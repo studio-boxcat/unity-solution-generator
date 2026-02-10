@@ -1,93 +1,37 @@
 import Foundation
 
-enum ProjectKind: String, Codable, Sendable {
-    case asmdef
-    case legacy
-}
-
-enum ProjectCategory: String, Codable, Sendable {
+enum ProjectCategory: String, Sendable {
     case runtime
     case editor
     case test
 }
 
-struct ProjectEntry: Codable, Sendable {
+struct ProjectInfo: Sendable {
     let name: String
     let csprojPath: String
     let templatePath: String
     let guid: String
-    let kind: ProjectKind
-    let category: ProjectCategory
-
-    init(name: String, csprojPath: String, templatePath: String, guid: String, kind: ProjectKind, category: ProjectCategory = .runtime) {
-        self.name = name
-        self.csprojPath = csprojPath
-        self.templatePath = templatePath
-        self.guid = guid
-        self.kind = kind
-        self.category = category
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case name, csprojPath, templatePath, guid, kind, category
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        name = try container.decode(String.self, forKey: .name)
-        csprojPath = try container.decode(String.self, forKey: .csprojPath)
-        templatePath = try container.decode(String.self, forKey: .templatePath)
-        guid = try container.decode(String.self, forKey: .guid)
-        kind = try container.decode(ProjectKind.self, forKey: .kind)
-        category = try container.decodeIfPresent(ProjectCategory.self, forKey: .category) ?? .runtime
-    }
-}
-
-struct GeneratorManifest: Codable, Sendable {
-    let solutionPath: String
-    let solutionTemplatePath: String
-    let projectTypeGuid: String
-    let projects: [ProjectEntry]
-
-    init(solutionPath: String, solutionTemplatePath: String, projectTypeGuid: String, projects: [ProjectEntry]) {
-        self.solutionPath = solutionPath
-        self.solutionTemplatePath = solutionTemplatePath
-        self.projectTypeGuid = projectTypeGuid
-        self.projects = projects
-    }
 }
 
 struct GenerateOptions: Sendable {
     let projectRoot: URL
-    let manifestPath: String
+    let templateRoot: String
     let verbose: Bool
 
-    init(projectRoot: URL, manifestPath: String, verbose: Bool = false) {
+    init(projectRoot: URL, templateRoot: String = "Library/UnitySolutionGenerator", verbose: Bool = false) {
         self.projectRoot = projectRoot
-        self.manifestPath = manifestPath
+        self.templateRoot = templateRoot
         self.verbose = verbose
     }
 }
 
-struct InitManifestOptions: Sendable {
+struct ExtractTemplatesOptions: Sendable {
     let projectRoot: URL
-    let manifestPath: String
     let templateRoot: String
 
-    init(projectRoot: URL, manifestPath: String, templateRoot: String) {
+    init(projectRoot: URL, templateRoot: String = "Library/UnitySolutionGenerator") {
         self.projectRoot = projectRoot
-        self.manifestPath = manifestPath
         self.templateRoot = templateRoot
-    }
-}
-
-struct RefreshTemplatesOptions: Sendable {
-    let projectRoot: URL
-    let manifestPath: String
-
-    init(projectRoot: URL, manifestPath: String) {
-        self.projectRoot = projectRoot
-        self.manifestPath = manifestPath
     }
 }
 
@@ -98,13 +42,11 @@ enum BuildPlatform: String, Sendable {
 
 struct PrepareBuildOptions: Sendable {
     let projectRoot: URL
-    let manifestPath: String
     let platform: BuildPlatform
     let debugBuild: Bool
 
-    init(projectRoot: URL, manifestPath: String, platform: BuildPlatform, debugBuild: Bool = false) {
+    init(projectRoot: URL, platform: BuildPlatform, debugBuild: Bool = false) {
         self.projectRoot = projectRoot
-        self.manifestPath = manifestPath
         self.platform = platform
         self.debugBuild = debugBuild
     }
@@ -129,39 +71,27 @@ struct GenerationStats: Sendable {
 }
 
 enum GeneratorError: Error, CustomStringConvertible {
-    case missingManifest(URL)
-    case invalidManifest(URL)
     case missingTemplate(URL)
-    case missingAsmDefForProject(String)
-    case failedToResolveProjectReference(project: String, reference: String)
     case invalidProjectVersion(URL)
-    case missingSolution(URL)
     case noSolutionFound(URL)
     case noProjectsInSolution(URL)
     case duplicateAsmDefName(String)
+    case noSlnTemplate(URL)
 
     var description: String {
         switch self {
-        case .missingManifest(let url):
-            return "Missing manifest: \(url.path)"
-        case .invalidManifest(let url):
-            return "Invalid manifest JSON: \(url.path)"
         case .missingTemplate(let url):
             return "Missing template file: \(url.path)"
-        case .missingAsmDefForProject(let project):
-            return "Project '\(project)' is asmdef-based but no matching .asmdef was found"
-        case .failedToResolveProjectReference(let project, let reference):
-            return "Project '\(project)' references unknown assembly '\(reference)'"
         case .invalidProjectVersion(let url):
             return "Could not parse Unity editor version from: \(url.path)"
-        case .missingSolution(let url):
-            return "Missing solution file: \(url.path)"
         case .noSolutionFound(let url):
             return "No .sln file found in: \(url.path)"
         case .noProjectsInSolution(let url):
             return "No C# projects found in solution: \(url.path)"
         case .duplicateAsmDefName(let name):
             return "Duplicate asmdef name: '\(name)'"
+        case .noSlnTemplate(let url):
+            return "No .sln.template file found in: \(url.path)"
         }
     }
 }
@@ -171,6 +101,8 @@ struct AsmDefRecord: Sendable {
     let directory: String
     let guid: String?
     let references: [String]
+    let category: ProjectCategory
+    let includePlatforms: [String]
 }
 
 struct AsmRefRecord: Sendable {
@@ -183,14 +115,11 @@ struct SourceAssignments: Sendable {
     let unresolvedFiles: [String]
 }
 
-struct CompilePattern: Sendable {
-    let include: String
-    let exclude: [String]
-}
-
 struct RawAsmDef: Decodable {
     let name: String
     let references: [String]?
+    let includePlatforms: [String]?
+    let defineConstraints: [String]?
 }
 
 struct RawAsmRef: Decodable {
@@ -201,13 +130,14 @@ struct ProjectFileScan: Sendable {
     let csFiles: [String]
     let asmDefPaths: [String]
     let asmRefPaths: [String]
-    let ignoredDirectories: [String]
 }
 
 private enum DirectoryResolution {
     case assembly(String)
     case none
 }
+
+private let csharpProjectTypeGuid = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}"
 
 final class SolutionGenerator {
     private let fileManager: FileManager
@@ -218,19 +148,12 @@ final class SolutionGenerator {
         self.decoder = JSONDecoder()
     }
 
+    // MARK: - Generate
+
     func generate(options: GenerateOptions) throws -> GenerateResult {
         let projectRoot = options.projectRoot.standardizedFileURL
-        let manifestURL = projectRoot.appendingPathComponent(options.manifestPath)
-
-        guard fileManager.fileExists(atPath: manifestURL.path) else {
-            throw GeneratorError.missingManifest(manifestURL)
-        }
-
-        let manifest = try loadManifest(manifestURL)
+        let templateRoot = options.templateRoot
         let unityVersion = try loadUnityVersion(projectRoot: projectRoot)
-
-        let knownProjects = Set(manifest.projects.map(\.name))
-        let projectByName = Dictionary(uniqueKeysWithValues: manifest.projects.map { ($0.name, $0) })
 
         // Single filesystem walk for .cs, .asmdef, and .asmref files.
         let scan = try scanProjectFiles(projectRoot: projectRoot, roots: ["Assets", "Packages"])
@@ -243,48 +166,48 @@ final class SolutionGenerator {
         let assemblyRoots = resolveAssemblyRoots(
             asmDefByName: asmDefByName,
             asmRefs: asmRefs,
-            projectNames: knownProjects,
             guidToAssembly: guidToAssembly
         )
 
         let assignments = assignSources(
             sourceFiles: scan.csFiles,
-            assemblyRoots: assemblyRoots,
-            knownProjects: knownProjects
+            assemblyRoots: assemblyRoots
         )
+
+        // Discover projects from templates directory.
+        let projects = try discoverProjects(
+            templateRoot: templateRoot,
+            projectRoot: projectRoot,
+            asmDefByName: asmDefByName
+        )
+        let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 
         var warnings: [String] = []
         if !assignments.unresolvedFiles.isEmpty {
             warnings.append("Unresolved source files: \(assignments.unresolvedFiles.count)")
         }
 
-        var compilePatternsByProject: [String: [CompilePattern]] = [:]
+        var patternsByProject: [String: [String]] = [:]
         var sourceCountByProject: [String: Int] = [:]
 
-        for project in manifest.projects {
+        for project in projects {
             let files = assignments.filesByProject[project.name] ?? []
             sourceCountByProject[project.name] = files.count
-            compilePatternsByProject[project.name] = makeCompilePatterns(
-                for: project,
-                files: files,
-                assemblyRoots: assemblyRoots,
-                ignoredDirectories: scan.ignoredDirectories
-            )
+            patternsByProject[project.name] = makeCompilePatterns(files: files)
         }
 
         var updatedFiles: [String] = []
 
-        for project in manifest.projects {
+        for project in projects {
             let templateURL = projectRoot.appendingPathComponent(project.templatePath)
             guard fileManager.fileExists(atPath: templateURL.path) else {
                 throw GeneratorError.missingTemplate(templateURL)
             }
 
             let template = try String(contentsOf: templateURL, encoding: .utf8)
-            let compilePatterns = compilePatternsByProject[project.name] ?? []
-            let sourceBlock = renderCompilePatterns(compilePatterns)
+            let sourceBlock = renderCompilePatterns(patternsByProject[project.name] ?? [])
 
-            let referenceBlock = try renderProjectReferences(
+            let referenceBlock = renderProjectReferences(
                 for: project,
                 asmDefByName: asmDefByName,
                 guidToAssembly: guidToAssembly,
@@ -307,14 +230,11 @@ final class SolutionGenerator {
             }
         }
 
-        let slnTemplateURL = projectRoot.appendingPathComponent(manifest.solutionTemplatePath)
-        guard fileManager.fileExists(atPath: slnTemplateURL.path) else {
-            throw GeneratorError.missingTemplate(slnTemplateURL)
-        }
-
+        // Find and render .sln template.
+        let slnTemplateURL = try findSlnTemplate(templateRoot: templateRoot, projectRoot: projectRoot)
         let slnTemplate = try String(contentsOf: slnTemplateURL, encoding: .utf8)
-        let slnProjectEntries = renderSolutionProjectEntries(manifest: manifest)
-        let slnProjectConfigs = renderSolutionProjectConfigs(manifest: manifest)
+        let slnProjectEntries = renderSolutionProjectEntries(projects: projects)
+        let slnProjectConfigs = renderSolutionProjectConfigs(projects: projects)
         let slnRendered = renderTemplate(
             slnTemplate,
             replacements: [
@@ -323,14 +243,16 @@ final class SolutionGenerator {
             ]
         )
 
-        let slnURL = projectRoot.appendingPathComponent(manifest.solutionPath)
+        // Derive .sln output path from template name: "Foo.sln.template" → "Foo.sln"
+        let slnName = String(slnTemplateURL.lastPathComponent.dropLast(".template".count))
+        let slnURL = projectRoot.appendingPathComponent(slnName)
         if try writeIfChanged(content: slnRendered, to: slnURL) {
-            updatedFiles.append(manifest.solutionPath)
+            updatedFiles.append(slnName)
         }
 
         let stats = GenerationStats(
             sourceCountByProject: sourceCountByProject,
-            directoryPatternCountByProject: compilePatternsByProject.mapValues(\.count),
+            directoryPatternCountByProject: patternsByProject.mapValues(\.count),
             unresolvedSourceCount: assignments.unresolvedFiles.count
         )
 
@@ -341,78 +263,28 @@ final class SolutionGenerator {
         return GenerateResult(updatedFiles: updatedFiles.sorted(), warnings: warnings, stats: stats)
     }
 
-    func initManifest(options: InitManifestOptions) throws -> URL {
+    // MARK: - Extract Templates
+
+    func extractTemplates(options: ExtractTemplatesOptions) throws -> [String] {
         let projectRoot = options.projectRoot.standardizedFileURL
         let templateRoot = options.templateRoot
-        let manifestURL = projectRoot.appendingPathComponent(options.manifestPath)
 
-        // Find the .sln file (first .sln at project root).
+        // Find .sln and parse projects.
         let slnURL = try findSolutionFile(projectRoot: projectRoot)
-        let slnName = slnURL.lastPathComponent
-
         let slnContent = try String(contentsOf: slnURL, encoding: .utf8)
         let slnEntries = parseSolutionProjects(slnContent)
         guard let firstEntry = slnEntries.first else {
             throw GeneratorError.noProjectsInSolution(slnURL)
         }
 
-        // Scan asmdefs to determine project kind.
-        let scan = try scanProjectFiles(projectRoot: projectRoot, roots: ["Assets", "Packages"])
-        let asmDefs = try loadAsmDefsFromPaths(scan.asmDefPaths, projectRoot: projectRoot)
-        let asmDefByName = try buildUniqueMap(asmDefs, key: \.name)
-
-        let slnBaseName = String(slnName.dropLast(".sln".count))
-
-        let projects = slnEntries.map { entry -> ProjectEntry in
-            let kind: ProjectKind = asmDefByName[entry.name] != nil ? .asmdef : .legacy
-            return ProjectEntry(
-                name: entry.name,
-                csprojPath: entry.csprojPath,
-                templatePath: "\(templateRoot)/csproj/\(entry.csprojPath).template",
-                guid: entry.projectGuid,
-                kind: kind,
-                category: inferCategory(name: entry.name)
-            )
-        }
-
-        let manifest = GeneratorManifest(
-            solutionPath: slnName,
-            solutionTemplatePath: "\(templateRoot)/\(slnBaseName).sln.template",
-            projectTypeGuid: firstEntry.typeGuid,
-            projects: projects
-        )
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        let data = try encoder.encode(manifest)
-        let json = String(decoding: data, as: UTF8.self) + "\n"
-
-        try fileManager.createDirectory(
-            at: manifestURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try writeIfChanged(content: json, to: manifestURL)
-
-        return manifestURL
-    }
-
-    func refreshTemplates(options: RefreshTemplatesOptions) throws -> [String] {
-        let projectRoot = options.projectRoot.standardizedFileURL
-        let manifestURL = projectRoot.appendingPathComponent(options.manifestPath)
-
-        guard fileManager.fileExists(atPath: manifestURL.path) else {
-            throw GeneratorError.missingManifest(manifestURL)
-        }
-
-        let manifest = try loadManifest(manifestURL)
         let unityVersion = try loadUnityVersion(projectRoot: projectRoot)
         let projectRootPath = projectRoot.path
 
         var updatedFiles: [String] = []
 
         // Refresh csproj templates.
-        for project in manifest.projects {
-            let csprojURL = projectRoot.appendingPathComponent(project.csprojPath)
+        for entry in slnEntries {
+            let csprojURL = projectRoot.appendingPathComponent(entry.csprojPath)
             guard fileManager.fileExists(atPath: csprojURL.path) else {
                 continue
             }
@@ -420,56 +292,88 @@ final class SolutionGenerator {
             let content = try String(contentsOf: csprojURL, encoding: .utf8)
             let template = templatizeCsproj(content, projectRoot: projectRootPath, unityVersion: unityVersion)
 
-            let templateURL = projectRoot.appendingPathComponent(project.templatePath)
+            let templatePath = "\(templateRoot)/csproj/\(entry.csprojPath).template"
+            let templateURL = projectRoot.appendingPathComponent(templatePath)
             try fileManager.createDirectory(at: templateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             if try writeIfChanged(content: template, to: templateURL) {
-                updatedFiles.append(project.templatePath)
+                updatedFiles.append(templatePath)
             }
         }
 
         // Refresh sln template.
-        let slnURL = projectRoot.appendingPathComponent(manifest.solutionPath)
-        guard fileManager.fileExists(atPath: slnURL.path) else {
-            throw GeneratorError.missingSolution(slnURL)
-        }
-
-        let slnContent = try String(contentsOf: slnURL, encoding: .utf8)
-        let slnTemplate = templatizeSln(slnContent, projectTypeGuid: manifest.projectTypeGuid)
-
-        let slnTemplateURL = projectRoot.appendingPathComponent(manifest.solutionTemplatePath)
+        let slnTemplate = templatizeSln(slnContent, projectTypeGuid: firstEntry.typeGuid)
+        let slnName = slnURL.lastPathComponent
+        let slnBaseName = String(slnName.dropLast(".sln".count))
+        let slnTemplatePath = "\(templateRoot)/\(slnBaseName).sln.template"
+        let slnTemplateURL = projectRoot.appendingPathComponent(slnTemplatePath)
         try fileManager.createDirectory(at: slnTemplateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if try writeIfChanged(content: slnTemplate, to: slnTemplateURL) {
-            updatedFiles.append(manifest.solutionTemplatePath)
+            updatedFiles.append(slnTemplatePath)
         }
 
         return updatedFiles.sorted()
     }
 
+    // MARK: - Prepare Build
+
     func prepareBuild(options: PrepareBuildOptions) throws -> PrepareBuildResult {
         let projectRoot = options.projectRoot.standardizedFileURL
-        let manifestURL = projectRoot.appendingPathComponent(options.manifestPath)
-
-        guard fileManager.fileExists(atPath: manifestURL.path) else {
-            throw GeneratorError.missingManifest(manifestURL)
-        }
-
-        let manifest = try loadManifest(manifestURL)
         let buildType = options.debugBuild ? "dev" : "prod"
         let suffix = ".v.\(options.platform.rawValue)-\(buildType)"
 
-        let runtimeProjects = manifest.projects.filter { $0.category == .runtime }
-        let nonRuntimeNames = Set(
-            manifest.projects.filter { $0.category != .runtime }.map(\.name)
-        )
+        // Discover categories from asmdef scan.
+        let scan = try scanProjectFiles(projectRoot: projectRoot, roots: ["Assets", "Packages"])
+        let asmDefs = try loadAsmDefsFromPaths(scan.asmDefPaths, projectRoot: projectRoot)
+        let asmDefByName = try buildUniqueMap(asmDefs, key: \.name)
+
+        // Scan .csproj files at project root.
+        let csprojFiles = try fileManager.contentsOfDirectory(
+            at: projectRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension == "csproj" }
+
+        // Categorize each project.
+        struct CsprojEntry {
+            let name: String
+            let csprojPath: String
+            let category: ProjectCategory
+            let matchesPlatform: Bool
+        }
+
+        let targetPlatformName = options.platform == .ios ? "iOS" : "Android"
+
+        var entries: [CsprojEntry] = []
+        for url in csprojFiles {
+            let filename = url.lastPathComponent
+            let name = String(filename.dropLast(".csproj".count))
+
+            // Skip platform variant files (already generated).
+            if name.contains(".v.") { continue }
+
+            let category: ProjectCategory
+            let matchesPlatform: Bool
+            if let asmDef = asmDefByName[name] {
+                category = asmDef.category
+                // Empty includePlatforms = all platforms. Otherwise must contain the target.
+                let platforms = asmDef.includePlatforms.filter { $0 != "Editor" }
+                matchesPlatform = platforms.isEmpty || platforms.contains(targetPlatformName)
+            } else {
+                category = .runtime
+                matchesPlatform = true
+            }
+            entries.append(CsprojEntry(name: name, csprojPath: filename, category: category, matchesPlatform: matchesPlatform))
+        }
+
+        let runtimeEntries = entries.filter { $0.category == .runtime && $0.matchesPlatform }
+        let nonRuntimeNames = Set(entries.filter { $0.category != .runtime || !$0.matchesPlatform }.map(\.name))
 
         var generated: [String] = []
         var skipped: [String] = []
 
-        for project in runtimeProjects {
-            let srcURL = projectRoot.appendingPathComponent(project.csprojPath)
-            guard fileManager.fileExists(atPath: srcURL.path) else { continue }
-
-            let baseName = String(project.csprojPath.dropLast(".csproj".count))
+        for entry in runtimeEntries {
+            let srcURL = projectRoot.appendingPathComponent(entry.csprojPath)
+            let baseName = String(entry.csprojPath.dropLast(".csproj".count))
             let dstName = "\(baseName)\(suffix).csproj"
             let dstURL = projectRoot.appendingPathComponent(dstName)
 
@@ -497,6 +401,56 @@ final class SolutionGenerator {
             skippedCsprojs: skipped.sorted(),
             suffix: suffix
         )
+    }
+
+    // MARK: - Project discovery
+
+    private func discoverProjects(
+        templateRoot: String,
+        projectRoot: URL,
+        asmDefByName: [String: AsmDefRecord]
+    ) throws -> [ProjectInfo] {
+        let templateDir = projectRoot
+            .appendingPathComponent(templateRoot)
+            .appendingPathComponent("csproj")
+
+        guard fileManager.fileExists(atPath: templateDir.path) else {
+            return []
+        }
+
+        let templateFiles = try fileManager.contentsOfDirectory(
+            at: templateDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension == "template" && $0.lastPathComponent.contains(".csproj.") }
+
+        return templateFiles.map { url in
+            let filename = url.lastPathComponent
+            // "Foo.csproj.template" → "Foo"
+            let name = String(filename.dropLast(".csproj.template".count))
+            return ProjectInfo(
+                name: name,
+                csprojPath: "\(name).csproj",
+                templatePath: "\(templateRoot)/csproj/\(filename)",
+                guid: deterministicGuid(for: name)
+            )
+        }.sorted { $0.name < $1.name }
+    }
+
+    private func findSlnTemplate(templateRoot: String, projectRoot: URL) throws -> URL {
+        let dir = projectRoot.appendingPathComponent(templateRoot)
+        guard fileManager.fileExists(atPath: dir.path) else {
+            throw GeneratorError.noSlnTemplate(dir)
+        }
+        let contents = try fileManager.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        guard let template = contents.first(where: { $0.lastPathComponent.hasSuffix(".sln.template") }) else {
+            throw GeneratorError.noSlnTemplate(dir)
+        }
+        return template
     }
 
     // MARK: - Build validation helpers
@@ -563,12 +517,21 @@ final class SolutionGenerator {
         )
     }
 
-    private func inferCategory(name: String) -> ProjectCategory {
-        let lower = name.lowercased()
-        if lower.contains("editor") { return .editor }
-        if lower.contains(".tests.") || lower.contains("testrunner") { return .test }
+    // MARK: - Category inference
+
+    private func inferCategory(from rawAsmDef: RawAsmDef) -> ProjectCategory {
+        let constraints = rawAsmDef.defineConstraints ?? []
+        if constraints.contains("UNITY_INCLUDE_TESTS") { return .test }
+
+        let platforms = rawAsmDef.includePlatforms ?? []
+        if platforms.count == 1 && platforms[0] == "Editor" { return .editor }
+
+        if constraints.contains("UNITY_EDITOR") { return .editor }
+
         return .runtime
     }
+
+    // MARK: - Template extraction
 
     private func templatizeCsproj(_ content: String, projectRoot: String, unityVersion: String) -> String {
         var lines: [String] = []
@@ -679,6 +642,8 @@ final class SolutionGenerator {
         return lines.joined(separator: "\n")
     }
 
+    // MARK: - Solution parsing
+
     private func findSolutionFile(projectRoot: URL) throws -> URL {
         let contents = try fileManager.contentsOfDirectory(
             at: projectRoot,
@@ -742,14 +707,7 @@ final class SolutionGenerator {
         return results
     }
 
-    private func loadManifest(_ url: URL) throws -> GeneratorManifest {
-        do {
-            let data = try Data(contentsOf: url)
-            return try decoder.decode(GeneratorManifest.self, from: data)
-        } catch {
-            throw GeneratorError.invalidManifest(url)
-        }
-    }
+    // MARK: - File loading
 
     private func loadUnityVersion(projectRoot: URL) throws -> String {
         let versionURL = projectRoot
@@ -784,15 +742,16 @@ final class SolutionGenerator {
         return guid
     }
 
+    // MARK: - Assembly roots
+
     private func resolveAssemblyRoots(
         asmDefByName: [String: AsmDefRecord],
         asmRefs: [AsmRefRecord],
-        projectNames: Set<String>,
         guidToAssembly: [String: String]
     ) -> [String: String] {
         var assemblyRoots: [String: String] = [:]
 
-        for (name, record) in asmDefByName where projectNames.contains(name) {
+        for (name, record) in asmDefByName {
             assemblyRoots[record.directory] = name
         }
 
@@ -802,10 +761,6 @@ final class SolutionGenerator {
                 asmDefByName: asmDefByName,
                 guidToAssembly: guidToAssembly
             ) else {
-                continue
-            }
-
-            guard projectNames.contains(assemblyName) else {
                 continue
             }
 
@@ -839,14 +794,13 @@ final class SolutionGenerator {
         return nil
     }
 
+    // MARK: - Source assignment
+
     private func assignSources(
         sourceFiles: [String],
-        assemblyRoots: [String: String],
-        knownProjects: Set<String>
+        assemblyRoots: [String: String]
     ) -> SourceAssignments {
-        var filesByProject: [String: [String]] = Dictionary(
-            uniqueKeysWithValues: knownProjects.map { ($0, []) }
-        )
+        var filesByProject: [String: [String]] = [:]
         var unresolvedFiles: [String] = []
 
         var directoryCache: [String: DirectoryResolution] = [:]
@@ -862,7 +816,7 @@ final class SolutionGenerator {
                 continue
             }
 
-            if let fallbackProject = resolveLegacyProject(for: file), knownProjects.contains(fallbackProject) {
+            if let fallbackProject = resolveLegacyProject(for: file) {
                 filesByProject[fallbackProject, default: []].append(file)
                 continue
             }
@@ -948,175 +902,70 @@ final class SolutionGenerator {
         return isFirstPass ? "Assembly-CSharp-firstpass" : "Assembly-CSharp"
     }
 
-    private func makeCompilePatterns(
-        for project: ProjectEntry,
-        files: [String],
-        assemblyRoots: [String: String],
-        ignoredDirectories: [String]
-    ) -> [CompilePattern] {
-        switch project.kind {
-        case .legacy:
-            return makeLegacyCompilePatterns(files: files)
-        case .asmdef:
-            let ownRoots = assemblyRoots
-                .compactMap { $0.value == project.name ? $0.key : nil }
-                .sorted()
+    // MARK: - Compile patterns
 
-            guard !ownRoots.isEmpty else {
-                // Fall back to directory-based legacy-style includes if no assemblyRoots exist.
-                return makeLegacyCompilePatterns(files: files)
-            }
-
-            let topOwnRoots = topLevelRoots(from: ownRoots)
-            let foreignRoots = assemblyRoots
-                .compactMap { $0.value == project.name ? nil : $0.key }
-                .sorted()
-
-            let patterns = topOwnRoots.map { root -> CompilePattern in
-                let includePattern = recursiveCsPattern(forDirectory: root)
-
-                var excludes = foreignRoots
-                    .filter { isDescendantOrSame($0, of: root) }
-                    .map(recursiveCsPattern(forDirectory:))
-
-                // Exclude directories ending with ~ or starting with .
-                for dir in ignoredDirectories where isDescendantOrSame(dir, of: root) {
-                    excludes.append(recursiveCsPattern(forDirectory: dir))
-                }
-
-                return CompilePattern(
-                    include: includePattern,
-                    exclude: deduplicatePreservingOrder(excludes)
-                )
-            }
-
-            return patterns.sorted { $0.include < $1.include }
+    private func makeCompilePatterns(files: [String]) -> [String] {
+        Set(files.map(parentDirectory(of:))).sorted().map { directory in
+            directory.isEmpty ? "*.cs" : "\(directory)/*.cs"
         }
     }
 
-    private func makeLegacyCompilePatterns(files: [String]) -> [CompilePattern] {
-        let directories = Set(files.map(parentDirectory(of:)))
-        let patterns = directories.map { directory -> CompilePattern in
-            if directory.isEmpty {
-                return CompilePattern(include: "*.cs", exclude: [])
-            }
-            return CompilePattern(include: "\(directory)/*.cs", exclude: [])
-        }
-        return patterns.sorted { $0.include < $1.include }
-    }
+    // MARK: - Rendering
 
-    private func topLevelRoots(from assemblyRoots: [String]) -> [String] {
-        let sortedByDepth = assemblyRoots.sorted {
-            let lhsDepth = pathDepth($0)
-            let rhsDepth = pathDepth($1)
-            if lhsDepth != rhsDepth {
-                return lhsDepth < rhsDepth
-            }
-            return $0 < $1
-        }
-
-        var roots: [String] = []
-        roots.reserveCapacity(sortedByDepth.count)
-
-        for root in sortedByDepth {
-            if roots.contains(where: { isDescendantOrSame(root, of: $0) }) {
-                continue
-            }
-            roots.append(root)
-        }
-
-        return roots.sorted()
-    }
-
-    private func recursiveCsPattern(forDirectory directory: String) -> String {
-        if directory.isEmpty {
-            return "**/*.cs"
-        }
-        return "\(directory)/**/*.cs"
-    }
-
-    private func renderCompilePatterns(_ patterns: [CompilePattern]) -> String {
+    private func renderCompilePatterns(_ patterns: [String]) -> String {
         patterns
-            .map { pattern in
-                let include = xmlEscape(pattern.include)
-                if pattern.exclude.isEmpty {
-                    return "    <Compile Include=\"\(include)\" />"
-                }
-
-                let exclude = xmlEscape(pattern.exclude.joined(separator: ";"))
-                return "    <Compile Include=\"\(include)\" Exclude=\"\(exclude)\" />"
-            }
+            .map { "    <Compile Include=\"\(xmlEscape($0))\" />" }
             .joined(separator: "\n")
     }
 
     private func renderProjectReferences(
-        for project: ProjectEntry,
+        for project: ProjectInfo,
         asmDefByName: [String: AsmDefRecord],
         guidToAssembly: [String: String],
-        projectByName: [String: ProjectEntry]
-    ) throws -> String {
-        let orderedReferences: [String]
-
-        switch project.kind {
-        case .legacy:
-            orderedReferences = []
-        case .asmdef:
-            guard let asmDef = asmDefByName[project.name] else {
-                throw GeneratorError.missingAsmDefForProject(project.name)
-            }
-
-            var refs: [String] = []
-            refs.reserveCapacity(asmDef.references.count)
-            for rawReference in asmDef.references {
-                guard let resolved = resolveAssemblyReference(
-                    rawReference,
-                    asmDefByName: asmDefByName,
-                    guidToAssembly: guidToAssembly
-                ) else {
-                    continue
-                }
-                if projectByName[resolved] == nil {
-                    continue
-                }
-                refs.append(resolved)
-            }
-            orderedReferences = deduplicatePreservingOrder(refs)
+        projectByName: [String: ProjectInfo]
+    ) -> String {
+        guard let asmDef = asmDefByName[project.name] else {
+            return ""
         }
 
+        var seen: Set<String> = []
         var blocks: [String] = []
-        blocks.reserveCapacity(orderedReferences.count)
 
-        for referenceName in orderedReferences {
-            guard let referenceProject = projectByName[referenceName] else {
-                throw GeneratorError.failedToResolveProjectReference(project: project.name, reference: referenceName)
+        for rawReference in asmDef.references {
+            guard let resolved = resolveAssemblyReference(
+                rawReference,
+                asmDefByName: asmDefByName,
+                guidToAssembly: guidToAssembly
+            ),
+            let ref = projectByName[resolved],
+            seen.insert(resolved).inserted else {
+                continue
             }
 
-            let block = [
-                "    <ProjectReference Include=\"\(xmlEscape(referenceProject.csprojPath))\">",
-                "      <Project>\(referenceProject.guid)</Project>",
-                "      <Name>\(xmlEscape(referenceProject.name))</Name>",
+            blocks.append([
+                "    <ProjectReference Include=\"\(xmlEscape(ref.csprojPath))\">",
+                "      <Project>\(ref.guid)</Project>",
+                "      <Name>\(xmlEscape(ref.name))</Name>",
                 "    </ProjectReference>",
-            ].joined(separator: "\n")
-
-            blocks.append(block)
+            ].joined(separator: "\n"))
         }
 
         return blocks.joined(separator: "\n")
     }
 
-    private func renderSolutionProjectEntries(manifest: GeneratorManifest) -> String {
-        manifest.projects
+    private func renderSolutionProjectEntries(projects: [ProjectInfo]) -> String {
+        projects
             .map { project in
                 [
-                    "Project(\"\(manifest.projectTypeGuid)\") = \"\(project.name)\", \"\(project.csprojPath)\", \"\(project.guid)\"",
+                    "Project(\"\(csharpProjectTypeGuid)\") = \"\(project.name)\", \"\(project.csprojPath)\", \"\(project.guid)\"",
                     "EndProject",
                 ].joined(separator: "\n")
             }
             .joined(separator: "\n")
     }
 
-    private func renderSolutionProjectConfigs(manifest: GeneratorManifest) -> String {
-        manifest.projects
+    private func renderSolutionProjectConfigs(projects: [ProjectInfo]) -> String {
+        projects
             .map { project in
                 [
                     "\t\t\(project.guid).Debug|Any CPU.ActiveCfg = Debug|Any CPU",
@@ -1142,11 +991,12 @@ final class SolutionGenerator {
         return true
     }
 
+    // MARK: - Filesystem scanning
+
     private func scanProjectFiles(projectRoot: URL, roots: [String]) throws -> ProjectFileScan {
         var csFiles: [String] = []
         var asmDefPaths: [String] = []
         var asmRefPaths: [String] = []
-        var ignoredDirectories: [String] = []
 
         // Use realpath to match the enumerator's resolved paths
         // (macOS: /var → /private/var firmlink).
@@ -1170,7 +1020,6 @@ final class SolutionGenerator {
                 // Skip directories ending with ~ (Unity ignored folders).
                 // Note: .skipsHiddenFiles handles dot-prefixed dirs/files.
                 if path.hasSuffix("~") {
-                    ignoredDirectories.append(String(path.dropFirst(prefixLen)))
                     enumerator.skipDescendants()
                     continue
                 }
@@ -1188,8 +1037,7 @@ final class SolutionGenerator {
         csFiles.sort()
         asmDefPaths.sort()
         asmRefPaths.sort()
-        ignoredDirectories.sort()
-        return ProjectFileScan(csFiles: csFiles, asmDefPaths: asmDefPaths, asmRefPaths: asmRefPaths, ignoredDirectories: ignoredDirectories)
+        return ProjectFileScan(csFiles: csFiles, asmDefPaths: asmDefPaths, asmRefPaths: asmRefPaths)
     }
 
     private func loadAsmDefsFromPaths(_ paths: [String], projectRoot: URL) throws -> [AsmDefRecord] {
@@ -1202,7 +1050,9 @@ final class SolutionGenerator {
                 name: raw.name,
                 directory: parentDirectory(of: path),
                 guid: metaGuid,
-                references: raw.references ?? []
+                references: raw.references ?? [],
+                category: inferCategory(from: raw),
+                includePlatforms: raw.includePlatforms ?? []
             )
         }
     }

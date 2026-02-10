@@ -6,28 +6,28 @@ struct CLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "unity-solution-generator",
         abstract: "Regenerate .csproj and .sln files from asmdef/asmref layout.",
-        subcommands: [Generate.self, InitManifest.self, RefreshTemplates.self, PrepareBuild.self],
+        subcommands: [Generate.self, ExtractTemplates.self, PrepareBuild.self],
         defaultSubcommand: Generate.self
     )
 }
 
 struct Generate: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Generate csproj/sln from current layout and manifest."
+        abstract: "Generate csproj/sln from current layout and templates."
     )
 
     @Option(name: .long, help: "Project root path.")
     var projectRoot: String?
 
-    @Option(name: .long, help: "Manifest file path relative to project root.")
-    var manifest: String = "Library/UnitySolutionGenerator/projects.json"
+    @Option(name: .long, help: "Template root directory relative to project root.")
+    var templateRoot: String = "Library/UnitySolutionGenerator"
 
     @Flag(name: .shortAndLong, help: "Print unresolved source file samples.")
     var verbose = false
 
     func run() throws {
         let root = resolveProjectRoot(projectRoot)
-        let options = GenerateOptions(projectRoot: root, manifestPath: manifest, verbose: verbose)
+        let options = GenerateOptions(projectRoot: root, templateRoot: templateRoot, verbose: verbose)
         let generator = SolutionGenerator()
         let result = try generator.generate(options: options)
 
@@ -56,50 +56,26 @@ struct Generate: ParsableCommand {
     }
 }
 
-struct InitManifest: ParsableCommand {
+struct ExtractTemplates: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "init-manifest",
-        abstract: "Generate projects.json from .sln and asmdef scan."
+        commandName: "extract-templates",
+        abstract: "Extract templates from Unity-generated csproj/sln."
     )
 
     @Option(name: .long, help: "Project root path.")
     var projectRoot: String?
-
-    @Option(name: .long, help: "Output manifest path relative to project root.")
-    var manifest: String = "Library/UnitySolutionGenerator/projects.json"
 
     @Option(name: .long, help: "Template root directory relative to project root.")
     var templateRoot: String = "Library/UnitySolutionGenerator"
 
     func run() throws {
         let root = resolveProjectRoot(projectRoot)
-        let options = InitManifestOptions(projectRoot: root, manifestPath: manifest, templateRoot: templateRoot)
+        let options = ExtractTemplatesOptions(projectRoot: root, templateRoot: templateRoot)
         let generator = SolutionGenerator()
-        let manifestURL = try generator.initManifest(options: options)
-        print("Generated: \(manifestURL.path)")
-    }
-}
-
-struct RefreshTemplates: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "refresh-templates",
-        abstract: "Extract templates from current Unity-generated csproj/sln."
-    )
-
-    @Option(name: .long, help: "Project root path.")
-    var projectRoot: String?
-
-    @Option(name: .long, help: "Manifest file path relative to project root.")
-    var manifest: String = "Library/UnitySolutionGenerator/projects.json"
-
-    func run() throws {
-        let root = resolveProjectRoot(projectRoot)
-        let options = RefreshTemplatesOptions(projectRoot: root, manifestPath: manifest)
-        let generator = SolutionGenerator()
-        let updated = try generator.refreshTemplates(options: options)
+        let updated = try generator.extractTemplates(options: options)
 
         if !updated.isEmpty {
-            print("Refreshed \(updated.count) template(s):")
+            print("Extracted \(updated.count) template(s):")
             for file in updated {
                 print("  - \(file)")
             }
@@ -117,9 +93,6 @@ struct PrepareBuild: ParsableCommand {
 
     @Option(name: .long, help: "Project root path.")
     var projectRoot: String?
-
-    @Option(name: .long, help: "Manifest file path relative to project root.")
-    var manifest: String
 
     @Flag(name: .long, help: "Target iOS platform.")
     var ios = false
@@ -144,7 +117,6 @@ struct PrepareBuild: ParsableCommand {
         let platform: BuildPlatform = ios ? .ios : .android
         let options = PrepareBuildOptions(
             projectRoot: root,
-            manifestPath: manifest,
             platform: platform,
             debugBuild: debug
         )
