@@ -32,13 +32,13 @@ unity-solution-generator prepare-build --ios --project-root /path/to/unity-proje
 unity-solution-generator prepare-build --android --debug --project-root /path/to/unity-project
 ```
 
-All commands accept `--template-root <path>` (default: `Library/UnitySolutionGenerator`) to override the template directory relative to the project root.
+`generate` and `extract-templates` accept `--template-root <path>` (default: `Library/UnitySolutionGenerator`) to override the template directory.
 
 ## Build validation
 
 `prepare-build` generates platform-variant `.csproj` copies that simulate device builds. It:
 
-- Includes only projects whose `includePlatforms` matches the target (or has no platform restriction)
+- Includes only runtime projects whose `includePlatforms` matches the target (or has no platform restriction)
 - Strips `UNITY_EDITOR` defines (no editor API on device)
 - Strips `DEBUG`/`TRACE` defines unless `--debug` is passed
 - Swaps platform defines (`UNITY_ANDROID` <-> `UNITY_IOS`)
@@ -52,13 +52,26 @@ unity-solution-generator prepare-build --ios --project-root . \
   | parallel dotnet build {} --no-restore -v q
 ```
 
-Which projects are runtime is determined automatically from `.asmdef` fields — see category inference below.
+### Validation matrix
+
+Full validation covers the editor build plus all platform/build-type combinations:
+
+```bash
+# Editor build (full solution, all projects)
+dotnet build project.sln --no-restore -v q
+
+# Platform builds (runtime projects only, no UNITY_EDITOR)
+unity-solution-generator prepare-build --ios --project-root .           # iOS prod
+unity-solution-generator prepare-build --ios --debug --project-root .   # iOS dev
+unity-solution-generator prepare-build --android --project-root .       # Android prod
+unity-solution-generator prepare-build --android --debug --project-root . # Android dev
+```
 
 ## How it works
 
-1. **Templates** are Unity-generated `.csproj`/`.sln` files with placeholders (`{{SOURCE_FOLDERS}}`, `{{PROJECT_REFERENCES}}`, etc.) replacing the dynamic parts.
+1. **Templates** are Unity-generated `.csproj`/`.sln` files with placeholders (`{{SOURCE_FOLDERS}}`, `{{PROJECT_REFERENCES}}`, `{{PROJECT_ROOT}}`) replacing the dynamic parts. Everything else (DLL references, analyzers, build settings) is preserved as-is from Unity's output.
 2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, builds per-directory compile patterns, and renders the templates.
-3. **Project categories** (runtime/editor/test) are inferred from `.asmdef` fields — no manifest needed.
+3. **Project categories** (runtime/editor/test) are inferred from `.asmdef` fields.
 
 ### Category inference
 
@@ -75,7 +88,7 @@ Platform-specific assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`) are tr
 
 ### Source ownership resolution
 
-For each `.cs` file, the generator walks the directory tree upward looking for the nearest `asmdef` or `asmref` assembly root. Files under an assembly root belong to that assembly. Files with no assembly root fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.).
+Source files are assigned per-directory: for each directory containing `.cs` files, the generator walks upward looking for the nearest `asmdef` or `asmref` assembly root. All `.cs` files in that directory belong to that assembly. Directories with no assembly root fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.).
 
 ### Compile patterns
 

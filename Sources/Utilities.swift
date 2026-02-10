@@ -1,18 +1,19 @@
 import Foundation
 
+// MARK: - Path manipulation
+
 func parentDirectory(of path: String) -> String {
     guard let slash = path.lastIndex(of: "/") else { return "" }
     return String(path[..<slash])
 }
 
-func deduplicatePreservingOrder(_ values: [String]) -> [String] {
-    var seen: Set<String> = []
-    var result: [String] = []
-    for value in values where seen.insert(value).inserted {
-        result.append(value)
-    }
-    return result
+func resolveRealPath(_ path: String) -> String {
+    guard let resolved = realpath(path, nil) else { return path }
+    defer { free(resolved) }
+    return String(cString: resolved)
 }
+
+// MARK: - String manipulation
 
 func xmlEscape(_ value: String) -> String {
     value
@@ -23,10 +24,10 @@ func xmlEscape(_ value: String) -> String {
         .replacingOccurrences(of: "'", with: "&apos;")
 }
 
-func resolveRealPath(_ path: String) -> String {
-    guard let resolved = realpath(path, nil) else { return path }
-    defer { free(resolved) }
-    return String(cString: resolved)
+func renderTemplate(_ template: String, replacements: [String: String]) -> String {
+    replacements.reduce(template) { partial, item in
+        partial.replacingOccurrences(of: item.key, with: item.value)
+    }
 }
 
 func deterministicGuid(for name: String) -> String {
@@ -45,4 +46,19 @@ func deterministicGuid(for name: String) -> String {
         UInt16(truncatingIfNeeded: h2 >> 32),
         UInt32(truncatingIfNeeded: h2)
     )
+}
+
+// MARK: - File I/O
+
+@discardableResult
+func writeIfChanged(content: String, to url: URL) throws -> Bool {
+    if let current = try? String(contentsOf: url, encoding: .utf8), current == content {
+        return false
+    }
+    try content.write(to: url, atomically: true, encoding: .utf8)
+    return true
+}
+
+func modificationDate(of url: URL) -> Date? {
+    try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
 }

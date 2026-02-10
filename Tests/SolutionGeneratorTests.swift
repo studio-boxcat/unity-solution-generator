@@ -83,7 +83,7 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertTrue(tests.contains("<ProjectReference Include=\"Main.csproj\">"))
     }
 
-    func testAsmRefGuidResolutionAndTildeSkip() throws {
+    func testAsmRefNameResolutionAndTildeSkip() throws {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -91,8 +91,7 @@ final class SolutionGeneratorTests: XCTestCase {
         try writeTemplates(root: root, projectNames: ["Core"])
 
         try writeFile(root, "Assets/SystemAssets/Assemblies/Core/Core.asmdef", "{\"name\":\"Core\"}\n")
-        try writeFile(root, "Assets/SystemAssets/Assemblies/Core/Core.asmdef.meta", "fileFormatVersion: 2\nguid: abcdefabcdefabcdefabcdefabcdefab\n")
-        try writeFile(root, "Assets/Game/Assembly.asmref", "{\"reference\":\"GUID:abcdefabcdefabcdefabcdefabcdefab\"}\n")
+        try writeFile(root, "Assets/Game/Assembly.asmref", "{\"reference\":\"Core\"}\n")
 
         try writeFile(root, "Assets/Game/Good.cs", "class Good {}\n")
         try writeFile(root, "Packages/com.example/src~/Hidden.cs", "class Hidden {}\n")
@@ -208,7 +207,6 @@ final class SolutionGeneratorTests: XCTestCase {
     }
 
     private func writeBaseProjectFiles(root: URL) throws {
-        try writeFile(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n")
         try writeFile(root, "tpl/test.sln.template", """
         Microsoft Visual Studio Solution File, Format Version 11.00
         {{PROJECT_ENTRIES}}
@@ -408,7 +406,6 @@ final class SolutionGeneratorTests: XCTestCase {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        try writeFile(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n")
 
         // Write asmdef files with category-determining fields
         try writeFile(root, "Assets/Assemblies/Runtime/Runtime.asmdef", "{\"name\":\"Runtime\"}\n")
@@ -455,7 +452,6 @@ final class SolutionGeneratorTests: XCTestCase {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        try writeFile(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n")
 
         // Runtime asmdef (no includePlatforms/defineConstraints = runtime)
         try writeFile(root, "Assets/Assemblies/Lib/Lib.asmdef", "{\"name\":\"Lib\"}\n")
@@ -484,7 +480,6 @@ final class SolutionGeneratorTests: XCTestCase {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        try writeFile(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n")
 
         // Runtime: no special fields
         try writeFile(root, "Assets/A/Runtime.asmdef", "{\"name\":\"Runtime\"}\n")
