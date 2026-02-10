@@ -41,13 +41,12 @@ struct Generate: ParsableCommand {
         }
 
         print("Source mapping summary:")
-        for (project, count) in result.stats.sourceCountByProject.sorted(by: { $0.key < $1.key }) {
-            let patternCount = result.stats.directoryPatternCountByProject[project] ?? 0
-            print("  - \(project): \(count) files, \(patternCount) patterns")
+        for (project, count) in result.stats.patternCountByProject.sorted(by: { $0.key < $1.key }) {
+            print("  - \(project): \(count) patterns")
         }
 
-        if result.stats.unresolvedSourceCount > 0 {
-            print("Unresolved files: \(result.stats.unresolvedSourceCount)")
+        if result.stats.unresolvedDirCount > 0 {
+            print("Unresolved directories: \(result.stats.unresolvedDirCount)")
         }
 
         for warning in result.warnings {

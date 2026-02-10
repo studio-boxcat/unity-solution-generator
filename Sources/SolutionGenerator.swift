@@ -64,9 +64,8 @@ struct GenerateResult: Sendable {
 }
 
 struct GenerationStats: Sendable {
-    let sourceCountByProject: [String: Int]
-    let directoryPatternCountByProject: [String: Int]
-    let unresolvedSourceCount: Int
+    let patternCountByProject: [String: Int]
+    let unresolvedDirCount: Int
 }
 
 enum GeneratorError: Error, CustomStringConvertible {
@@ -117,12 +116,75 @@ struct RawAsmRef: Decodable {
 }
 
 struct ProjectFileScan: Sendable {
-    let csFiles: [String]
+    let csDirs: [String]
     let asmDefPaths: [String]
     let asmRefPaths: [String]
 }
 
 private let csharpProjectTypeGuid = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}"
+
+// MARK: - Parallel filesystem scan (POSIX readdir)
+
+private struct SendablePtr<T>: @unchecked Sendable {
+    let ptr: UnsafeMutablePointer<T>
+    subscript(index: Int) -> T {
+        get { ptr[index] }
+        nonmutating set { ptr[index] = newValue }
+    }
+}
+
+private struct ScanBucket {
+    var csDirs: [String] = []
+    var asmDef: [String] = []
+    var asmRef: [String] = []
+}
+
+private func posixScanDir(_ dirPath: String, prefixLen: Int, bucket: inout ScanBucket) {
+    guard let dir = opendir(dirPath) else { return }
+    defer { closedir(dir) }
+
+    var hasCS = false
+
+    while let entry = readdir(dir) {
+        let dType = entry.pointee.d_type
+        var d_name = entry.pointee.d_name
+        let name = withUnsafePointer(to: &d_name) {
+            String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
+        }
+
+        if name.first == "." { continue }
+        if name.hasSuffix("~") { continue }
+
+        let childPath = "\(dirPath)/\(name)"
+
+        var isDir = dType == DT_DIR
+        var isFile = dType == DT_REG
+
+        if dType == DT_LNK || dType == DT_UNKNOWN {
+            var statBuf = stat()
+            guard stat(childPath, &statBuf) == 0 else { continue }
+            isDir = (statBuf.st_mode & S_IFMT) == S_IFDIR
+            isFile = (statBuf.st_mode & S_IFMT) == S_IFREG
+        }
+
+        if isDir {
+            posixScanDir(childPath, prefixLen: prefixLen, bucket: &bucket)
+        } else if isFile {
+            if name.hasSuffix(".cs") {
+                hasCS = true
+            } else if name.hasSuffix(".asmdef") {
+                bucket.asmDef.append(String(childPath.dropFirst(prefixLen)))
+            } else if name.hasSuffix(".asmref") {
+                bucket.asmRef.append(String(childPath.dropFirst(prefixLen)))
+            }
+        }
+    }
+
+    if hasCS {
+        let relDir = dirPath.count > prefixLen ? String(dirPath.dropFirst(prefixLen)) : ""
+        bucket.csDirs.append(relDir)
+    }
+}
 
 final class SolutionGenerator {
     private let fileManager: FileManager
@@ -158,18 +220,17 @@ final class SolutionGenerator {
             }
         }
 
-        // Assign sources per-directory.
-        let csFilesByDirectory = Dictionary(grouping: scan.csFiles) { parentDirectory(of: $0) }
-        var filesByProject: [String: [String]] = [:]
-        var unresolvedFiles: [String] = []
+        // Assign source directories to projects.
+        var dirsByProject: [String: [String]] = [:]
+        var unresolvedDirs: [String] = []
 
-        for (directory, files) in csFilesByDirectory {
-            if let owner = findAssemblyOwner(directory: directory, assemblyRoots: assemblyRoots) {
-                filesByProject[owner, default: []].append(contentsOf: files)
-            } else if let legacy = resolveLegacyProject(forDirectory: directory) {
-                filesByProject[legacy, default: []].append(contentsOf: files)
+        for dir in scan.csDirs {
+            if let owner = findAssemblyOwner(directory: dir, assemblyRoots: assemblyRoots) {
+                dirsByProject[owner, default: []].append(dir)
+            } else if let legacy = resolveLegacyProject(forDirectory: dir) {
+                dirsByProject[legacy, default: []].append(dir)
             } else {
-                unresolvedFiles.append(contentsOf: files)
+                unresolvedDirs.append(dir)
             }
         }
 
@@ -178,17 +239,17 @@ final class SolutionGenerator {
         let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 
         var warnings: [String] = []
-        if !unresolvedFiles.isEmpty {
-            warnings.append("Unresolved source files: \(unresolvedFiles.count)")
+        if !unresolvedDirs.isEmpty {
+            warnings.append("Unresolved source directories: \(unresolvedDirs.count)")
         }
 
         var patternsByProject: [String: [String]] = [:]
-        var sourceCountByProject: [String: Int] = [:]
 
         for project in projects {
-            let files = filesByProject[project.name] ?? []
-            sourceCountByProject[project.name] = files.count
-            patternsByProject[project.name] = makeCompilePatterns(files: files)
+            let dirs = dirsByProject[project.name] ?? []
+            patternsByProject[project.name] = dirs.sorted().map {
+                $0.isEmpty ? "*.cs" : "\($0)/*.cs"
+            }
         }
 
         var updatedFiles: [String] = []
@@ -244,13 +305,12 @@ final class SolutionGenerator {
         }
 
         let stats = GenerationStats(
-            sourceCountByProject: sourceCountByProject,
-            directoryPatternCountByProject: patternsByProject.mapValues(\.count),
-            unresolvedSourceCount: unresolvedFiles.count
+            patternCountByProject: patternsByProject.mapValues(\.count),
+            unresolvedDirCount: unresolvedDirs.count
         )
 
         if options.verbose {
-            warnings += unresolvedFiles.prefix(20).map { "Unresolved: \($0)" }
+            warnings += unresolvedDirs.prefix(20).map { "Unresolved: \($0)/" }
         }
 
         return GenerateResult(updatedFiles: updatedFiles.sorted(), warnings: warnings, stats: stats)
@@ -708,14 +768,6 @@ final class SolutionGenerator {
         return isFirstPass ? "Assembly-CSharp-firstpass" : "Assembly-CSharp"
     }
 
-    // MARK: - Compile patterns
-
-    private func makeCompilePatterns(files: [String]) -> [String] {
-        Set(files.map(parentDirectory(of:))).sorted().map { directory in
-            directory.isEmpty ? "*.cs" : "\(directory)/*.cs"
-        }
-    }
-
     // MARK: - Rendering
 
     private func renderCompilePatterns(_ patterns: [String]) -> String {
@@ -776,50 +828,89 @@ final class SolutionGenerator {
     // MARK: - Filesystem scanning
 
     private func scanProjectFiles(projectRoot: URL, roots: [String]) throws -> ProjectFileScan {
-        var csFiles: [String] = []
-        var asmDefPaths: [String] = []
-        var asmRefPaths: [String] = []
-
-        // Use realpath to match the enumerator's resolved paths
-        // (macOS: /var → /private/var firmlink).
+        // Use realpath to resolve firmlinks (macOS: /var → /private/var).
         let rootPath = resolveRealPath(projectRoot.path)
         let prefixLen = rootPath.count + 1
 
+        // List immediate children of each root; directories become parallel walk targets.
+        var walkTargets: [String] = []
+        var rootBucket = ScanBucket()
+
         for root in roots {
-            let rootURL = URL(fileURLWithPath: rootPath).appendingPathComponent(root)
-            guard fileManager.fileExists(atPath: rootURL.path) else { continue }
+            let rootDir = "\(rootPath)/\(root)"
+            guard let dir = opendir(rootDir) else { continue }
+            defer { closedir(dir) }
 
-            guard let enumerator = fileManager.enumerator(
-                at: rootURL,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            ) else { continue }
+            var rootHasCS = false
 
-            while let next = enumerator.nextObject() as? URL {
-                let path = next.path
-                guard path.count > prefixLen else { continue }
-
-                // Skip directories ending with ~ (Unity ignored folders).
-                // Note: .skipsHiddenFiles handles dot-prefixed dirs/files.
-                if path.hasSuffix("~") {
-                    enumerator.skipDescendants()
-                    continue
+            while let entry = readdir(dir) {
+                let dType = entry.pointee.d_type
+                var d_name = entry.pointee.d_name
+                let name = withUnsafePointer(to: &d_name) {
+                    String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
                 }
 
-                if path.hasSuffix(".cs") {
-                    csFiles.append(String(path.dropFirst(prefixLen)))
-                } else if path.hasSuffix(".asmdef") {
-                    asmDefPaths.append(String(path.dropFirst(prefixLen)))
-                } else if path.hasSuffix(".asmref") {
-                    asmRefPaths.append(String(path.dropFirst(prefixLen)))
+                if name.first == "." { continue }
+                if name.hasSuffix("~") { continue }
+
+                let childPath = "\(rootDir)/\(name)"
+
+                var isDir = dType == DT_DIR
+                var isFile = dType == DT_REG
+
+                if dType == DT_LNK || dType == DT_UNKNOWN {
+                    var statBuf = stat()
+                    guard stat(childPath, &statBuf) == 0 else { continue }
+                    isDir = (statBuf.st_mode & S_IFMT) == S_IFDIR
+                    isFile = (statBuf.st_mode & S_IFMT) == S_IFREG
                 }
+
+                if isDir {
+                    walkTargets.append(childPath)
+                } else if isFile {
+                    if name.hasSuffix(".cs") {
+                        rootHasCS = true
+                    } else if name.hasSuffix(".asmdef") {
+                        rootBucket.asmDef.append(String(childPath.dropFirst(prefixLen)))
+                    } else if name.hasSuffix(".asmref") {
+                        rootBucket.asmRef.append(String(childPath.dropFirst(prefixLen)))
+                    }
+                }
+            }
+
+            if rootHasCS {
+                rootBucket.csDirs.append(root)
             }
         }
 
-        csFiles.sort()
+        // Walk each subdirectory in parallel using POSIX readdir.
+        let dirs = walkTargets
+        let count = dirs.count
+        let raw = UnsafeMutablePointer<ScanBucket>.allocate(capacity: count)
+        raw.initialize(repeating: ScanBucket(), count: count)
+        defer { raw.deinitialize(count: count); raw.deallocate() }
+        let buckets = SendablePtr(ptr: raw)
+
+        DispatchQueue.concurrentPerform(iterations: count) { i in
+            var bucket = ScanBucket()
+            posixScanDir(dirs[i], prefixLen: prefixLen, bucket: &bucket)
+            buckets[i] = bucket
+        }
+
+        // Merge results.
+        var csDirs = rootBucket.csDirs
+        var asmDefPaths = rootBucket.asmDef
+        var asmRefPaths = rootBucket.asmRef
+        for i in 0..<count {
+            let b = raw[i]
+            csDirs.append(contentsOf: b.csDirs)
+            asmDefPaths.append(contentsOf: b.asmDef)
+            asmRefPaths.append(contentsOf: b.asmRef)
+        }
+
         asmDefPaths.sort()
         asmRefPaths.sort()
-        return ProjectFileScan(csFiles: csFiles, asmDefPaths: asmDefPaths, asmRefPaths: asmRefPaths)
+        return ProjectFileScan(csDirs: csDirs, asmDefPaths: asmDefPaths, asmRefPaths: asmRefPaths)
     }
 
     private func loadAsmDefsFromPaths(_ paths: [String], projectRoot: URL) throws -> [AsmDefRecord] {
