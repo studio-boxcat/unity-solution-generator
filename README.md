@@ -19,13 +19,13 @@ Installs `unity-solution-generator` to `~/.local/bin/` (symlink).
 | `prepare-build` | Generate platform-variant `.csproj` copies for device build validation |
 
 ```bash
-unity-solution-generator --project-root /path/to/unity-project
-unity-solution-generator extract-templates --project-root /path/to/unity-project
-unity-solution-generator prepare-build --ios --project-root /path/to/unity-project
-unity-solution-generator prepare-build --android --debug --project-root /path/to/unity-project
+unity-solution-generator -p /path/to/unity-project
+unity-solution-generator extract-templates -p /path/to/unity-project
+unity-solution-generator prepare-build --ios -p /path/to/unity-project
+unity-solution-generator prepare-build --android --debug -p /path/to/unity-project
 ```
 
-`generate` and `extract-templates` accept `--template-root <path>` (default: `Library/UnitySolutionGenerator`) to override the template directory.
+`-p` / `--project-root` sets the Unity project root. `generate` and `extract-templates` accept `--template-root <path>` (default: `Library/UnitySolutionGenerator`) to override the template directory.
 
 ## Build validation
 
@@ -43,7 +43,7 @@ Output is one `.csproj` path per line to stdout, for piping to `parallel`:
 ```bash
 CACHE=Library/BuildValidation/ios-prod
 mkdir -p "$CACHE"
-unity-solution-generator prepare-build --ios --project-root . \
+unity-solution-generator prepare-build --ios -p . \
   | parallel dotnet build {} --no-restore -v q \
       "-p:BaseIntermediateOutputPath=$CACHE/{/.}/"
 ```
@@ -89,6 +89,6 @@ Directories ending with `~` or starting with `.` are excluded from scanning.
 Templates live in `Library/UnitySolutionGenerator/` (gitignored). After cloning, or after Unity upgrades / package changes, re-extract and regenerate:
 
 ```bash
-unity-solution-generator extract-templates --project-root .
-unity-solution-generator --project-root .
+unity-solution-generator extract-templates -p .
+unity-solution-generator -p .
 ```

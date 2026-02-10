@@ -16,7 +16,7 @@ struct Generate: ParsableCommand {
         abstract: "Generate csproj/sln from current layout and templates."
     )
 
-    @Option(name: .long, help: "Project root path.")
+    @Option(name: .shortAndLong, help: "Project root path.")
     var projectRoot: String?
 
     @Option(name: .long, help: "Template root directory relative to project root.")
@@ -62,7 +62,7 @@ struct ExtractTemplates: ParsableCommand {
         abstract: "Extract templates from Unity-generated csproj/sln."
     )
 
-    @Option(name: .long, help: "Project root path.")
+    @Option(name: .shortAndLong, help: "Project root path.")
     var projectRoot: String?
 
     @Option(name: .long, help: "Template root directory relative to project root.")
@@ -91,7 +91,7 @@ struct PrepareBuild: ParsableCommand {
         abstract: "Generate platform-variant csproj copies for device build validation."
     )
 
-    @Option(name: .long, help: "Project root path.")
+    @Option(name: .shortAndLong, help: "Project root path.")
     var projectRoot: String?
 
     @Flag(name: .long, help: "Target iOS platform.")
