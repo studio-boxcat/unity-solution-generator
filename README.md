@@ -19,16 +19,9 @@ Installs `unity-solution-generator` to `~/.local/bin/` (symlink).
 | `prepare-build` | Generate platform-variant `.csproj` copies for device build validation |
 
 ```bash
-# Generate solution files (default command)
 unity-solution-generator --project-root /path/to/unity-project
-
-# Extract templates from Unity-generated csproj/sln
 unity-solution-generator extract-templates --project-root /path/to/unity-project
-
-# Generate iOS build-validation csprojs (outputs paths to stdout)
 unity-solution-generator prepare-build --ios --project-root /path/to/unity-project
-
-# Generate Android build-validation csprojs, keeping DEBUG/TRACE defines
 unity-solution-generator prepare-build --android --debug --project-root /path/to/unity-project
 ```
 
@@ -45,37 +38,27 @@ unity-solution-generator prepare-build --android --debug --project-root /path/to
 - Removes `<ProjectReference>` entries for non-runtime and non-matching-platform projects
 - Rewrites remaining project references to point at their platform-variant copies
 
-Output is one `.csproj` path per line to stdout, for piping to `parallel` or `xargs`:
+Output is one `.csproj` path per line to stdout, for piping to `parallel`:
 
 ```bash
+CACHE=Library/BuildValidation/ios-prod
+mkdir -p "$CACHE"
 unity-solution-generator prepare-build --ios --project-root . \
-  | parallel dotnet build {} --no-restore -v q
+  | parallel dotnet build {} --no-restore -v q \
+      "-p:BaseIntermediateOutputPath=$CACHE/{/.}/"
 ```
 
-### Validation matrix
+`BaseIntermediateOutputPath` isolates build intermediates per config — without it, platform variant builds pollute the shared `obj/` directory and break subsequent editor builds.
 
-Full validation covers the editor build plus all platform/build-type combinations:
-
-```bash
-# Editor build (full solution, all projects)
-dotnet build project.sln --no-restore -v q
-
-# Platform builds (runtime projects only, no UNITY_EDITOR)
-unity-solution-generator prepare-build --ios --project-root .           # iOS prod
-unity-solution-generator prepare-build --ios --debug --project-root .   # iOS dev
-unity-solution-generator prepare-build --android --project-root .       # Android prod
-unity-solution-generator prepare-build --android --debug --project-root . # Android dev
-```
+Full validation covers the editor build plus all platform/build-type combinations (`--ios`, `--ios --debug`, `--android`, `--android --debug`), each with its own `BaseIntermediateOutputPath`.
 
 ## How it works
 
-1. **Templates** are Unity-generated `.csproj`/`.sln` files with placeholders (`{{SOURCE_FOLDERS}}`, `{{PROJECT_REFERENCES}}`, `{{PROJECT_ROOT}}`) replacing the dynamic parts. Everything else (DLL references, analyzers, build settings) is preserved as-is from Unity's output.
+1. **Templates** are Unity-generated `.csproj`/`.sln` files with placeholders (`{{SOURCE_FOLDERS}}`, `{{PROJECT_REFERENCES}}`, `{{PROJECT_ROOT}}`) replacing the dynamic parts. Everything else (DLL references, analyzers, build settings, define symbols) is preserved as-is from Unity's output.
 2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, builds per-directory compile patterns, and renders the templates.
-3. **Project categories** (runtime/editor/test) are inferred from `.asmdef` fields.
+3. **Project categories** (runtime/editor/test) are inferred from `.asmdef` fields:
 
 ### Category inference
-
-Categories are derived from `.asmdef` fields at runtime:
 
 | Rule | Category |
 |------|----------|
@@ -103,26 +86,9 @@ Directories ending with `~` or starting with `.` are excluded from scanning.
 
 ## Unity project setup
 
-The Unity project needs:
-
-```
-Library/UnitySolutionGenerator/              # gitignored, regenerated templates
-```
-
-Typical workflow after cloning:
+Templates live in `Library/UnitySolutionGenerator/` (gitignored). After cloning, or after Unity upgrades / package changes, re-extract and regenerate:
 
 ```bash
-# 1. Extract templates from Unity-generated files
-unity-solution-generator extract-templates --project-root .
-
-# 2. Regenerate solution (no Unity needed after this)
-unity-solution-generator --project-root .
-```
-
-After Unity upgrades or package changes:
-
-```bash
-# Extract templates, then regenerate
 unity-solution-generator extract-templates --project-root .
 unity-solution-generator --project-root .
 ```
