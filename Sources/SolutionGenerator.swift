@@ -73,9 +73,17 @@ struct SolutionGenerator {
         let platform = options.platform
 
         let scan = try ProjectScanner.scan(projectRoot: projectRoot)
-        let projects = discoverProjects(templatesDir: templatesDir)
-        guard !projects.isEmpty else {
-            throw GeneratorError.noTemplatesFound(templatesDir)
+        var projects = discoverProjects(templatesDir: templatesDir)
+        if projects.isEmpty {
+            fputs("No templates found, running init...\n", stderr)
+            let updated = try TemplateExtractor.extract(
+                options: ExtractTemplatesOptions(projectRoot: projectRoot, generatorRoot: generatorRoot)
+            )
+            for file in updated { fputs("  \(file)\n", stderr) }
+            projects = discoverProjects(templatesDir: templatesDir)
+            guard !projects.isEmpty else {
+                throw GeneratorError.noTemplatesFound(templatesDir)
+            }
         }
         let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 

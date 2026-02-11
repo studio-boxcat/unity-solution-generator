@@ -24,15 +24,12 @@ struct CLI {
 
     static func runInit(_ args: [String]) {
         guard !args.isEmpty else {
-            die("init requires: <unity-root> [generator-root]")
+            die("init requires: <unity-root>")
         }
-
-        let projectRoot = args[0]
-        let generatorRoot = args.count > 1 ? args[1] : defaultGeneratorRoot
 
         do {
             let updated = try TemplateExtractor.extract(
-                options: ExtractTemplatesOptions(projectRoot: resolveRealPath(projectRoot), generatorRoot: generatorRoot)
+                options: ExtractTemplatesOptions(projectRoot: resolveRealPath(args[0]))
             )
             if updated.isEmpty {
                 print("No changes.")
@@ -47,7 +44,7 @@ struct CLI {
 
     static func runGenerate(_ args: [String]) {
         guard args.count >= 3 else {
-            die("generate requires: <unity-root> <platform> <config> [generator-root] [options]")
+            die("generate requires: <unity-root> <platform> <config> [options]")
         }
 
         let projectRoot = args[0]
@@ -67,25 +64,17 @@ struct CLI {
         default: die("Unknown config '\(args[2])'. Use 'prod', 'dev', or 'editor'.")
         }
 
-        var generatorRoot = defaultGeneratorRoot
         var verbose = false
-        var i = 3
-        if i < args.count && !args[i].hasPrefix("-") {
-            generatorRoot = args[i]
-            i += 1
-        }
-        while i < args.count {
+        for i in 3..<args.count {
             switch args[i] {
             case "-v", "--verbose": verbose = true
             default: die("Unknown option: \(args[i])")
             }
-            i += 1
         }
 
         do {
             let result = try SolutionGenerator().generate(options: GenerateOptions(
                 projectRoot: resolveRealPath(projectRoot),
-                generatorRoot: generatorRoot,
                 verbose: verbose,
                 platform: platform,
                 buildConfig: buildConfig
@@ -109,8 +98,8 @@ struct CLI {
     static func printUsage() {
         print("""
         USAGE:
-          unity-solution-generator init <unity-root> [generator-root]
-          unity-solution-generator generate <unity-root> <platform> <config> [generator-root] [options]
+          unity-solution-generator init <unity-root>
+          unity-solution-generator generate <unity-root> <platform> <config> [options]
 
         COMMANDS:
           init                  Extract .csproj templates from Unity-generated project files
@@ -120,7 +109,6 @@ struct CLI {
           unity-root            Unity project root
           platform              ios | android
           config                prod | dev | editor
-          generator-root        Generator root (default: Library/UnitySolutionGenerator)
 
         OPTIONS:
           -v, --verbose         Print unresolved directory samples
