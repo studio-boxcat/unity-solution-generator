@@ -1,4 +1,5 @@
-import Foundation
+import Darwin
+import Dispatch
 
 // MARK: - Public types
 
@@ -14,6 +15,22 @@ struct AsmDefRecord: Sendable {
     let references: [String]
     let category: ProjectCategory
     let includePlatforms: [String]
+
+    static func load(rootPath: String, relativePath: String) throws -> AsmDefRecord? {
+        let json = try readFile(joinPath(rootPath, relativePath))
+        guard let name = extractJsonString(json, key: "name") else { return nil }
+        let includePlatforms = extractJsonStringArray(json, key: "includePlatforms")
+        return AsmDefRecord(
+            name: name,
+            directory: parentDirectory(of: relativePath),
+            references: extractJsonStringArray(json, key: "references"),
+            category: inferCategory(
+                includePlatforms: includePlatforms,
+                defineConstraints: extractJsonStringArray(json, key: "defineConstraints")
+            ),
+            includePlatforms: includePlatforms
+        )
+    }
 }
 
 // MARK: - Scanner
@@ -25,26 +42,15 @@ struct ProjectScanner {
         let unresolvedDirs: [String]
     }
 
-    static func scan(projectRoot: URL) throws -> Result {
-        let rootPath = resolveRealPath(projectRoot.path)
+    static func scan(projectRoot: String) throws -> Result {
+        let rootPath = resolveRealPath(projectRoot)
         let fileScan = scanProjectFiles(rootPath: rootPath, roots: ["Assets", "Packages"])
-
-        // Single decoder shared across all JSON parsing (asmdef + asmref files).
-        let decoder = JSONDecoder()
 
         // Load .asmdef files and build name → record map.
         // Unity enforces globally unique assembly definition names.
         var asmDefByName: [String: AsmDefRecord] = [:]
         for path in fileScan.asmDefPaths {
-            let data = try Data(contentsOf: projectRoot.appendingPathComponent(path))
-            let raw = try decoder.decode(RawAsmDef.self, from: data)
-            let record = AsmDefRecord(
-                name: raw.name,
-                directory: parentDirectory(of: path),
-                references: raw.references ?? [],
-                category: inferCategory(from: raw),
-                includePlatforms: raw.includePlatforms ?? []
-            )
+            guard let record = try AsmDefRecord.load(rootPath: rootPath, relativePath: path) else { continue }
             guard asmDefByName[record.name] == nil else {
                 throw GeneratorError.duplicateAsmDefName(record.name)
             }
@@ -52,26 +58,19 @@ struct ProjectScanner {
         }
 
         // Build assembly root map: directory → assembly name.
-        // Unity allows at most one .asmdef or .asmref per directory (never both,
-        // never multiples), so asmdef directories and asmref directories are disjoint.
         var assemblyRoots: [String: String] = [:]
         for (name, record) in asmDefByName {
             assemblyRoots[record.directory] = name
         }
 
-        // .asmref files extend an existing assembly's source roots into another
-        // directory tree. Skip orphaned .asmref files whose target doesn't exist.
+        // .asmref files extend an existing assembly's source roots.
         for path in fileScan.asmRefPaths {
-            let data = try Data(contentsOf: projectRoot.appendingPathComponent(path))
-            let raw = try decoder.decode(RawAsmRef.self, from: data)
-            guard asmDefByName[raw.reference] != nil else { continue }
-            assemblyRoots[parentDirectory(of: path)] = raw.reference
+            guard let (dir, reference) = try loadAsmRef(rootPath: rootPath, relativePath: path),
+                  asmDefByName[reference] != nil else { continue }
+            assemblyRoots[dir] = reference
         }
 
         // Assign each directory containing .cs files to its owning assembly.
-        // Walk upward from the directory until hitting an assembly root (asmdef/asmref).
-        // Directories outside any assembly root fall back to Unity's legacy assembly
-        // rules (Assembly-CSharp, Assembly-CSharp-Editor, etc.).
         var dirsByProject: [String: [String]] = [:]
         var unresolvedDirs: [String] = []
 
@@ -89,25 +88,6 @@ struct ProjectScanner {
     }
 }
 
-// MARK: - JSON types
-
-private struct RawAsmDef: Decodable {
-    let name: String
-    let references: [String]?
-    let includePlatforms: [String]?
-    let defineConstraints: [String]?
-}
-
-private struct RawAsmRef: Decodable {
-    let reference: String
-}
-
-private struct FileScan {
-    let csDirs: [String]
-    let asmDefPaths: [String]
-    let asmRefPaths: [String]
-}
-
 // MARK: - Parallel filesystem scan (POSIX readdir)
 
 private struct SendablePtr<T>: @unchecked Sendable {
@@ -118,15 +98,18 @@ private struct SendablePtr<T>: @unchecked Sendable {
     }
 }
 
-// Unity allows at most one .asmdef or .asmref per directory (never both).
 private struct ScanBucket {
     var csDirs: [String] = []
     var asmDefPaths: [String] = []
     var asmRefPaths: [String] = []
 }
 
-/// Resolve a dirent entry into (name, fullPath, isDirectory), skipping dot/tilde entries and
-/// following symlinks. Returns nil for entries that should be skipped.
+private struct FileScan {
+    let csDirs: [String]
+    let asmDefPaths: [String]
+    let asmRefPaths: [String]
+}
+
 private func processDirent(_ entry: UnsafeMutablePointer<dirent>, parentPath: String) -> (name: String, path: String, isDir: Bool)? {
     var d_name = entry.pointee.d_name
     let name = withUnsafePointer(to: &d_name) {
@@ -151,7 +134,6 @@ private func processDirent(_ entry: UnsafeMutablePointer<dirent>, parentPath: St
     return nil
 }
 
-/// Classify a file by extension and append to the appropriate bucket field.
 private func collectFile(name: String, path: String, prefixLen: Int, hasCS: inout Bool, bucket: inout ScanBucket) {
     if name.hasSuffix(".cs") {
         hasCS = true
@@ -187,7 +169,6 @@ private func posixScanDir(_ dirPath: String, prefixLen: Int, bucket: inout ScanB
 private func scanProjectFiles(rootPath: String, roots: [String]) -> FileScan {
     let prefixLen = rootPath.count + 1
 
-    // List immediate children of each root; directories become parallel walk targets.
     var walkTargets: [String] = []
     var rootBucket = ScanBucket()
 
@@ -213,7 +194,6 @@ private func scanProjectFiles(rootPath: String, roots: [String]) -> FileScan {
         }
     }
 
-    // Walk each subdirectory in parallel using POSIX readdir.
     let targets = walkTargets
     let count = targets.count
     let raw = UnsafeMutablePointer<ScanBucket>.allocate(capacity: count)
@@ -227,7 +207,6 @@ private func scanProjectFiles(rootPath: String, roots: [String]) -> FileScan {
         buckets[i] = bucket
     }
 
-    // Merge results.
     var csDirs = rootBucket.csDirs
     var asmDefPaths = rootBucket.asmDefPaths
     var asmRefPaths = rootBucket.asmRefPaths
@@ -243,15 +222,10 @@ private func scanProjectFiles(rootPath: String, roots: [String]) -> FileScan {
 
 // MARK: - Category inference
 
-private func inferCategory(from rawAsmDef: RawAsmDef) -> ProjectCategory {
-    let constraints = rawAsmDef.defineConstraints ?? []
-    if constraints.contains("UNITY_INCLUDE_TESTS") { return .test }
-
-    let platforms = rawAsmDef.includePlatforms ?? []
-    if platforms.count == 1 && platforms[0] == "Editor" { return .editor }
-
-    if constraints.contains("UNITY_EDITOR") { return .editor }
-
+private func inferCategory(includePlatforms: [String], defineConstraints: [String]) -> ProjectCategory {
+    if defineConstraints.contains("UNITY_INCLUDE_TESTS") { return .test }
+    if includePlatforms.count == 1 && includePlatforms[0] == "Editor" { return .editor }
+    if defineConstraints.contains("UNITY_EDITOR") { return .editor }
     return .runtime
 }
 
@@ -265,6 +239,12 @@ private func findAssemblyOwner(directory: String, assemblyRoots: [String: String
         current = parentDirectory(of: current)
     }
     return nil
+}
+
+private func loadAsmRef(rootPath: String, relativePath: String) throws -> (directory: String, reference: String)? {
+    let json = try readFile(joinPath(rootPath, relativePath))
+    guard let reference = extractJsonString(json, key: "reference") else { return nil }
+    return (parentDirectory(of: relativePath), reference)
 }
 
 private func resolveLegacyProject(forDirectory directory: String) -> String? {
@@ -282,3 +262,4 @@ private func resolveLegacyProject(forDirectory directory: String) -> String? {
     }
     return isFirstPass ? "Assembly-CSharp-firstpass" : "Assembly-CSharp"
 }
+

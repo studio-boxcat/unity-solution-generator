@@ -108,16 +108,16 @@ Directories ending with `~` or starting with `.` are excluded from scanning.
 
 ## Performance
 
-Measured on meow-tower (19 projects, ~2.8k `.cs` dirs) with `hyperfine`, M1 Max:
+Measured on meow-tower (19 projects, ~2.8k `.cs` dirs) with [`hyperfine`](https://github.com/sharkdp/hyperfine), M1 Max:
 
-| Command | Time |
-|---------|------|
-| `extract-templates` | 122 ms |
-| `generate` (scan only) | 43 ms |
-| `generate --ios` (prod) | 53 ms |
-| `generate --ios --editor` | 46 ms |
+| Command | v1 (Foundation) | v2 (Darwin) |
+|---------|-----------------|-------------|
+| `extract-templates` | 122 ms | 119 ms |
+| `generate` (scan only) | 43 ms | 41 ms |
+| `generate --ios` (prod) | 53 ms | 66 ms |
+| `generate --ios --editor` | 46 ms | 44 ms |
 
-Filesystem scan (parallel POSIX readdir) dominates at ~43ms.
+v2 drops Foundation for pure Darwin/POSIX. Prod variant is slower due to `stripNonRuntimeReferences` switching from NSRegularExpression to line-based scan. Filesystem scan (parallel POSIX readdir) dominates at ~41ms.
 
 ## Unity project setup
 

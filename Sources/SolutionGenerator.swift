@@ -1,4 +1,4 @@
-import Foundation
+import Darwin
 
 struct ProjectInfo: Sendable {
     let name: String
@@ -8,13 +8,13 @@ struct ProjectInfo: Sendable {
 }
 
 struct GenerateOptions: Sendable {
-    let projectRoot: URL
+    let projectRoot: String
     let generatorRoot: String
     let verbose: Bool
     let platform: BuildPlatform?
     let buildConfig: BuildConfig
 
-    init(projectRoot: URL, generatorRoot: String = "Library/UnitySolutionGenerator", verbose: Bool = false, platform: BuildPlatform? = nil, buildConfig: BuildConfig = .prod) {
+    init(projectRoot: String, generatorRoot: String = "Library/UnitySolutionGenerator", verbose: Bool = false, platform: BuildPlatform? = nil, buildConfig: BuildConfig = .prod) {
         self.projectRoot = projectRoot
         self.generatorRoot = generatorRoot
         self.verbose = verbose
@@ -52,22 +52,21 @@ struct GenerationStats: Sendable {
 }
 
 enum GeneratorError: Error, CustomStringConvertible {
-    case missingTemplate(URL)
-    case noSolutionFound(URL)
-    case noProjectsInSolution(URL)
+    case missingTemplate(String)
+    case noSolutionFound(String)
+    case noProjectsInSolution(String)
     case duplicateAsmDefName(String)
 
     var description: String {
         switch self {
-        case .missingTemplate(let url):
-            return "Missing template file: \(url.path)"
-        case .noSolutionFound(let url):
-            return "No .sln file found in: \(url.path)"
-        case .noProjectsInSolution(let url):
-            return "No C# projects found in solution: \(url.path)"
+        case .missingTemplate(let path):
+            return "Missing template file: \(path)"
+        case .noSolutionFound(let path):
+            return "No .sln file found in: \(path)"
+        case .noProjectsInSolution(let path):
+            return "No C# projects found in solution: \(path)"
         case .duplicateAsmDefName(let name):
             return "Duplicate asmdef name: '\(name)'"
-
         }
     }
 }
@@ -106,25 +105,20 @@ struct SlnRenderer {
 }
 
 final class SolutionGenerator {
-    private let fileManager: FileManager
-
-    init(fileManager: FileManager = .default) {
-        self.fileManager = fileManager
-    }
 
     // MARK: - Generate
 
     func generate(options: GenerateOptions) throws -> GenerateResult {
-        let projectRoot = options.projectRoot.standardizedFileURL
+        let projectRoot = resolveRealPath(options.projectRoot)
         let generatorRoot = options.generatorRoot
-        let generatorDir = projectRoot.appendingPathComponent(generatorRoot)
-        let templatesDir = generatorDir.appendingPathComponent("templates")
+        let generatorDir = joinPath(projectRoot, generatorRoot)
+        let templatesDir = joinPath(generatorDir, "templates")
 
         // Scan Unity project layout.
         let scan = try ProjectScanner.scan(projectRoot: projectRoot)
 
         // Discover projects from templates directory.
-        let projects = try discoverProjects(generatorRoot: generatorRoot, templatesDir: templatesDir)
+        let projects = discoverProjects(generatorRoot: generatorRoot, templatesDir: templatesDir)
         let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 
         var warnings: [String] = []
@@ -149,12 +143,12 @@ final class SolutionGenerator {
         var renderedCsprojs: [(info: ProjectInfo, content: String)] = []
 
         for project in projects {
-            let templateURL = projectRoot.appendingPathComponent(project.templatePath)
-            guard fileManager.fileExists(atPath: templateURL.path) else {
-                throw GeneratorError.missingTemplate(templateURL)
+            let templatePath = joinPath(projectRoot, project.templatePath)
+            guard fileExists(templatePath) else {
+                throw GeneratorError.missingTemplate(templatePath)
             }
 
-            let template = try String(contentsOf: templateURL, encoding: .utf8)
+            let template = try readFile(templatePath)
             let sourceBlock = renderCompilePatterns(patternsByProject[project.name] ?? [])
             let referenceBlock = renderProjectReferences(
                 for: project,
@@ -165,7 +159,7 @@ final class SolutionGenerator {
             let rendered = renderTemplate(
                 template,
                 replacements: [
-                    "{{PROJECT_ROOT}}": projectRoot.path,
+                    "{{PROJECT_ROOT}}": projectRoot,
                     "{{SOURCE_FOLDERS}}": sourceBlock,
                     "{{PROJECT_REFERENCES}}": referenceBlock,
                 ]
@@ -190,8 +184,8 @@ final class SolutionGenerator {
 
         // Write variant csprojs into {platform}-{config}/ subdirectory.
         let config = "\(platform.rawValue)-\(options.buildConfig.rawValue)"
-        let variantDir = generatorDir.appendingPathComponent(config)
-        try fileManager.createDirectory(at: variantDir, withIntermediateDirectories: true)
+        let variantDir = joinPath(generatorDir, config)
+        createDirectoryRecursive(variantDir)
 
         // Filter and transform csprojs based on build configuration.
         let isEditor = options.buildConfig == .editor
@@ -237,16 +231,17 @@ final class SolutionGenerator {
             content = swapPlatformDefines(content, platform: platform)
 
             let outputPath = "\(generatorRoot)/\(config)/\(entry.info.csprojPath)"
-            let outputURL = variantDir.appendingPathComponent(entry.info.csprojPath)
-            try writeIfChanged(content: content, to: outputURL)
+            let outputFile = joinPath(variantDir, entry.info.csprojPath)
+            try writeFileIfChanged(outputFile, content)
             variantCsprojs.append(outputPath)
         }
 
         // Write .sln alongside variant csprojs.
-        let slnName = "\(projectRoot.lastPathComponent).sln"
+        let projectName = projectRoot.split(separator: "/").last.map(String.init) ?? "Project"
+        let slnName = "\(projectName).sln"
         let slnContent = SlnRenderer.render(projects: entriesToWrite.map(\.info))
-        let slnURL = variantDir.appendingPathComponent(slnName)
-        try writeIfChanged(content: slnContent, to: slnURL)
+        let slnFile = joinPath(variantDir, slnName)
+        try writeFileIfChanged(slnFile, slnContent)
         let slnPath = "\(generatorRoot)/\(config)/\(slnName)"
 
         return GenerateResult(
@@ -261,29 +256,22 @@ final class SolutionGenerator {
 
     private func discoverProjects(
         generatorRoot: String,
-        templatesDir: URL
-    ) throws -> [ProjectInfo] {
-        guard fileManager.fileExists(atPath: templatesDir.path) else {
-            return []
-        }
+        templatesDir: String
+    ) -> [ProjectInfo] {
+        guard fileExists(templatesDir) else { return [] }
 
-        let templateFiles = try fileManager.contentsOfDirectory(
-            at: templatesDir,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ).filter { $0.pathExtension == "template" && $0.lastPathComponent.contains(".csproj.") }
-
-        return templateFiles.map { url in
-            let filename = url.lastPathComponent
-            // "Foo.csproj.template" → "Foo"
-            let name = String(filename.dropLast(".csproj.template".count))
-            return ProjectInfo(
-                name: name,
-                csprojPath: "\(name).csproj",
-                templatePath: "\(generatorRoot)/templates/\(filename)",
-                guid: deterministicGuid(for: name)
-            )
-        }.sorted { $0.name < $1.name }
+        return listDirectory(templatesDir)
+            .filter { $0.hasSuffix(".csproj.template") }
+            .map { filename in
+                let name = String(filename.dropLast(".csproj.template".count))
+                return ProjectInfo(
+                    name: name,
+                    csprojPath: "\(name).csproj",
+                    templatePath: "\(generatorRoot)/templates/\(filename)",
+                    guid: deterministicGuid(for: name)
+                )
+            }
+            .sorted { $0.name < $1.name }
     }
 
     // MARK: - Build validation helpers
@@ -315,15 +303,22 @@ final class SolutionGenerator {
 
     func stripNonRuntimeReferences(_ content: String, nonRuntimeNames: Set<String>) -> String {
         guard !nonRuntimeNames.isEmpty else { return content }
-        let escaped = nonRuntimeNames.map { NSRegularExpression.escapedPattern(for: $0) }
-        let alternation = escaped.sorted().joined(separator: "|")
-        let pattern = #"<ProjectReference Include="(\#(alternation))\.csproj">.*?</ProjectReference>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators) else {
-            return content
+        var lines: [Substring] = []
+        var skipping = false
+        for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
+            if skipping {
+                if line.contains("</ProjectReference>") { skipping = false }
+                continue
+            }
+            if let r = line.range(of: "Include=\""),
+               let end = line.range(of: ".csproj\"", range: r.upperBound..<line.endIndex),
+               nonRuntimeNames.contains(String(line[r.upperBound..<end.lowerBound])) {
+                skipping = true
+                continue
+            }
+            lines.append(line)
         }
-        return regex.stringByReplacingMatches(
-            in: content, range: NSRange(content.startIndex..., in: content), withTemplate: ""
-        )
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Rendering

@@ -7,7 +7,7 @@ final class SolutionGeneratorTests: XCTestCase {
 
     func testNestedAssemblyRootMappingAndLegacyFallback() throws {
         let root = try makeTempProjectRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(atPath: root) }
 
         try writeTemplates(root: root, projectNames: ["Main", "Core", "Tests", "Assembly-CSharp-firstpass"])
 
@@ -88,7 +88,7 @@ final class SolutionGeneratorTests: XCTestCase {
 
     func testAsmRefNameResolutionAndTildeSkip() throws {
         let root = try makeTempProjectRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(atPath: root) }
 
         try writeTemplates(root: root, projectNames: ["Core"])
 
@@ -112,7 +112,7 @@ final class SolutionGeneratorTests: XCTestCase {
 
     func testTildeDirectoryExcludedFromScan() throws {
         let root = try makeTempProjectRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(atPath: root) }
 
         try writeTemplates(root: root, projectNames: ["Main"])
 
@@ -128,13 +128,12 @@ final class SolutionGeneratorTests: XCTestCase {
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor
         ))
 
-        // Tilde dirs are skipped during scan — their files never appear.
         try assertCompileSet(root: root, csprojPath: "tpl/ios-editor/Main.csproj", expected: ["Assets/Game/Good.cs"])
     }
 
     func testDotDirectoryExcludedFromScan() throws {
         let root = try makeTempProjectRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(atPath: root) }
 
         try writeTemplates(root: root, projectNames: ["Main"])
 
@@ -149,13 +148,12 @@ final class SolutionGeneratorTests: XCTestCase {
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor
         ))
 
-        // Dot-directory files should not be in the compile set.
         try assertCompileSet(root: root, csprojPath: "tpl/ios-editor/Main.csproj", expected: ["Assets/Game/Visible.cs"])
     }
 
     func testE2EGeneratedCompileSetMatchesOriginalCsproj() throws {
         let root = try makeTempProjectRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(atPath: root) }
 
         try writeTemplates(root: root, projectNames: ["Main", "Sandbox"])
 
@@ -169,7 +167,6 @@ final class SolutionGeneratorTests: XCTestCase {
         try writeFile(root, "Assets/Game/Tests/CTest.cs", "class CTest {}\n")
         try writeFile(root, "Assets/Game/Sandbox/S.cs", "class S {}\n")
 
-        // Simulates the original Unity-generated per-file projects.
         try writeFile(root, "Main.original.csproj", """
         <Project>
           <ItemGroup>
@@ -206,14 +203,13 @@ final class SolutionGeneratorTests: XCTestCase {
 
     // MARK: - Setup helpers
 
-    private func makeTempProjectRoot() throws -> URL {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("solution-generator-tests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+    private func makeTempProjectRoot() throws -> String {
+        let path = NSTemporaryDirectory() + "solution-generator-tests-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        return path
     }
 
-    private func writeTemplates(root: URL, projectNames: [String]) throws {
+    private func writeTemplates(root: String, projectNames: [String]) throws {
         for name in projectNames {
             try writeFile(root, "tpl/templates/\(name).csproj.template", """
             <Project>
@@ -226,7 +222,7 @@ final class SolutionGeneratorTests: XCTestCase {
         }
     }
 
-    private func writeTemplatesWithDefines(root: URL, projectNames: [String], defines: String = "UNITY_5;UNITY_EDITOR;UNITY_IOS") throws {
+    private func writeTemplatesWithDefines(root: String, projectNames: [String], defines: String = "UNITY_5;UNITY_EDITOR;UNITY_IOS") throws {
         for name in projectNames {
             try writeFile(root, "tpl/templates/\(name).csproj.template", """
             <Project>
@@ -244,20 +240,20 @@ final class SolutionGeneratorTests: XCTestCase {
 
     // MARK: - Assertion helpers
 
-    private func assertCompileSet(root: URL, csprojPath: String, expected: Set<String>) throws {
+    private func assertCompileSet(root: String, csprojPath: String, expected: Set<String>) throws {
         let actual = try readCompileSet(root: root, csprojPath: csprojPath)
         XCTAssertEqual(actual, expected)
     }
 
-    private func readCompileSet(root: URL, csprojPath: String) throws -> Set<String> {
+    private func readCompileSet(root: String, csprojPath: String) throws -> Set<String> {
         let content = try readFile(root, csprojPath)
-        let entries = try parseCompileEntries(from: content)
-        return try expandCompileEntries(entries, root: root)
+        let entries = parseCompileEntries(from: content)
+        return expandCompileEntries(entries, root: root)
     }
 
-    private func parseCompileEntries(from csproj: String) throws -> [CompileEntry] {
+    private func parseCompileEntries(from csproj: String) -> [CompileEntry] {
         let pattern = #"<Compile Include=\"([^\"]+)\"\s*/>"#
-        let regex = try NSRegularExpression(pattern: pattern)
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let range = NSRange(csproj.startIndex..<csproj.endIndex, in: csproj)
 
         return regex.matches(in: csproj, range: range).compactMap { match in
@@ -268,16 +264,15 @@ final class SolutionGeneratorTests: XCTestCase {
         }
     }
 
-    private func expandCompileEntries(_ entries: [CompileEntry], root: URL) throws -> Set<String> {
+    private func expandCompileEntries(_ entries: [CompileEntry], root: String) -> Set<String> {
         var result: Set<String> = []
         for entry in entries {
-            result.formUnion(try expandPattern(entry.include, root: root))
+            result.formUnion(expandPattern(entry.include, root: root))
         }
         return result
     }
 
-    private func expandPattern(_ pattern: String, root: URL) throws -> Set<String> {
-        // Strip leading "../" segments (relative paths from variant subdirectory).
+    private func expandPattern(_ pattern: String, root: String) -> Set<String> {
         var stripped = pattern
         while stripped.hasPrefix("../") {
             stripped = String(stripped.dropFirst(3))
@@ -285,13 +280,13 @@ final class SolutionGeneratorTests: XCTestCase {
 
         if stripped.hasSuffix("/*.cs") {
             let directory = String(stripped.dropLast("/*.cs".count))
-            return try listCsFiles(root: root, relativeDirectory: directory)
+            return listCsFiles(root: root, relativeDirectory: directory)
         }
 
         if stripped.hasSuffix(".cs") {
             let path = stripped.replacingOccurrences(of: "\\", with: "/")
-            let fileURL = root.appendingPathComponent(path)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
+            let fullPath = "\(root)/\(path)"
+            if FileManager.default.fileExists(atPath: fullPath) {
                 return [path]
             }
             return []
@@ -300,39 +295,23 @@ final class SolutionGeneratorTests: XCTestCase {
         return []
     }
 
-    private func listCsFiles(root: URL, relativeDirectory: String) throws -> Set<String> {
-        let directoryURL = relativeDirectory.isEmpty
-            ? root
-            : root.appendingPathComponent(relativeDirectory)
+    private func listCsFiles(root: String, relativeDirectory: String) -> Set<String> {
+        let dirPath = relativeDirectory.isEmpty ? root : "\(root)/\(relativeDirectory)"
 
-        guard FileManager.default.fileExists(atPath: directoryURL.path) else {
+        guard FileManager.default.fileExists(atPath: dirPath) else {
             return []
         }
 
-        let rootPath = root.standardizedFileURL.path
-        let urls = try FileManager.default.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        )
-
-        var result: Set<String> = []
-        for url in urls {
-            let standardized = url.standardizedFileURL
-            let values = try standardized.resourceValues(forKeys: [.isRegularFileKey])
-            guard values.isRegularFile == true else {
-                continue
-            }
-            guard standardized.path.hasSuffix(".cs") else {
-                continue
-            }
-            guard standardized.path.hasPrefix(rootPath + "/") else {
-                continue
-            }
-            let relative = String(standardized.path.dropFirst(rootPath.count + 1)).replacingOccurrences(of: "\\", with: "/")
-            result.insert(relative)
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dirPath) else {
+            return []
         }
 
+        var result: Set<String> = []
+        for entry in entries {
+            guard entry.hasSuffix(".cs") else { continue }
+            let relativePath = relativeDirectory.isEmpty ? entry : "\(relativeDirectory)/\(entry)"
+            result.insert(relativePath)
+        }
         return result
     }
 
@@ -346,14 +325,15 @@ final class SolutionGeneratorTests: XCTestCase {
         return unescaped
     }
 
-    private func writeFile(_ root: URL, _ relativePath: String, _ content: String) throws {
-        let fileURL = root.appendingPathComponent(relativePath)
-        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try content.write(to: fileURL, atomically: true, encoding: .utf8)
+    private func writeFile(_ root: String, _ relativePath: String, _ content: String) throws {
+        let path = "\(root)/\(relativePath)"
+        let dir = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
-    private func readFile(_ root: URL, _ relativePath: String) throws -> String {
-        try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
+    private func readFile(_ root: String, _ relativePath: String) throws -> String {
+        try String(contentsOfFile: "\(root)/\(relativePath)", encoding: .utf8)
     }
 
     // MARK: - Build transform unit tests
@@ -405,7 +385,7 @@ final class SolutionGeneratorTests: XCTestCase {
 
     func testProdVariantCategoryFiltering() throws {
         let root = try makeTempProjectRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(atPath: root) }
 
         try writeTemplatesWithDefines(root: root, projectNames: ["Runtime", "MyEditor", "MyTests"])
 
@@ -425,7 +405,6 @@ final class SolutionGeneratorTests: XCTestCase {
 
         let gen = SolutionGenerator()
 
-        // Prod: only runtime project.
         let prodResult = try gen.generate(options: GenerateOptions(
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .prod
         ))
@@ -435,12 +414,10 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertFalse(variant.contains("UNITY_EDITOR"))
         XCTAssertFalse(variant.contains("MyEditor.csproj\">"))
 
-        // .sln contains only the runtime project.
         let prodSln = try readFile(root, prodResult.variantSlnPath!)
         XCTAssertTrue(prodSln.contains("\"Runtime\""))
         XCTAssertFalse(prodSln.contains("\"MyEditor\""))
 
-        // Editor: all projects included, editor defines preserved.
         let editorResult = try gen.generate(options: GenerateOptions(
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor
         ))
@@ -448,7 +425,6 @@ final class SolutionGeneratorTests: XCTestCase {
         let editorRuntime = try readFile(root, "tpl/ios-editor/Runtime.csproj")
         XCTAssertTrue(editorRuntime.contains("UNITY_EDITOR"))
 
-        // Editor .sln contains all projects.
         let editorSln = try readFile(root, editorResult.variantSlnPath!)
         XCTAssertTrue(editorSln.contains("\"MyEditor\""))
         XCTAssertTrue(editorSln.contains("\"MyTests\""))
@@ -456,40 +432,35 @@ final class SolutionGeneratorTests: XCTestCase {
 
     func testCategoryInferenceFromAsmDefFields() throws {
         let root = try makeTempProjectRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(atPath: root) }
 
         try writeTemplatesWithDefines(root: root,
             projectNames: ["Runtime", "PlatformLib", "EditorOnly", "EditorConstrained", "PlayTests"],
             defines: "UNITY_5"
         )
 
-        // Runtime: no special fields
         try writeFile(root, "Assets/A/Runtime.asmdef", "{\"name\":\"Runtime\"}\n")
-        try writeFile(root, "Assets/A/Code.cs", "class Code {}\n")
-        // Runtime: platform-specific (iOS + Editor)
         try writeFile(root, "Assets/B/PlatformLib.asmdef", """
         {"name":"PlatformLib","includePlatforms":["iOS","Editor"]}
         """)
-        try writeFile(root, "Assets/B/Code.cs", "class Code2 {}\n")
-        // Editor: includePlatforms = ["Editor"]
         try writeFile(root, "Assets/C/EditorOnly.asmdef", """
         {"name":"EditorOnly","includePlatforms":["Editor"]}
         """)
-        try writeFile(root, "Assets/C/Code.cs", "class Code3 {}\n")
-        // Editor: defineConstraints = ["UNITY_EDITOR"]
         try writeFile(root, "Assets/D/EditorConstrained.asmdef", """
         {"name":"EditorConstrained","defineConstraints":["UNITY_EDITOR"]}
         """)
-        try writeFile(root, "Assets/D/Code.cs", "class Code4 {}\n")
-        // Test: defineConstraints = ["UNITY_INCLUDE_TESTS"]
         try writeFile(root, "Assets/E/PlayTests.asmdef", """
         {"name":"PlayTests","defineConstraints":["UNITY_INCLUDE_TESTS"]}
         """)
+
+        try writeFile(root, "Assets/A/Code.cs", "class Code {}\n")
+        try writeFile(root, "Assets/B/Code.cs", "class Code2 {}\n")
+        try writeFile(root, "Assets/C/Code.cs", "class Code3 {}\n")
+        try writeFile(root, "Assets/D/Code.cs", "class Code4 {}\n")
         try writeFile(root, "Assets/E/Code.cs", "class Code5 {}\n")
 
         let gen = SolutionGenerator()
 
-        // Prod: only Runtime and PlatformLib (runtime + matching platform).
         let prodResult = try gen.generate(options: GenerateOptions(
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .prod
         ))
@@ -499,7 +470,6 @@ final class SolutionGeneratorTests: XCTestCase {
         })
         XCTAssertEqual(prodNames, ["Runtime", "PlatformLib"])
 
-        // Editor: all 5 projects.
         let editorResult = try gen.generate(options: GenerateOptions(
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor
         ))

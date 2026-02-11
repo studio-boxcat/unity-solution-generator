@@ -61,7 +61,6 @@ struct Generate: ParsableCommand {
         let result = try generator.generate(options: options)
 
         if platform == nil {
-            // No platform: just show scan stats.
             print("Source mapping summary:")
             for (project, count) in result.stats.patternCountByProject.sorted(by: { $0.key < $1.key }) {
                 print("  - \(project): \(count) patterns")
@@ -108,9 +107,9 @@ struct ExtractTemplates: ParsableCommand {
     }
 }
 
-private func resolveProjectRoot(_ path: String?) -> URL {
+private func resolveProjectRoot(_ path: String?) -> String {
     if let path {
-        return URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL
+        return URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path
     }
-    return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    return FileManager.default.currentDirectoryPath
 }

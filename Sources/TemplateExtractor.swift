@@ -1,10 +1,10 @@
-import Foundation
+import Darwin
 
 struct ExtractTemplatesOptions: Sendable {
-    let projectRoot: URL
+    let projectRoot: String
     let generatorRoot: String
 
-    init(projectRoot: URL, generatorRoot: String = "Library/UnitySolutionGenerator") {
+    init(projectRoot: String, generatorRoot: String = "Library/UnitySolutionGenerator") {
         self.projectRoot = projectRoot
         self.generatorRoot = generatorRoot
     }
@@ -15,37 +15,31 @@ struct ExtractTemplatesOptions: Sendable {
 /// the generator can later fill in from the filesystem scan.
 struct TemplateExtractor {
     static func extract(options: ExtractTemplatesOptions) throws -> [String] {
-        let fileManager = FileManager.default
-        let projectRoot = options.projectRoot.standardizedFileURL
+        let projectRoot = resolveRealPath(options.projectRoot)
         let generatorRoot = options.generatorRoot
 
         // Find .sln and parse projects.
-        let slnURL = try findSolutionFile(projectRoot: projectRoot, fileManager: fileManager)
-        let slnContent = try String(contentsOf: slnURL, encoding: .utf8)
+        let slnPath = try findSolutionFile(projectRoot: projectRoot)
+        let slnContent = try readFile(slnPath)
         let slnEntries = parseSolutionProjects(slnContent)
         guard !slnEntries.isEmpty else {
-            throw GeneratorError.noProjectsInSolution(slnURL)
+            throw GeneratorError.noProjectsInSolution(slnPath)
         }
-
-        let projectRootPath = projectRoot.path
 
         var updatedFiles: [String] = []
 
-        // Refresh csproj templates.
         for entry in slnEntries {
-            let csprojURL = projectRoot.appendingPathComponent(entry.csprojPath)
-            guard fileManager.fileExists(atPath: csprojURL.path) else {
-                continue
-            }
+            let csprojPath = joinPath(projectRoot, entry.csprojPath)
+            guard fileExists(csprojPath) else { continue }
 
-            let content = try String(contentsOf: csprojURL, encoding: .utf8)
-            let template = templatizeCsproj(content, projectRoot: projectRootPath)
+            let content = try readFile(csprojPath)
+            let template = templatizeCsproj(content, projectRoot: projectRoot)
 
-            let templatePath = "\(generatorRoot)/templates/\(entry.csprojPath).template"
-            let templateURL = projectRoot.appendingPathComponent(templatePath)
-            try fileManager.createDirectory(at: templateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if try writeIfChanged(content: template, to: templateURL) {
-                updatedFiles.append(templatePath)
+            let templateRelPath = "\(generatorRoot)/templates/\(entry.csprojPath).template"
+            let templatePath = joinPath(projectRoot, templateRelPath)
+            createDirectoryRecursive(parentDirectory(of: templatePath))
+            if try writeFileIfChanged(templatePath, template) {
+                updatedFiles.append(templateRelPath)
             }
         }
 
@@ -59,16 +53,12 @@ private struct SlnProjectEntry {
     let csprojPath: String
 }
 
-private func findSolutionFile(projectRoot: URL, fileManager: FileManager) throws -> URL {
-    let contents = try fileManager.contentsOfDirectory(
-        at: projectRoot,
-        includingPropertiesForKeys: [.isRegularFileKey],
-        options: [.skipsHiddenFiles]
-    )
-    guard let slnURL = contents.first(where: { $0.pathExtension == "sln" }) else {
+private func findSolutionFile(projectRoot: String) throws -> String {
+    let entries = listDirectory(projectRoot)
+    guard let slnFile = entries.first(where: { $0.hasSuffix(".sln") }) else {
         throw GeneratorError.noSolutionFound(projectRoot)
     }
-    return slnURL
+    return joinPath(projectRoot, slnFile)
 }
 
 private func parseSolutionProjects(_ content: String) -> [SlnProjectEntry] {
@@ -107,10 +97,6 @@ private func parseSolutionProjects(_ content: String) -> [SlnProjectEntry] {
 // MARK: - Templatization
 
 /// Replace dynamic sections of a Unity-generated .csproj with placeholders.
-/// Strips XML comments, <None Include> entries, <Compile Include> lines, and
-/// <ProjectReference> blocks, inserting {{SOURCE_FOLDERS}} and
-/// {{PROJECT_REFERENCES}} placeholders. Absolute paths are replaced with
-/// {{PROJECT_ROOT}}.
 private func templatizeCsproj(_ content: String, projectRoot: String) -> String {
     var lines: [String] = []
     var sourcePlaceholderEmitted = false
@@ -167,4 +153,3 @@ private func templatizeCsproj(_ content: String, projectRoot: String) -> String 
 
     return lines.joined(separator: "\n")
 }
-
