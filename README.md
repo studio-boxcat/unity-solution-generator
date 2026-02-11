@@ -25,7 +25,7 @@ unity-solution-generator generate . ios editor            # ios-editor
 unity-solution-generator generate . android prod          # android-prod
 ```
 
-Positional args: `<command> <unity-root> <platform> <config>`. Generator root is always `Library/UnitySolutionGenerator`.
+Positional args: `<command> <unity-root> <platform> <config>`.
 
 ### Platform + configuration
 

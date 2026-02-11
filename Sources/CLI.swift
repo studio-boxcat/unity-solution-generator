@@ -29,7 +29,7 @@ struct CLI {
 
         do {
             let updated = try TemplateExtractor.extract(
-                options: ExtractTemplatesOptions(projectRoot: resolveRealPath(args[0]))
+                options: ExtractTemplatesOptions(projectRoot: args[0])
             )
             if updated.isEmpty {
                 print("No changes.")
@@ -74,7 +74,7 @@ struct CLI {
 
         do {
             let result = try SolutionGenerator().generate(options: GenerateOptions(
-                projectRoot: resolveRealPath(projectRoot),
+                projectRoot: projectRoot,
                 verbose: verbose,
                 platform: platform,
                 buildConfig: buildConfig

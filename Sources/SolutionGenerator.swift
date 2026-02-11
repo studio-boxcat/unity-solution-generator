@@ -58,7 +58,7 @@ enum GeneratorError: Error, CustomStringConvertible {
         case .duplicateAsmDefName(let name):
             return "Duplicate asmdef name: '\(name)'"
         case .noTemplatesFound(let path):
-            return "No templates found in: \(path)\nRun 'unity-solution-generator init <unity-root>' first."
+            return "No templates found in: \(path)\nEnsure the Unity project has a .sln file, then run 'unity-solution-generator init <unity-root>'."
         }
     }
 }
