@@ -71,7 +71,7 @@ struct Generate: ParsableCommand {
                 print("Unresolved directories: \(result.stats.unresolvedDirCount)")
             }
         } else if let slnPath = result.variantSlnPath {
-            print(root.appendingPathComponent(slnPath).path)
+            print(slnPath)
         }
 
         for warning in result.warnings {
