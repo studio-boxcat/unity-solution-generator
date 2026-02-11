@@ -34,8 +34,8 @@ Two orthogonal axes: **platform** (`ios`, `android`) and **configuration** (`pro
 | Config | Projects | DefineConstants (via Directory.Build.props) |
 |--------|----------|---------------------------------------------|
 | `prod` | runtime only | platform defines only |
-| `dev` | runtime only | platform + `DEBUG;TRACE` |
-| `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE` |
+| `dev` | runtime only | platform + `DEBUG;TRACE;UNITY_ASSERTIONS` |
+| `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE;UNITY_ASSERTIONS` |
 
 Dynamic defines are injected via `Directory.Build.props` per variant — templates contain only static defines with a `$(DefineConstants)` reference. Prod/dev variants exclude `<ProjectReference>` entries for editor/test projects during rendering.
 
@@ -76,7 +76,7 @@ done; done
 
 1. **Init** reads Unity-generated `.csproj` files and strips dynamic parts: `<Compile>`, `<ProjectReference>`, dynamic defines, and `</Project>` are removed. Absolute paths become `$(ProjectRoot)`, dynamic defines become `$(DefineConstants)`. Everything else (DLL references, analyzers, build settings) is preserved as-is.
 2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for directories containing `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, and appends `<ItemGroup>` (compile patterns + project references) + `</Project>` to each template fragment. The `.sln` is generated from a minimal template.
-3. **Directory.Build.props** is written per variant with `$(ProjectRoot)` (absolute path) and `$(DefineConstants)` (platform + config defines). MSBuild imports this before the `.csproj`, so `$(DefineConstants)` in templates inherits the variant-specific values.
+3. **Directory.Build.props** is written per variant with `$(ProjectRoot)` (absolute path) and `$(DefineConstants)` (platform + config defines). Both the props file and the templates use `$(DefineConstants)` with append semantics so static and dynamic defines are combined correctly.
 
 ### Category inference
 
