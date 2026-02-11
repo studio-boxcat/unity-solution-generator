@@ -290,19 +290,13 @@ final class SolutionGenerator {
 
     func stripEditorDefines(_ content: String, debugBuild: Bool) -> String {
         var result = content
-        let editorPattern = "UNITY_EDITOR(_64|_OSX)?;"
-        if let regex = try? NSRegularExpression(pattern: editorPattern) {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: ""
-            )
-        }
+        // Order matters: strip suffixed variants before the base.
+        result = result.replacingOccurrences(of: "UNITY_EDITOR_64;", with: "")
+        result = result.replacingOccurrences(of: "UNITY_EDITOR_OSX;", with: "")
+        result = result.replacingOccurrences(of: "UNITY_EDITOR;", with: "")
         if !debugBuild {
-            let debugPattern = "(DEBUG|TRACE);"
-            if let regex = try? NSRegularExpression(pattern: debugPattern) {
-                result = regex.stringByReplacingMatches(
-                    in: result, range: NSRange(result.startIndex..., in: result), withTemplate: ""
-                )
-            }
+            result = result.replacingOccurrences(of: "DEBUG;", with: "")
+            result = result.replacingOccurrences(of: "TRACE;", with: "")
         }
         return result
     }

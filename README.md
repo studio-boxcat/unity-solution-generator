@@ -106,6 +106,19 @@ Instead of listing every `.cs` file individually, the generator emits per-direct
 
 Directories ending with `~` or starting with `.` are excluded from scanning.
 
+## Performance
+
+Measured on meow-tower (19 projects, ~2.8k `.cs` dirs) with `hyperfine`, M1 Max:
+
+| Command | Time |
+|---------|------|
+| `extract-templates` | 122 ms |
+| `generate` (scan only) | 43 ms |
+| `generate --ios` (prod) | 53 ms |
+| `generate --ios --editor` | 46 ms |
+
+Filesystem scan (parallel POSIX readdir) dominates at ~43ms.
+
 ## Unity project setup
 
 After cloning, or after Unity upgrades / package changes, re-extract templates:
