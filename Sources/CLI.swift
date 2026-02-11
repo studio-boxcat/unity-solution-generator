@@ -109,8 +109,7 @@ struct ExtractTemplates: ParsableCommand {
     func run() throws {
         let root = resolveProjectRoot(projectRoot)
         let options = ExtractTemplatesOptions(projectRoot: root, templateRoot: templateRoot)
-        let generator = SolutionGenerator()
-        let updated = try generator.extractTemplates(options: options)
+        let updated = try TemplateExtractor.extract(options: options)
 
         if !updated.isEmpty {
             print("Extracted \(updated.count) template(s):")
