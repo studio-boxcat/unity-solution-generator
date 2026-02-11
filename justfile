@@ -1,7 +1,7 @@
 set shell := ["bash", "-cu"]
 
 pkg := justfile_directory()
-bin := pkg / ".build/release/unity-solution-generator"
+bin := pkg / "dist/unity-solution-generator"
 
 # List available recipes
 default:
@@ -10,7 +10,7 @@ default:
 # Build release binary
 build:
     swift build --package-path "{{pkg}}" -c release
-    strip "{{bin}}"
+    strip -o "{{bin}}" "{{pkg}}/.build/release/unity-solution-generator"
 
 # Install to ~/.local/bin
 install: build
