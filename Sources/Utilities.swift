@@ -58,7 +58,3 @@ func writeIfChanged(content: String, to url: URL) throws -> Bool {
     try content.write(to: url, atomically: true, encoding: .utf8)
     return true
 }
-
-func modificationDate(of url: URL) -> Date? {
-    try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
-}

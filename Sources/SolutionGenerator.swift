@@ -9,17 +9,17 @@ struct ProjectInfo: Sendable {
 
 struct GenerateOptions: Sendable {
     let projectRoot: URL
-    let templateRoot: String
+    let generatorRoot: String
     let verbose: Bool
     let platform: BuildPlatform?
-    let debugBuild: Bool
+    let buildConfig: BuildConfig
 
-    init(projectRoot: URL, templateRoot: String = "Library/UnitySolutionGenerator", verbose: Bool = false, platform: BuildPlatform? = nil, debugBuild: Bool = false) {
+    init(projectRoot: URL, generatorRoot: String = "Library/UnitySolutionGenerator", verbose: Bool = false, platform: BuildPlatform? = nil, buildConfig: BuildConfig = .prod) {
         self.projectRoot = projectRoot
-        self.templateRoot = templateRoot
+        self.generatorRoot = generatorRoot
         self.verbose = verbose
         self.platform = platform
-        self.debugBuild = debugBuild
+        self.buildConfig = buildConfig
     }
 }
 
@@ -28,12 +28,22 @@ enum BuildPlatform: String, Sendable {
     case android
 }
 
+/// Build configuration axis — orthogonal to platform.
+///   - editor: all projects, keeps UNITY_EDITOR + DEBUG/TRACE
+///   - dev:    runtime only, strips UNITY_EDITOR, keeps DEBUG/TRACE
+///   - prod:   runtime only, strips UNITY_EDITOR + DEBUG/TRACE
+enum BuildConfig: String, Sendable {
+    case editor
+    case dev
+    case prod
+}
+
 struct GenerateResult: Sendable {
-    let updatedFiles: [String]
     let warnings: [String]
     let stats: GenerationStats
-    let platformCsprojs: [String]
-    let skippedCsprojs: [String]
+    let variantCsprojs: [String]
+    /// .sln path in variant directory (for `dotnet build <sln> -m`).
+    let variantSlnPath: String?
 }
 
 struct GenerationStats: Sendable {
@@ -46,7 +56,6 @@ enum GeneratorError: Error, CustomStringConvertible {
     case noSolutionFound(URL)
     case noProjectsInSolution(URL)
     case duplicateAsmDefName(String)
-    case noSlnTemplate(URL)
 
     var description: String {
         switch self {
@@ -58,13 +67,43 @@ enum GeneratorError: Error, CustomStringConvertible {
             return "No C# projects found in solution: \(url.path)"
         case .duplicateAsmDefName(let name):
             return "Duplicate asmdef name: '\(name)'"
-        case .noSlnTemplate(let url):
-            return "No .sln.template file found in: \(url.path)"
+
         }
     }
 }
 
-private let csharpProjectTypeGuid = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}"
+struct SlnRenderer {
+    private static let csharpProjectTypeGuid = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}"
+
+    static func render(projects: [ProjectInfo]) -> String {
+        var lines: [String] = [
+            "Microsoft Visual Studio Solution File, Format Version 11.00",
+            "# Visual Studio 2010",
+        ]
+
+        for project in projects {
+            lines.append("Project(\"\(csharpProjectTypeGuid)\") = \"\(project.name)\", \"\(project.csprojPath)\", \"\(project.guid)\"")
+            lines.append("EndProject")
+        }
+
+        lines.append("Global")
+        lines.append("\tGlobalSection(SolutionConfigurationPlatforms) = preSolution")
+        lines.append("\t\tDebug|Any CPU = Debug|Any CPU")
+        lines.append("\tEndGlobalSection")
+        lines.append("\tGlobalSection(ProjectConfigurationPlatforms) = postSolution")
+
+        for project in projects {
+            lines.append("\t\t\(project.guid).Debug|Any CPU.ActiveCfg = Debug|Any CPU")
+            lines.append("\t\t\(project.guid).Debug|Any CPU.Build.0 = Debug|Any CPU")
+        }
+
+        lines.append("\tEndGlobalSection")
+        lines.append("EndGlobal")
+        lines.append("")
+
+        return lines.joined(separator: "\n")
+    }
+}
 
 final class SolutionGenerator {
     private let fileManager: FileManager
@@ -77,13 +116,15 @@ final class SolutionGenerator {
 
     func generate(options: GenerateOptions) throws -> GenerateResult {
         let projectRoot = options.projectRoot.standardizedFileURL
-        let templateRoot = options.templateRoot
+        let generatorRoot = options.generatorRoot
+        let generatorDir = projectRoot.appendingPathComponent(generatorRoot)
+        let templatesDir = generatorDir.appendingPathComponent("templates")
 
         // Scan Unity project layout.
         let scan = try ProjectScanner.scan(projectRoot: projectRoot)
 
         // Discover projects from templates directory.
-        let projects = try discoverProjects(templateRoot: templateRoot, projectRoot: projectRoot)
+        let projects = try discoverProjects(generatorRoot: generatorRoot, templatesDir: templatesDir)
         let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 
         var warnings: [String] = []
@@ -91,16 +132,21 @@ final class SolutionGenerator {
             warnings.append("Unresolved source directories: \(scan.unresolvedDirs.count)")
         }
 
-        var patternsByProject: [String: [String]] = [:]
+        // Relative prefix to reach project root from variant subdirectory.
+        // Variants sit one level below generatorDir, so depth + 1.
+        // e.g. "Library/UnitySolutionGenerator" (depth 2) → "../../../"
+        let variantPrefix = String(repeating: "../", count: generatorRoot.split(separator: "/").count + 1)
 
+        var patternsByProject: [String: [String]] = [:]
         for project in projects {
             let dirs = scan.dirsByProject[project.name] ?? []
             patternsByProject[project.name] = dirs.sorted().map {
-                $0.isEmpty ? "*.cs" : "\($0)/*.cs"
+                $0.isEmpty ? "\(variantPrefix)*.cs" : "\(variantPrefix)\($0)/*.cs"
             }
         }
 
-        var updatedFiles: [String] = []
+        // Render all csprojs in memory from templates.
+        var renderedCsprojs: [(info: ProjectInfo, content: String)] = []
 
         for project in projects {
             let templateURL = projectRoot.appendingPathComponent(project.templatePath)
@@ -110,7 +156,6 @@ final class SolutionGenerator {
 
             let template = try String(contentsOf: templateURL, encoding: .utf8)
             let sourceBlock = renderCompilePatterns(patternsByProject[project.name] ?? [])
-
             let referenceBlock = renderProjectReferences(
                 for: project,
                 asmDefByName: scan.asmDefByName,
@@ -126,30 +171,7 @@ final class SolutionGenerator {
                 ]
             )
 
-            let outputURL = projectRoot.appendingPathComponent(project.csprojPath)
-            if try writeIfChanged(content: rendered, to: outputURL) {
-                updatedFiles.append(project.csprojPath)
-            }
-        }
-
-        // Find and render .sln template.
-        let slnTemplateURL = try findSlnTemplate(templateRoot: templateRoot, projectRoot: projectRoot)
-        let slnTemplate = try String(contentsOf: slnTemplateURL, encoding: .utf8)
-        let slnProjectEntries = renderSolutionProjectEntries(projects: projects)
-        let slnProjectConfigs = renderSolutionProjectConfigs(projects: projects)
-        let slnRendered = renderTemplate(
-            slnTemplate,
-            replacements: [
-                "{{PROJECT_ENTRIES}}": slnProjectEntries,
-                "{{PROJECT_CONFIGS}}": slnProjectConfigs,
-            ]
-        )
-
-        // Derive .sln output path from template name: "Foo.sln.template" → "Foo.sln"
-        let slnName = String(slnTemplateURL.lastPathComponent.dropLast(".template".count))
-        let slnURL = projectRoot.appendingPathComponent(slnName)
-        if try writeIfChanged(content: slnRendered, to: slnURL) {
-            updatedFiles.append(slnName)
+            renderedCsprojs.append((info: project, content: rendered))
         }
 
         let stats = GenerationStats(
@@ -161,129 +183,92 @@ final class SolutionGenerator {
             warnings += scan.unresolvedDirs.prefix(20).map { "Unresolved: \($0)/" }
         }
 
-        // Generate platform variant csprojs when a target platform is specified.
-        var platformCsprojs: [String] = []
-        var skippedCsprojs: [String] = []
-
-        if let platform = options.platform {
-            let (generated, skipped) = try generatePlatformVariants(
-                projectRoot: projectRoot,
-                platform: platform,
-                debugBuild: options.debugBuild,
-                asmDefByName: scan.asmDefByName
-            )
-            platformCsprojs = generated
-            skippedCsprojs = skipped
+        // Without a platform, just scan and report stats.
+        guard let platform = options.platform else {
+            return GenerateResult(warnings: warnings, stats: stats, variantCsprojs: [], variantSlnPath: nil)
         }
 
-        return GenerateResult(
-            updatedFiles: updatedFiles.sorted(),
-            warnings: warnings,
-            stats: stats,
-            platformCsprojs: platformCsprojs,
-            skippedCsprojs: skippedCsprojs
-        )
-    }
+        // Write variant csprojs into {platform}-{config}/ subdirectory.
+        let config = "\(platform.rawValue)-\(options.buildConfig.rawValue)"
+        let variantDir = generatorDir.appendingPathComponent(config)
+        try fileManager.createDirectory(at: variantDir, withIntermediateDirectories: true)
 
-    // MARK: - Platform variant generation
-
-    private func generatePlatformVariants(
-        projectRoot: URL,
-        platform: BuildPlatform,
-        debugBuild: Bool,
-        asmDefByName: [String: AsmDefRecord]
-    ) throws -> (generated: [String], skipped: [String]) {
-        let buildType = debugBuild ? "dev" : "prod"
-        let suffix = ".v.\(platform.rawValue)-\(buildType)"
-
-        // Scan .csproj files at project root.
-        let csprojFiles = try fileManager.contentsOfDirectory(
-            at: projectRoot,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ).filter { $0.pathExtension == "csproj" }
-
-        // Categorize each project.
-        struct CsprojEntry {
-            let name: String
-            let csprojPath: String
-            let category: ProjectCategory
-            let matchesPlatform: Bool
-        }
-
+        // Filter and transform csprojs based on build configuration.
+        let isEditor = options.buildConfig == .editor
         let targetPlatformName = platform == .ios ? "iOS" : "Android"
 
-        var entries: [CsprojEntry] = []
-        for url in csprojFiles {
-            let filename = url.lastPathComponent
-            let name = String(filename.dropLast(".csproj".count))
+        var entriesToWrite: [(info: ProjectInfo, content: String)] = []
+        var nonRuntimeNames: Set<String> = []
 
-            // Skip platform variant files (already generated).
-            if name.contains(".v.") { continue }
+        if isEditor {
+            // Editor: all projects, no filtering.
+            entriesToWrite = renderedCsprojs
+        } else {
+            // Dev/Prod: runtime projects only, matching target platform.
+            for entry in renderedCsprojs {
+                let category: ProjectCategory
+                let matchesPlatform: Bool
+                if let asmDef = scan.asmDefByName[entry.info.name] {
+                    category = asmDef.category
+                    let platforms = asmDef.includePlatforms.filter { $0 != "Editor" }
+                    matchesPlatform = platforms.isEmpty || platforms.contains(targetPlatformName)
+                } else {
+                    category = .runtime
+                    matchesPlatform = true
+                }
 
-            let category: ProjectCategory
-            let matchesPlatform: Bool
-            if let asmDef = asmDefByName[name] {
-                category = asmDef.category
-                let platforms = asmDef.includePlatforms.filter { $0 != "Editor" }
-                matchesPlatform = platforms.isEmpty || platforms.contains(targetPlatformName)
-            } else {
-                category = .runtime
-                matchesPlatform = true
+                if category == .runtime && matchesPlatform {
+                    entriesToWrite.append(entry)
+                } else {
+                    nonRuntimeNames.insert(entry.info.name)
+                }
             }
-            entries.append(CsprojEntry(name: name, csprojPath: filename, category: category, matchesPlatform: matchesPlatform))
         }
 
-        let runtimeEntries = entries.filter { $0.category == .runtime && $0.matchesPlatform }
-        let nonRuntimeNames = Set(entries.filter { $0.category != .runtime || !$0.matchesPlatform }.map(\.name))
+        var variantCsprojs: [String] = []
 
-        var generated: [String] = []
-        var skipped: [String] = []
+        for entry in entriesToWrite {
+            var content = entry.content
 
-        for entry in runtimeEntries {
-            let srcURL = projectRoot.appendingPathComponent(entry.csprojPath)
-            let baseName = String(entry.csprojPath.dropLast(".csproj".count))
-            let dstName = "\(baseName)\(suffix).csproj"
-            let dstURL = projectRoot.appendingPathComponent(dstName)
-
-            // Skip if suffixed file is newer than source (cached).
-            if fileManager.fileExists(atPath: dstURL.path),
-               let srcDate = modificationDate(of: srcURL),
-               let dstDate = modificationDate(of: dstURL),
-               dstDate >= srcDate
-            {
-                skipped.append(dstName)
-                continue
+            if !isEditor {
+                content = stripEditorDefines(content, debugBuild: options.buildConfig == .dev)
+                content = stripNonRuntimeReferences(content, nonRuntimeNames: nonRuntimeNames)
             }
-
-            var content = try String(contentsOf: srcURL, encoding: .utf8)
-            content = stripEditorDefines(content, debugBuild: debugBuild)
             content = swapPlatformDefines(content, platform: platform)
-            content = stripNonRuntimeReferences(content, nonRuntimeNames: nonRuntimeNames)
-            content = rewriteReferenceSuffix(content, suffix: suffix)
-            try content.write(to: dstURL, atomically: true, encoding: .utf8)
-            generated.append(dstName)
+
+            let outputPath = "\(generatorRoot)/\(config)/\(entry.info.csprojPath)"
+            let outputURL = variantDir.appendingPathComponent(entry.info.csprojPath)
+            try writeIfChanged(content: content, to: outputURL)
+            variantCsprojs.append(outputPath)
         }
 
-        return (generated: generated.sorted(), skipped: skipped.sorted())
+        // Write .sln alongside variant csprojs.
+        let slnName = "\(projectRoot.lastPathComponent).sln"
+        let slnContent = SlnRenderer.render(projects: entriesToWrite.map(\.info))
+        let slnURL = variantDir.appendingPathComponent(slnName)
+        try writeIfChanged(content: slnContent, to: slnURL)
+        let slnPath = "\(generatorRoot)/\(config)/\(slnName)"
+
+        return GenerateResult(
+            warnings: warnings,
+            stats: stats,
+            variantCsprojs: variantCsprojs.sorted(),
+            variantSlnPath: slnPath
+        )
     }
 
     // MARK: - Project discovery
 
     private func discoverProjects(
-        templateRoot: String,
-        projectRoot: URL
+        generatorRoot: String,
+        templatesDir: URL
     ) throws -> [ProjectInfo] {
-        let templateDir = projectRoot
-            .appendingPathComponent(templateRoot)
-            .appendingPathComponent("csproj")
-
-        guard fileManager.fileExists(atPath: templateDir.path) else {
+        guard fileManager.fileExists(atPath: templatesDir.path) else {
             return []
         }
 
         let templateFiles = try fileManager.contentsOfDirectory(
-            at: templateDir,
+            at: templatesDir,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ).filter { $0.pathExtension == "template" && $0.lastPathComponent.contains(".csproj.") }
@@ -295,26 +280,10 @@ final class SolutionGenerator {
             return ProjectInfo(
                 name: name,
                 csprojPath: "\(name).csproj",
-                templatePath: "\(templateRoot)/csproj/\(filename)",
+                templatePath: "\(generatorRoot)/templates/\(filename)",
                 guid: deterministicGuid(for: name)
             )
         }.sorted { $0.name < $1.name }
-    }
-
-    private func findSlnTemplate(templateRoot: String, projectRoot: URL) throws -> URL {
-        let dir = projectRoot.appendingPathComponent(templateRoot)
-        guard fileManager.fileExists(atPath: dir.path) else {
-            throw GeneratorError.noSlnTemplate(dir)
-        }
-        let contents = try fileManager.contentsOfDirectory(
-            at: dir,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )
-        guard let template = contents.first(where: { $0.lastPathComponent.hasSuffix(".sln.template") }) else {
-            throw GeneratorError.noSlnTemplate(dir)
-        }
-        return template
     }
 
     // MARK: - Build validation helpers
@@ -363,17 +332,6 @@ final class SolutionGenerator {
         )
     }
 
-    func rewriteReferenceSuffix(_ content: String, suffix: String) -> String {
-        let pattern = #"(<ProjectReference Include=")([^"]+)(\.csproj">)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return content }
-        let escapedSuffix = NSRegularExpression.escapedTemplate(for: suffix)
-        return regex.stringByReplacingMatches(
-            in: content,
-            range: NSRange(content.startIndex..., in: content),
-            withTemplate: "$1$2\(escapedSuffix)$3"
-        )
-    }
-
     // MARK: - Rendering
 
     private func renderCompilePatterns(_ patterns: [String]) -> String {
@@ -409,25 +367,4 @@ final class SolutionGenerator {
         return blocks.joined(separator: "\n")
     }
 
-    private func renderSolutionProjectEntries(projects: [ProjectInfo]) -> String {
-        projects
-            .map { project in
-                [
-                    "Project(\"\(csharpProjectTypeGuid)\") = \"\(project.name)\", \"\(project.csprojPath)\", \"\(project.guid)\"",
-                    "EndProject",
-                ].joined(separator: "\n")
-            }
-            .joined(separator: "\n")
-    }
-
-    private func renderSolutionProjectConfigs(projects: [ProjectInfo]) -> String {
-        projects
-            .map { project in
-                [
-                    "\t\t\(project.guid).Debug|Any CPU.ActiveCfg = Debug|Any CPU",
-                    "\t\t\(project.guid).Debug|Any CPU.Build.0 = Debug|Any CPU",
-                ].joined(separator: "\n")
-            }
-            .joined(separator: "\n")
-    }
 }

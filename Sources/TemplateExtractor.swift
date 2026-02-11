@@ -2,11 +2,11 @@ import Foundation
 
 struct ExtractTemplatesOptions: Sendable {
     let projectRoot: URL
-    let templateRoot: String
+    let generatorRoot: String
 
-    init(projectRoot: URL, templateRoot: String = "Library/UnitySolutionGenerator") {
+    init(projectRoot: URL, generatorRoot: String = "Library/UnitySolutionGenerator") {
         self.projectRoot = projectRoot
-        self.templateRoot = templateRoot
+        self.generatorRoot = generatorRoot
     }
 }
 
@@ -17,13 +17,13 @@ struct TemplateExtractor {
     static func extract(options: ExtractTemplatesOptions) throws -> [String] {
         let fileManager = FileManager.default
         let projectRoot = options.projectRoot.standardizedFileURL
-        let templateRoot = options.templateRoot
+        let generatorRoot = options.generatorRoot
 
         // Find .sln and parse projects.
         let slnURL = try findSolutionFile(projectRoot: projectRoot, fileManager: fileManager)
         let slnContent = try String(contentsOf: slnURL, encoding: .utf8)
         let slnEntries = parseSolutionProjects(slnContent)
-        guard let firstEntry = slnEntries.first else {
+        guard !slnEntries.isEmpty else {
             throw GeneratorError.noProjectsInSolution(slnURL)
         }
 
@@ -41,23 +41,12 @@ struct TemplateExtractor {
             let content = try String(contentsOf: csprojURL, encoding: .utf8)
             let template = templatizeCsproj(content, projectRoot: projectRootPath)
 
-            let templatePath = "\(templateRoot)/csproj/\(entry.csprojPath).template"
+            let templatePath = "\(generatorRoot)/templates/\(entry.csprojPath).template"
             let templateURL = projectRoot.appendingPathComponent(templatePath)
             try fileManager.createDirectory(at: templateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             if try writeIfChanged(content: template, to: templateURL) {
                 updatedFiles.append(templatePath)
             }
-        }
-
-        // Refresh sln template.
-        let slnTemplate = templatizeSln(slnContent, projectTypeGuid: firstEntry.typeGuid)
-        let slnName = slnURL.lastPathComponent
-        let slnBaseName = String(slnName.dropLast(".sln".count))
-        let slnTemplatePath = "\(templateRoot)/\(slnBaseName).sln.template"
-        let slnTemplateURL = projectRoot.appendingPathComponent(slnTemplatePath)
-        try fileManager.createDirectory(at: slnTemplateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if try writeIfChanged(content: slnTemplate, to: slnTemplateURL) {
-            updatedFiles.append(slnTemplatePath)
         }
 
         return updatedFiles.sorted()
@@ -67,7 +56,6 @@ struct TemplateExtractor {
 // MARK: - Solution parsing
 
 private struct SlnProjectEntry {
-    let typeGuid: String
     let csprojPath: String
 }
 
@@ -105,14 +93,13 @@ private func parseSolutionProjects(_ content: String) -> [SlnProjectEntry] {
 
         guard quoted.count >= 3 else { continue }
 
-        let typeGuid = quoted[0]
         let csprojPath = quoted[2]
 
         guard csprojPath.hasSuffix(".csproj"), !csprojPath.contains("/") else {
             continue
         }
 
-        results.append(SlnProjectEntry(typeGuid: typeGuid, csprojPath: csprojPath))
+        results.append(SlnProjectEntry(csprojPath: csprojPath))
     }
     return results
 }
@@ -181,50 +168,3 @@ private func templatizeCsproj(_ content: String, projectRoot: String) -> String 
     return lines.joined(separator: "\n")
 }
 
-/// Replace dynamic sections of a Unity-generated .sln with placeholders.
-/// Collapses Project() blocks into {{PROJECT_ENTRIES}} and per-project
-/// config lines into {{PROJECT_CONFIGS}}.
-private func templatizeSln(_ content: String, projectTypeGuid: String) -> String {
-    var lines: [String] = []
-    var inProjectBlock = false
-    var projectPlaceholderEmitted = false
-    var configPlaceholderEmitted = false
-
-    let projectPrefix = "Project(\"\(projectTypeGuid)\") = "
-
-    for rawLine in content.split(separator: "\n", omittingEmptySubsequences: false) {
-        let line = String(rawLine)
-
-        if line.hasPrefix(projectPrefix) {
-            if !projectPlaceholderEmitted {
-                lines.append("{{PROJECT_ENTRIES}}")
-                projectPlaceholderEmitted = true
-            }
-            inProjectBlock = true
-            continue
-        }
-
-        if inProjectBlock {
-            if line == "Global" {
-                inProjectBlock = false
-                lines.append(line)
-            }
-            continue
-        }
-
-        if line.contains(".Debug|Any CPU.") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("{") && (trimmed.contains("ActiveCfg") || trimmed.contains("Build.0")) {
-                if !configPlaceholderEmitted {
-                    lines.append("{{PROJECT_CONFIGS}}")
-                    configPlaceholderEmitted = true
-                }
-                continue
-            }
-        }
-
-        lines.append(line)
-    }
-
-    return lines.joined(separator: "\n")
-}
