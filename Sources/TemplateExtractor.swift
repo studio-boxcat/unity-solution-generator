@@ -90,11 +90,7 @@ private func parseSolutionProjects(_ content: String) -> [String] {
 
 // MARK: - Templatization
 
-private let dynamicDefines: Set<String> = [
-    "UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_OSX",
-    "DEBUG", "TRACE",
-    "UNITY_ANDROID", "UNITY_IOS", "UNITY_IPHONE",
-]
+private let dynamicDefines = DynamicDefines.all
 
 /// Strip dynamic sections, replace absolute paths with $(ProjectRoot),
 /// strip dynamic defines from DefineConstants, and cut before </Project>.

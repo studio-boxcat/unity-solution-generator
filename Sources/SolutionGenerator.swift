@@ -34,6 +34,24 @@ enum BuildConfig: String, Sendable {
     case prod
 }
 
+/// Defines stripped from templates and injected per-variant via Directory.Build.props.
+enum DynamicDefines {
+    static let platform: [BuildPlatform: [String]] = [
+        .ios: ["UNITY_IOS", "UNITY_IPHONE"],
+        .android: ["UNITY_ANDROID"],
+    ]
+    static let editor = ["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_OSX"]
+    static let debug = ["DEBUG", "TRACE", "UNITY_ASSERTIONS"]
+
+    static let all: Set<String> = {
+        var s = Set<String>()
+        for v in platform.values { s.formUnion(v) }
+        s.formUnion(editor)
+        s.formUnion(debug)
+        return s
+    }()
+}
+
 struct GenerateResult: Sendable {
     let warnings: [String]
     let variantCsprojs: [String]
@@ -265,18 +283,14 @@ struct SolutionGenerator {
         platform: BuildPlatform,
         buildConfig: BuildConfig
     ) -> String {
-        var defines: [String] = []
-        switch platform {
-        case .ios: defines.append(contentsOf: ["UNITY_IOS", "UNITY_IPHONE"])
-        case .android: defines.append("UNITY_ANDROID")
-        }
+        var defines = DynamicDefines.platform[platform] ?? []
         if buildConfig == .editor {
-            defines.append(contentsOf: ["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_OSX"])
+            defines.append(contentsOf: DynamicDefines.editor)
         }
         if buildConfig == .editor || buildConfig == .dev {
-            defines.append(contentsOf: ["DEBUG", "TRACE"])
+            defines.append(contentsOf: DynamicDefines.debug)
         }
-        return "<Project>\n<PropertyGroup>\n<ProjectRoot>\(projectRoot)</ProjectRoot>\n<DefineConstants>\(defines.joined(separator: ";"))</DefineConstants>\n</PropertyGroup>\n</Project>\n"
+        return "<Project>\n<PropertyGroup>\n<ProjectRoot>\(projectRoot)</ProjectRoot>\n<DefineConstants>$(DefineConstants);\(defines.joined(separator: ";"))</DefineConstants>\n</PropertyGroup>\n</Project>\n"
     }
 }
 
