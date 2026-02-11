@@ -14,15 +14,15 @@ Installs `unity-solution-generator` to `~/.local/bin/` (symlink).
 
 | Command | Description |
 |---------|-------------|
+| `init` | Extract `.csproj` templates from Unity-generated project files |
 | `generate` | Regenerate `.csproj`/`.sln` from templates and filesystem |
-| `extract-templates` | Extract `.csproj` templates from Unity-generated project files |
 
 ```bash
+unity-solution-generator init .                           # extract templates
 unity-solution-generator generate . ios prod              # ios-prod
 unity-solution-generator generate . ios dev               # ios-dev
 unity-solution-generator generate . ios editor            # ios-editor
 unity-solution-generator generate . android prod          # android-prod
-unity-solution-generator extract-templates .
 ```
 
 Positional args: `<command> <unity-root> <platform> <config>`. Optional 4th arg sets generator root (default: `Library/UnitySolutionGenerator`).
@@ -74,8 +74,8 @@ done; done
 
 ## How it works
 
-1. **Templates** are Unity-generated `.csproj` files with dynamic parts stripped: `<Compile>`, `<ProjectReference>`, dynamic defines, and `</Project>` are removed. Absolute paths become `$(ProjectRoot)`, dynamic defines become `$(DefineConstants)`. Everything else (DLL references, analyzers, build settings) is preserved as-is. The `.sln` is generated from a minimal template.
-2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for directories containing `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, and appends `<ItemGroup>` (compile patterns + project references) + `</Project>` to each template fragment.
+1. **Init** reads Unity-generated `.csproj` files and strips dynamic parts: `<Compile>`, `<ProjectReference>`, dynamic defines, and `</Project>` are removed. Absolute paths become `$(ProjectRoot)`, dynamic defines become `$(DefineConstants)`. Everything else (DLL references, analyzers, build settings) is preserved as-is.
+2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for directories containing `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, and appends `<ItemGroup>` (compile patterns + project references) + `</Project>` to each template fragment. The `.sln` is generated from a minimal template.
 3. **Directory.Build.props** is written per variant with `$(ProjectRoot)` (absolute path) and `$(DefineConstants)` (platform + config defines). MSBuild imports this before the `.csproj`, so `$(DefineConstants)` in templates inherits the variant-specific values.
 
 ### Category inference
@@ -118,8 +118,8 @@ No Foundation dependency — binary links only against libSystem, libswiftCore, 
 
 ## Unity project setup
 
-After cloning, or after Unity upgrades / package changes, re-extract templates:
+After cloning, or after Unity upgrades / package changes, re-initialize templates:
 
 ```bash
-unity-solution-generator extract-templates .
+unity-solution-generator init .
 ```

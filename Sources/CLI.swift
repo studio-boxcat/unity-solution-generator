@@ -11,14 +11,37 @@ struct CLI {
         }
 
         switch args.first {
+        case "init":
+            args.removeFirst()
+            runInit(args)
         case "generate":
             args.removeFirst()
             runGenerate(args)
-        case "extract-templates":
-            args.removeFirst()
-            runExtractTemplates(args)
         default:
-            die("Unknown command '\(args.first!)'. Use 'generate' or 'extract-templates'.")
+            die("Unknown command '\(args.first!)'. Use 'init' or 'generate'.")
+        }
+    }
+
+    static func runInit(_ args: [String]) {
+        guard !args.isEmpty else {
+            die("init requires: <unity-root> [generator-root]")
+        }
+
+        let projectRoot = args[0]
+        let generatorRoot = args.count > 1 ? args[1] : defaultGeneratorRoot
+
+        do {
+            let updated = try TemplateExtractor.extract(
+                options: ExtractTemplatesOptions(projectRoot: resolveRealPath(projectRoot), generatorRoot: generatorRoot)
+            )
+            if updated.isEmpty {
+                print("No changes.")
+            } else {
+                print("Extracted \(updated.count) template(s):")
+                for file in updated { print("  - \(file)") }
+            }
+        } catch {
+            die("\(error)")
         }
     }
 
@@ -78,29 +101,6 @@ struct CLI {
         }
     }
 
-    static func runExtractTemplates(_ args: [String]) {
-        guard !args.isEmpty else {
-            die("extract-templates requires: <unity-root> [generator-root]")
-        }
-
-        let projectRoot = args[0]
-        let generatorRoot = args.count > 1 ? args[1] : defaultGeneratorRoot
-
-        do {
-            let updated = try TemplateExtractor.extract(
-                options: ExtractTemplatesOptions(projectRoot: resolveRealPath(projectRoot), generatorRoot: generatorRoot)
-            )
-            if updated.isEmpty {
-                print("No changes.")
-            } else {
-                print("Extracted \(updated.count) template(s):")
-                for file in updated { print("  - \(file)") }
-            }
-        } catch {
-            die("\(error)")
-        }
-    }
-
     static func die(_ message: String) -> Never {
         fputs("error: \(message)\n", stderr)
         exit(1)
@@ -109,12 +109,12 @@ struct CLI {
     static func printUsage() {
         print("""
         USAGE:
+          unity-solution-generator init <unity-root> [generator-root]
           unity-solution-generator generate <unity-root> <platform> <config> [generator-root] [options]
-          unity-solution-generator extract-templates <unity-root> [generator-root]
 
         COMMANDS:
+          init                  Extract .csproj templates from Unity-generated project files
           generate              Regenerate .csproj/.sln for a platform+config variant
-          extract-templates     Extract .csproj templates from Unity-generated files
 
         ARGUMENTS:
           unity-root            Unity project root

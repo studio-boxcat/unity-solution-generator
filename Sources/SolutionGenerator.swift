@@ -45,6 +45,7 @@ enum GeneratorError: Error, CustomStringConvertible {
     case noSolutionFound(String)
     case noProjectsInSolution(String)
     case duplicateAsmDefName(String)
+    case noTemplatesFound(String)
 
     var description: String {
         switch self {
@@ -56,6 +57,8 @@ enum GeneratorError: Error, CustomStringConvertible {
             return "No C# projects found in solution: \(path)"
         case .duplicateAsmDefName(let name):
             return "Duplicate asmdef name: '\(name)'"
+        case .noTemplatesFound(let path):
+            return "No templates found in: \(path)\nRun 'unity-solution-generator init <unity-root>' first."
         }
     }
 }
@@ -71,6 +74,9 @@ struct SolutionGenerator {
 
         let scan = try ProjectScanner.scan(projectRoot: projectRoot)
         let projects = discoverProjects(templatesDir: templatesDir)
+        guard !projects.isEmpty else {
+            throw GeneratorError.noTemplatesFound(templatesDir)
+        }
         let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 
         var warnings: [String] = []
