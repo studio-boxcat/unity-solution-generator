@@ -16,20 +16,19 @@ Installs `unity-solution-generator` to `~/.local/bin/` (symlink).
 |---------|-------------|
 | `generate` (default) | Regenerate `.csproj`/`.sln` from templates and filesystem |
 | `extract-templates` | Extract templates from current Unity-generated `.csproj`/`.sln` |
-| `prepare-build` | Generate platform-variant `.csproj` copies for device build validation |
 
 ```bash
 unity-solution-generator -p /path/to/unity-project
 unity-solution-generator extract-templates -p /path/to/unity-project
-unity-solution-generator prepare-build --ios -p /path/to/unity-project
-unity-solution-generator prepare-build --android --debug -p /path/to/unity-project
+unity-solution-generator --ios -p /path/to/unity-project
+unity-solution-generator --android --debug -p /path/to/unity-project
 ```
 
 `-p` / `--project-root` sets the Unity project root. `generate` and `extract-templates` accept `--template-root <path>` (default: `Library/UnitySolutionGenerator`) to override the template directory.
 
 ## Build validation
 
-`prepare-build` generates platform-variant `.csproj` copies that simulate device builds. It:
+When `--ios` or `--android` is passed, `generate` also produces platform-variant `.csproj` copies that simulate device builds. It:
 
 - Includes only runtime projects whose `includePlatforms` matches the target (or has no platform restriction)
 - Strips `UNITY_EDITOR` defines (no editor API on device)
@@ -43,7 +42,7 @@ Output is one `.csproj` path per line to stdout, for piping to `parallel`:
 ```bash
 CACHE=Library/BuildValidation/ios-prod
 mkdir -p "$CACHE"
-unity-solution-generator prepare-build --ios -p . \
+unity-solution-generator --ios -p . \
   | parallel dotnet build {} --no-restore -v q \
       "-p:BaseIntermediateOutputPath=$CACHE/{/.}/"
 ```
@@ -55,7 +54,7 @@ Full validation covers the editor build plus all platform/build-type combination
 ## How it works
 
 1. **Templates** are Unity-generated `.csproj`/`.sln` files with placeholders (`{{SOURCE_FOLDERS}}`, `{{PROJECT_REFERENCES}}`, `{{PROJECT_ROOT}}`) replacing the dynamic parts. Everything else (DLL references, analyzers, build settings, define symbols) is preserved as-is from Unity's output.
-2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, builds per-directory compile patterns, and renders the templates.
+2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for directories containing `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, builds per-directory compile patterns, and renders the templates.
 3. **Project categories** (runtime/editor/test) are inferred from `.asmdef` fields:
 
 ### Category inference
@@ -67,7 +66,7 @@ Full validation covers the editor build plus all platform/build-type combination
 | `defineConstraints` contains `"UNITY_EDITOR"` | **editor** |
 | Everything else | **runtime** |
 
-Platform-specific assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`) are treated as **runtime**, but only included in `prepare-build` when the target platform matches. Projects without `.asmdef` files (legacy assemblies) are treated as **runtime** with no platform restriction.
+Platform-specific assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`) are treated as **runtime**, but only included in platform variant generation when the target platform matches. Projects without `.asmdef` files (legacy assemblies) are treated as **runtime** with no platform restriction.
 
 ### Source ownership resolution
 

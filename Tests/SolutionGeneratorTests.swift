@@ -231,6 +231,22 @@ final class SolutionGeneratorTests: XCTestCase {
         }
     }
 
+    private func writeTemplatesWithDefines(root: URL, projectNames: [String], defines: String = "UNITY_5;UNITY_EDITOR;UNITY_IOS") throws {
+        for name in projectNames {
+            try writeFile(root, "tpl/csproj/\(name).csproj.template", """
+            <Project>
+              <PropertyGroup>
+                <DefineConstants>\(defines)</DefineConstants>
+              </PropertyGroup>
+              <ItemGroup>
+            {{SOURCE_FOLDERS}}
+            {{PROJECT_REFERENCES}}
+              </ItemGroup>
+            </Project>
+            """)
+        }
+    }
+
     // MARK: - Assertion helpers
 
     private func assertCompileSet(root: URL, csprojPath: String, expected: Set<String>) throws {
@@ -343,7 +359,7 @@ final class SolutionGeneratorTests: XCTestCase {
         try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
     }
 
-    // MARK: - prepareBuild tests
+    // MARK: - Build transform unit tests
 
     func testStripEditorDefines() {
         let gen = SolutionGenerator()
@@ -402,13 +418,18 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertFalse(result.contains("\"Core.csproj\""))
     }
 
-    func testPrepareBuildCategoryFiltering() throws {
+    // MARK: - Platform variant integration tests
+
+    func testPlatformVariantCategoryFiltering() throws {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
+        try writeBaseProjectFiles(root: root)
+        try writeTemplatesWithDefines(root: root, projectNames: ["Runtime", "MyEditor", "MyTests"])
 
-        // Write asmdef files with category-determining fields
-        try writeFile(root, "Assets/Assemblies/Runtime/Runtime.asmdef", "{\"name\":\"Runtime\"}\n")
+        try writeFile(root, "Assets/Assemblies/Runtime/Runtime.asmdef", """
+        {"name":"Runtime","references":["MyEditor"]}
+        """)
         try writeFile(root, "Assets/Assemblies/MyEditor/MyEditor.asmdef", """
         {"name":"MyEditor","includePlatforms":["Editor"]}
         """)
@@ -416,63 +437,50 @@ final class SolutionGeneratorTests: XCTestCase {
         {"name":"MyTests","defineConstraints":["UNITY_INCLUDE_TESTS"]}
         """)
 
-        // Write minimal csprojs for prepare-build to read
-        let csprojContent = """
-        <Project>
-          <PropertyGroup>
-            <DefineConstants>UNITY_5;UNITY_EDITOR;UNITY_IOS</DefineConstants>
-          </PropertyGroup>
-          <ItemGroup>
-            <ProjectReference Include="MyEditor.csproj">
-            </ProjectReference>
-          </ItemGroup>
-        </Project>
-        """
-        try writeFile(root, "Runtime.csproj", csprojContent)
-        try writeFile(root, "MyEditor.csproj", csprojContent)
-        try writeFile(root, "MyTests.csproj", csprojContent)
+        try writeFile(root, "Assets/Assemblies/Runtime/Foo.cs", "class Foo {}\n")
+        try writeFile(root, "Assets/Assemblies/MyEditor/Bar.cs", "class Bar {}\n")
+        try writeFile(root, "Assets/Assemblies/MyTests/Baz.cs", "class Baz {}\n")
 
         let gen = SolutionGenerator()
-        let result = try gen.prepareBuild(options: PrepareBuildOptions(
-            projectRoot: root, platform: .ios
+        let result = try gen.generate(options: GenerateOptions(
+            projectRoot: root, templateRoot: templateRoot, platform: .ios
         ))
 
-        // Only runtime project should get a variant
-        XCTAssertEqual(result.generatedCsprojs.count, 1)
-        XCTAssertTrue(result.generatedCsprojs[0].hasPrefix("Runtime"))
-        XCTAssertTrue(result.generatedCsprojs[0].contains(".v.ios-prod"))
+        // Only runtime project should get a variant.
+        XCTAssertEqual(result.platformCsprojs.count, 1)
+        XCTAssertTrue(result.platformCsprojs[0].hasPrefix("Runtime"))
+        XCTAssertTrue(result.platformCsprojs[0].contains(".v.ios-prod"))
 
-        // Verify editor defines stripped and editor ref removed
-        let variant = try readFile(root, result.generatedCsprojs[0])
+        // Verify editor defines stripped and editor ref removed.
+        let variant = try readFile(root, result.platformCsprojs[0])
         XCTAssertFalse(variant.contains("UNITY_EDITOR"))
         XCTAssertFalse(variant.contains("MyEditor.csproj\">"))
     }
 
-    func testPrepareBuildSkipsFreshCsproj() throws {
+    func testPlatformVariantSkipsFreshCsproj() throws {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
+        try writeBaseProjectFiles(root: root)
+        try writeTemplatesWithDefines(root: root, projectNames: ["Lib"])
 
-        // Runtime asmdef (no includePlatforms/defineConstraints = runtime)
         try writeFile(root, "Assets/Assemblies/Lib/Lib.asmdef", "{\"name\":\"Lib\"}\n")
-
-        let csproj = "<Project><PropertyGroup><DefineConstants>UNITY_5;UNITY_EDITOR;UNITY_IOS</DefineConstants></PropertyGroup></Project>"
-        try writeFile(root, "Lib.csproj", csproj)
+        try writeFile(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n")
 
         let gen = SolutionGenerator()
 
-        // First run generates
-        let first = try gen.prepareBuild(options: PrepareBuildOptions(
-            projectRoot: root, platform: .ios
+        // First run generates.
+        let first = try gen.generate(options: GenerateOptions(
+            projectRoot: root, templateRoot: templateRoot, platform: .ios
         ))
-        XCTAssertEqual(first.generatedCsprojs.count, 1)
+        XCTAssertEqual(first.platformCsprojs.count, 1)
         XCTAssertEqual(first.skippedCsprojs.count, 0)
 
-        // Second run skips (suffixed file is newer)
-        let second = try gen.prepareBuild(options: PrepareBuildOptions(
-            projectRoot: root, platform: .ios
+        // Second run skips (suffixed file is newer than source).
+        let second = try gen.generate(options: GenerateOptions(
+            projectRoot: root, templateRoot: templateRoot, platform: .ios
         ))
-        XCTAssertEqual(second.generatedCsprojs.count, 0)
+        XCTAssertEqual(second.platformCsprojs.count, 0)
         XCTAssertEqual(second.skippedCsprojs.count, 1)
     }
 
@@ -480,39 +488,43 @@ final class SolutionGeneratorTests: XCTestCase {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
+        try writeBaseProjectFiles(root: root)
+        try writeTemplatesWithDefines(root: root,
+            projectNames: ["Runtime", "PlatformLib", "EditorOnly", "EditorConstrained", "PlayTests"],
+            defines: "UNITY_5"
+        )
 
         // Runtime: no special fields
         try writeFile(root, "Assets/A/Runtime.asmdef", "{\"name\":\"Runtime\"}\n")
+        try writeFile(root, "Assets/A/Code.cs", "class Code {}\n")
         // Runtime: platform-specific (iOS + Editor)
         try writeFile(root, "Assets/B/PlatformLib.asmdef", """
         {"name":"PlatformLib","includePlatforms":["iOS","Editor"]}
         """)
+        try writeFile(root, "Assets/B/Code.cs", "class Code2 {}\n")
         // Editor: includePlatforms = ["Editor"]
         try writeFile(root, "Assets/C/EditorOnly.asmdef", """
         {"name":"EditorOnly","includePlatforms":["Editor"]}
         """)
+        try writeFile(root, "Assets/C/Code.cs", "class Code3 {}\n")
         // Editor: defineConstraints = ["UNITY_EDITOR"]
         try writeFile(root, "Assets/D/EditorConstrained.asmdef", """
         {"name":"EditorConstrained","defineConstraints":["UNITY_EDITOR"]}
         """)
+        try writeFile(root, "Assets/D/Code.cs", "class Code4 {}\n")
         // Test: defineConstraints = ["UNITY_INCLUDE_TESTS"]
         try writeFile(root, "Assets/E/PlayTests.asmdef", """
         {"name":"PlayTests","defineConstraints":["UNITY_INCLUDE_TESTS"]}
         """)
-
-        // Write csprojs so prepare-build can categorize
-        let csproj = "<Project><PropertyGroup><DefineConstants>UNITY_5</DefineConstants></PropertyGroup></Project>"
-        for name in ["Runtime", "PlatformLib", "EditorOnly", "EditorConstrained", "PlayTests"] {
-            try writeFile(root, "\(name).csproj", csproj)
-        }
+        try writeFile(root, "Assets/E/Code.cs", "class Code5 {}\n")
 
         let gen = SolutionGenerator()
-        let result = try gen.prepareBuild(options: PrepareBuildOptions(
-            projectRoot: root, platform: .ios
+        let result = try gen.generate(options: GenerateOptions(
+            projectRoot: root, templateRoot: templateRoot, platform: .ios
         ))
 
-        // Only Runtime and PlatformLib should be treated as runtime
-        let generatedNames = Set(result.generatedCsprojs.map {
+        // Only Runtime and PlatformLib should be treated as runtime.
+        let generatedNames = Set(result.platformCsprojs.map {
             String($0.prefix(while: { $0 != "." }))
         })
         XCTAssertEqual(generatedNames, ["Runtime", "PlatformLib"])

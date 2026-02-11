@@ -1,11 +1,5 @@
 import Foundation
 
-enum ProjectCategory: String, Sendable {
-    case runtime
-    case editor
-    case test
-}
-
 struct ProjectInfo: Sendable {
     let name: String
     let csprojPath: String
@@ -17,11 +11,15 @@ struct GenerateOptions: Sendable {
     let projectRoot: URL
     let templateRoot: String
     let verbose: Bool
+    let platform: BuildPlatform?
+    let debugBuild: Bool
 
-    init(projectRoot: URL, templateRoot: String = "Library/UnitySolutionGenerator", verbose: Bool = false) {
+    init(projectRoot: URL, templateRoot: String = "Library/UnitySolutionGenerator", verbose: Bool = false, platform: BuildPlatform? = nil, debugBuild: Bool = false) {
         self.projectRoot = projectRoot
         self.templateRoot = templateRoot
         self.verbose = verbose
+        self.platform = platform
+        self.debugBuild = debugBuild
     }
 }
 
@@ -40,27 +38,12 @@ enum BuildPlatform: String, Sendable {
     case android
 }
 
-struct PrepareBuildOptions: Sendable {
-    let projectRoot: URL
-    let platform: BuildPlatform
-    let debugBuild: Bool
-
-    init(projectRoot: URL, platform: BuildPlatform, debugBuild: Bool = false) {
-        self.projectRoot = projectRoot
-        self.platform = platform
-        self.debugBuild = debugBuild
-    }
-}
-
-struct PrepareBuildResult: Sendable {
-    let generatedCsprojs: [String]
-    let skippedCsprojs: [String]
-}
-
 struct GenerateResult: Sendable {
     let updatedFiles: [String]
     let warnings: [String]
     let stats: GenerationStats
+    let platformCsprojs: [String]
+    let skippedCsprojs: [String]
 }
 
 struct GenerationStats: Sendable {
@@ -91,108 +74,13 @@ enum GeneratorError: Error, CustomStringConvertible {
     }
 }
 
-struct AsmDefRecord: Sendable {
-    let name: String
-    let directory: String
-    let references: [String]
-    let category: ProjectCategory
-    let includePlatforms: [String]
-}
-
-struct AsmRefRecord: Sendable {
-    let directory: String
-    let reference: String
-}
-
-struct RawAsmDef: Decodable {
-    let name: String
-    let references: [String]?
-    let includePlatforms: [String]?
-    let defineConstraints: [String]?
-}
-
-struct RawAsmRef: Decodable {
-    let reference: String
-}
-
-struct ProjectFileScan: Sendable {
-    let csDirs: [String]
-    let asmDefPaths: [String]
-    let asmRefPaths: [String]
-}
-
 private let csharpProjectTypeGuid = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}"
-
-// MARK: - Parallel filesystem scan (POSIX readdir)
-
-private struct SendablePtr<T>: @unchecked Sendable {
-    let ptr: UnsafeMutablePointer<T>
-    subscript(index: Int) -> T {
-        get { ptr[index] }
-        nonmutating set { ptr[index] = newValue }
-    }
-}
-
-private struct ScanBucket {
-    var csDirs: [String] = []
-    var asmDef: [String] = []
-    var asmRef: [String] = []
-}
-
-private func posixScanDir(_ dirPath: String, prefixLen: Int, bucket: inout ScanBucket) {
-    guard let dir = opendir(dirPath) else { return }
-    defer { closedir(dir) }
-
-    var hasCS = false
-
-    while let entry = readdir(dir) {
-        let dType = entry.pointee.d_type
-        var d_name = entry.pointee.d_name
-        let name = withUnsafePointer(to: &d_name) {
-            String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
-        }
-
-        if name.first == "." { continue }
-        if name.hasSuffix("~") { continue }
-
-        let childPath = "\(dirPath)/\(name)"
-
-        var isDir = dType == DT_DIR
-        var isFile = dType == DT_REG
-
-        if dType == DT_LNK || dType == DT_UNKNOWN {
-            var statBuf = stat()
-            guard stat(childPath, &statBuf) == 0 else { continue }
-            isDir = (statBuf.st_mode & S_IFMT) == S_IFDIR
-            isFile = (statBuf.st_mode & S_IFMT) == S_IFREG
-        }
-
-        if isDir {
-            posixScanDir(childPath, prefixLen: prefixLen, bucket: &bucket)
-        } else if isFile {
-            if name.hasSuffix(".cs") {
-                hasCS = true
-            } else if name.hasSuffix(".asmdef") {
-                bucket.asmDef.append(String(childPath.dropFirst(prefixLen)))
-            } else if name.hasSuffix(".asmref") {
-                bucket.asmRef.append(String(childPath.dropFirst(prefixLen)))
-            }
-        }
-    }
-
-    if hasCS {
-        let relDir = dirPath.count > prefixLen ? String(dirPath.dropFirst(prefixLen)) : ""
-        bucket.csDirs.append(relDir)
-    }
-}
 
 final class SolutionGenerator {
     private let fileManager: FileManager
-    private let decoder: JSONDecoder
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        self.decoder = JSONDecoder()
     }
 
     // MARK: - Generate
@@ -201,52 +89,22 @@ final class SolutionGenerator {
         let projectRoot = options.projectRoot.standardizedFileURL
         let templateRoot = options.templateRoot
 
-        // Single filesystem walk for .cs, .asmdef, and .asmref files.
-        let scan = try scanProjectFiles(projectRoot: projectRoot, roots: ["Assets", "Packages"])
-
-        let asmDefs = try loadAsmDefsFromPaths(scan.asmDefPaths, projectRoot: projectRoot)
-        let asmRefs = try loadAsmRefsFromPaths(scan.asmRefPaths, projectRoot: projectRoot)
-        let asmDefByName = try buildUniqueMap(asmDefs, key: \.name)
-
-        // Build assembly root map: directory → assembly name.
-        var assemblyRoots: [String: String] = [:]
-        for (name, record) in asmDefByName {
-            assemblyRoots[record.directory] = name
-        }
-        for asmRef in asmRefs {
-            guard asmDefByName[asmRef.reference] != nil else { continue }
-            if assemblyRoots[asmRef.directory] == nil {
-                assemblyRoots[asmRef.directory] = asmRef.reference
-            }
-        }
-
-        // Assign source directories to projects.
-        var dirsByProject: [String: [String]] = [:]
-        var unresolvedDirs: [String] = []
-
-        for dir in scan.csDirs {
-            if let owner = findAssemblyOwner(directory: dir, assemblyRoots: assemblyRoots) {
-                dirsByProject[owner, default: []].append(dir)
-            } else if let legacy = resolveLegacyProject(forDirectory: dir) {
-                dirsByProject[legacy, default: []].append(dir)
-            } else {
-                unresolvedDirs.append(dir)
-            }
-        }
+        // Scan Unity project layout.
+        let scan = try ProjectScanner.scan(projectRoot: projectRoot)
 
         // Discover projects from templates directory.
         let projects = try discoverProjects(templateRoot: templateRoot, projectRoot: projectRoot)
         let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 
         var warnings: [String] = []
-        if !unresolvedDirs.isEmpty {
-            warnings.append("Unresolved source directories: \(unresolvedDirs.count)")
+        if !scan.unresolvedDirs.isEmpty {
+            warnings.append("Unresolved source directories: \(scan.unresolvedDirs.count)")
         }
 
         var patternsByProject: [String: [String]] = [:]
 
         for project in projects {
-            let dirs = dirsByProject[project.name] ?? []
+            let dirs = scan.dirsByProject[project.name] ?? []
             patternsByProject[project.name] = dirs.sorted().map {
                 $0.isEmpty ? "*.cs" : "\($0)/*.cs"
             }
@@ -265,7 +123,7 @@ final class SolutionGenerator {
 
             let referenceBlock = renderProjectReferences(
                 for: project,
-                asmDefByName: asmDefByName,
+                asmDefByName: scan.asmDefByName,
                 projectByName: projectByName
             )
 
@@ -306,14 +164,35 @@ final class SolutionGenerator {
 
         let stats = GenerationStats(
             patternCountByProject: patternsByProject.mapValues(\.count),
-            unresolvedDirCount: unresolvedDirs.count
+            unresolvedDirCount: scan.unresolvedDirs.count
         )
 
         if options.verbose {
-            warnings += unresolvedDirs.prefix(20).map { "Unresolved: \($0)/" }
+            warnings += scan.unresolvedDirs.prefix(20).map { "Unresolved: \($0)/" }
         }
 
-        return GenerateResult(updatedFiles: updatedFiles.sorted(), warnings: warnings, stats: stats)
+        // Generate platform variant csprojs when a target platform is specified.
+        var platformCsprojs: [String] = []
+        var skippedCsprojs: [String] = []
+
+        if let platform = options.platform {
+            let (generated, skipped) = try generatePlatformVariants(
+                projectRoot: projectRoot,
+                platform: platform,
+                debugBuild: options.debugBuild,
+                asmDefByName: scan.asmDefByName
+            )
+            platformCsprojs = generated
+            skippedCsprojs = skipped
+        }
+
+        return GenerateResult(
+            updatedFiles: updatedFiles.sorted(),
+            warnings: warnings,
+            stats: stats,
+            platformCsprojs: platformCsprojs,
+            skippedCsprojs: skippedCsprojs
+        )
     }
 
     // MARK: - Extract Templates
@@ -366,17 +245,16 @@ final class SolutionGenerator {
         return updatedFiles.sorted()
     }
 
-    // MARK: - Prepare Build
+    // MARK: - Platform variant generation
 
-    func prepareBuild(options: PrepareBuildOptions) throws -> PrepareBuildResult {
-        let projectRoot = options.projectRoot.standardizedFileURL
-        let buildType = options.debugBuild ? "dev" : "prod"
-        let suffix = ".v.\(options.platform.rawValue)-\(buildType)"
-
-        // Discover categories from asmdef scan.
-        let scan = try scanProjectFiles(projectRoot: projectRoot, roots: ["Assets", "Packages"])
-        let asmDefs = try loadAsmDefsFromPaths(scan.asmDefPaths, projectRoot: projectRoot)
-        let asmDefByName = try buildUniqueMap(asmDefs, key: \.name)
+    private func generatePlatformVariants(
+        projectRoot: URL,
+        platform: BuildPlatform,
+        debugBuild: Bool,
+        asmDefByName: [String: AsmDefRecord]
+    ) throws -> (generated: [String], skipped: [String]) {
+        let buildType = debugBuild ? "dev" : "prod"
+        let suffix = ".v.\(platform.rawValue)-\(buildType)"
 
         // Scan .csproj files at project root.
         let csprojFiles = try fileManager.contentsOfDirectory(
@@ -393,7 +271,7 @@ final class SolutionGenerator {
             let matchesPlatform: Bool
         }
 
-        let targetPlatformName = options.platform == .ios ? "iOS" : "Android"
+        let targetPlatformName = platform == .ios ? "iOS" : "Android"
 
         var entries: [CsprojEntry] = []
         for url in csprojFiles {
@@ -407,7 +285,6 @@ final class SolutionGenerator {
             let matchesPlatform: Bool
             if let asmDef = asmDefByName[name] {
                 category = asmDef.category
-                // Empty includePlatforms = all platforms. Otherwise must contain the target.
                 let platforms = asmDef.includePlatforms.filter { $0 != "Editor" }
                 matchesPlatform = platforms.isEmpty || platforms.contains(targetPlatformName)
             } else {
@@ -440,18 +317,15 @@ final class SolutionGenerator {
             }
 
             var content = try String(contentsOf: srcURL, encoding: .utf8)
-            content = stripEditorDefines(content, debugBuild: options.debugBuild)
-            content = swapPlatformDefines(content, platform: options.platform)
+            content = stripEditorDefines(content, debugBuild: debugBuild)
+            content = swapPlatformDefines(content, platform: platform)
             content = stripNonRuntimeReferences(content, nonRuntimeNames: nonRuntimeNames)
             content = rewriteReferenceSuffix(content, suffix: suffix)
             try content.write(to: dstURL, atomically: true, encoding: .utf8)
             generated.append(dstName)
         }
 
-        return PrepareBuildResult(
-            generatedCsprojs: generated.sorted(),
-            skippedCsprojs: skipped.sorted()
-        )
+        return (generated: generated.sorted(), skipped: skipped.sorted())
     }
 
     // MARK: - Project discovery
@@ -507,7 +381,6 @@ final class SolutionGenerator {
 
     func stripEditorDefines(_ content: String, debugBuild: Bool) -> String {
         var result = content
-        // Remove UNITY_EDITOR, UNITY_EDITOR_64, UNITY_EDITOR_OSX defines
         let editorPattern = "UNITY_EDITOR(_64|_OSX)?;"
         if let regex = try? NSRegularExpression(pattern: editorPattern) {
             result = regex.stringByReplacingMatches(
@@ -515,7 +388,6 @@ final class SolutionGenerator {
             )
         }
         if !debugBuild {
-            // Strip DEBUG and TRACE defines for release builds
             let debugPattern = "(DEBUG|TRACE);"
             if let regex = try? NSRegularExpression(pattern: debugPattern) {
                 result = regex.stringByReplacingMatches(
@@ -532,7 +404,6 @@ final class SolutionGenerator {
         case .ios:
             result = result.replacingOccurrences(of: "UNITY_ANDROID;", with: "UNITY_IOS;")
         case .android:
-            // Remove legacy alias first, then swap
             result = result.replacingOccurrences(of: "UNITY_IPHONE;", with: "")
             result = result.replacingOccurrences(of: "UNITY_IOS;", with: "UNITY_ANDROID;")
         }
@@ -563,20 +434,6 @@ final class SolutionGenerator {
         )
     }
 
-    // MARK: - Category inference
-
-    private func inferCategory(from rawAsmDef: RawAsmDef) -> ProjectCategory {
-        let constraints = rawAsmDef.defineConstraints ?? []
-        if constraints.contains("UNITY_INCLUDE_TESTS") { return .test }
-
-        let platforms = rawAsmDef.includePlatforms ?? []
-        if platforms.count == 1 && platforms[0] == "Editor" { return .editor }
-
-        if constraints.contains("UNITY_EDITOR") { return .editor }
-
-        return .runtime
-    }
-
     // MARK: - Template extraction
 
     private func templatizeCsproj(_ content: String, projectRoot: String) -> String {
@@ -590,7 +447,6 @@ final class SolutionGenerator {
             let line = String(rawLine)
                 .replacingOccurrences(of: projectRoot, with: "{{PROJECT_ROOT}}")
 
-            // Multi-line comment tracking.
             if inComment {
                 if line.contains("-->") {
                     inComment = false
@@ -604,12 +460,10 @@ final class SolutionGenerator {
                 continue
             }
 
-            // Skip <None Include="..."> entries.
             if line.contains("<None Include=\"") {
                 continue
             }
 
-            // Collapse <ProjectReference> blocks into placeholder.
             if inProjectReference {
                 if line.contains("</ProjectReference>") {
                     inProjectReference = false
@@ -625,7 +479,6 @@ final class SolutionGenerator {
                 continue
             }
 
-            // Collapse <Compile Include="..."> lines into placeholder.
             if line.contains("<Compile Include=\"") {
                 if !sourcePlaceholderEmitted {
                     lines.append("    {{SOURCE_FOLDERS}}")
@@ -651,7 +504,6 @@ final class SolutionGenerator {
         for rawLine in content.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = String(rawLine)
 
-            // Collapse Project blocks.
             if line.hasPrefix(projectPrefix) {
                 if !projectPlaceholderEmitted {
                     lines.append("{{PROJECT_ENTRIES}}")
@@ -669,7 +521,6 @@ final class SolutionGenerator {
                 continue
             }
 
-            // Collapse per-project config lines (GUID.Debug|Any CPU...).
             if line.contains(".Debug|Any CPU.") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("{") && (trimmed.contains("ActiveCfg") || trimmed.contains("Build.0")) {
@@ -740,34 +591,6 @@ final class SolutionGenerator {
         return results
     }
 
-    // MARK: - Source assignment
-
-    private func findAssemblyOwner(directory: String, assemblyRoots: [String: String]) -> String? {
-        var current = directory
-        while true {
-            if let name = assemblyRoots[current] { return name }
-            if current.isEmpty { break }
-            current = parentDirectory(of: current)
-        }
-        return nil
-    }
-
-    private func resolveLegacyProject(forDirectory directory: String) -> String? {
-        let components = directory.split(separator: "/")
-        guard components.first == "Assets" else { return nil }
-
-        let isEditor = components.contains("Editor")
-        let secondDir = components.count > 1 ? components[1] : Substring()
-        let isFirstPass = secondDir == "Plugins"
-            || secondDir == "Standard Assets"
-            || secondDir == "Pro Standard Assets"
-
-        if isEditor {
-            return isFirstPass ? "Assembly-CSharp-Editor-firstpass" : "Assembly-CSharp-Editor"
-        }
-        return isFirstPass ? "Assembly-CSharp-firstpass" : "Assembly-CSharp"
-    }
-
     // MARK: - Rendering
 
     private func renderCompilePatterns(_ patterns: [String]) -> String {
@@ -823,129 +646,5 @@ final class SolutionGenerator {
                 ].joined(separator: "\n")
             }
             .joined(separator: "\n")
-    }
-
-    // MARK: - Filesystem scanning
-
-    private func scanProjectFiles(projectRoot: URL, roots: [String]) throws -> ProjectFileScan {
-        // Use realpath to resolve firmlinks (macOS: /var → /private/var).
-        let rootPath = resolveRealPath(projectRoot.path)
-        let prefixLen = rootPath.count + 1
-
-        // List immediate children of each root; directories become parallel walk targets.
-        var walkTargets: [String] = []
-        var rootBucket = ScanBucket()
-
-        for root in roots {
-            let rootDir = "\(rootPath)/\(root)"
-            guard let dir = opendir(rootDir) else { continue }
-            defer { closedir(dir) }
-
-            var rootHasCS = false
-
-            while let entry = readdir(dir) {
-                let dType = entry.pointee.d_type
-                var d_name = entry.pointee.d_name
-                let name = withUnsafePointer(to: &d_name) {
-                    String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
-                }
-
-                if name.first == "." { continue }
-                if name.hasSuffix("~") { continue }
-
-                let childPath = "\(rootDir)/\(name)"
-
-                var isDir = dType == DT_DIR
-                var isFile = dType == DT_REG
-
-                if dType == DT_LNK || dType == DT_UNKNOWN {
-                    var statBuf = stat()
-                    guard stat(childPath, &statBuf) == 0 else { continue }
-                    isDir = (statBuf.st_mode & S_IFMT) == S_IFDIR
-                    isFile = (statBuf.st_mode & S_IFMT) == S_IFREG
-                }
-
-                if isDir {
-                    walkTargets.append(childPath)
-                } else if isFile {
-                    if name.hasSuffix(".cs") {
-                        rootHasCS = true
-                    } else if name.hasSuffix(".asmdef") {
-                        rootBucket.asmDef.append(String(childPath.dropFirst(prefixLen)))
-                    } else if name.hasSuffix(".asmref") {
-                        rootBucket.asmRef.append(String(childPath.dropFirst(prefixLen)))
-                    }
-                }
-            }
-
-            if rootHasCS {
-                rootBucket.csDirs.append(root)
-            }
-        }
-
-        // Walk each subdirectory in parallel using POSIX readdir.
-        let dirs = walkTargets
-        let count = dirs.count
-        let raw = UnsafeMutablePointer<ScanBucket>.allocate(capacity: count)
-        raw.initialize(repeating: ScanBucket(), count: count)
-        defer { raw.deinitialize(count: count); raw.deallocate() }
-        let buckets = SendablePtr(ptr: raw)
-
-        DispatchQueue.concurrentPerform(iterations: count) { i in
-            var bucket = ScanBucket()
-            posixScanDir(dirs[i], prefixLen: prefixLen, bucket: &bucket)
-            buckets[i] = bucket
-        }
-
-        // Merge results.
-        var csDirs = rootBucket.csDirs
-        var asmDefPaths = rootBucket.asmDef
-        var asmRefPaths = rootBucket.asmRef
-        for i in 0..<count {
-            let b = raw[i]
-            csDirs.append(contentsOf: b.csDirs)
-            asmDefPaths.append(contentsOf: b.asmDef)
-            asmRefPaths.append(contentsOf: b.asmRef)
-        }
-
-        asmDefPaths.sort()
-        asmRefPaths.sort()
-        return ProjectFileScan(csDirs: csDirs, asmDefPaths: asmDefPaths, asmRefPaths: asmRefPaths)
-    }
-
-    private func loadAsmDefsFromPaths(_ paths: [String], projectRoot: URL) throws -> [AsmDefRecord] {
-        try paths.compactMap { path in
-            let url = projectRoot.appendingPathComponent(path)
-            let data = try Data(contentsOf: url)
-            let raw = try decoder.decode(RawAsmDef.self, from: data)
-            return AsmDefRecord(
-                name: raw.name,
-                directory: parentDirectory(of: path),
-                references: raw.references ?? [],
-                category: inferCategory(from: raw),
-                includePlatforms: raw.includePlatforms ?? []
-            )
-        }
-    }
-
-    private func loadAsmRefsFromPaths(_ paths: [String], projectRoot: URL) throws -> [AsmRefRecord] {
-        try paths.compactMap { path in
-            let url = projectRoot.appendingPathComponent(path)
-            let data = try Data(contentsOf: url)
-            let raw = try decoder.decode(RawAsmRef.self, from: data)
-            return AsmRefRecord(directory: parentDirectory(of: path), reference: raw.reference)
-        }
-    }
-
-    private func buildUniqueMap(_ records: [AsmDefRecord], key: KeyPath<AsmDefRecord, String>) throws -> [String: AsmDefRecord] {
-        var map: [String: AsmDefRecord] = [:]
-        for record in records {
-            let k = record[keyPath: key]
-            if map[k] != nil {
-                throw GeneratorError.duplicateAsmDefName(k)
-            }
-            map[k] = record
-        }
-        return map
     }
 }
