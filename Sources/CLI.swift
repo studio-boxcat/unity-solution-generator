@@ -1,115 +1,130 @@
-import ArgumentParser
-import Foundation
+import Darwin
 
 @main
-struct CLI: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "unity-solution-generator",
-        abstract: "Regenerate .csproj/.sln from asmdef/asmref layout.",
-        subcommands: [Generate.self, ExtractTemplates.self],
-        defaultSubcommand: Generate.self
-    )
-}
+struct CLI {
+    static func main() {
+        var args = Array(CommandLine.arguments.dropFirst())
 
-struct Generate: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        abstract: "Generate .csproj files from current layout and templates."
-    )
-
-    @Option(name: .shortAndLong, help: "Project root path.")
-    var projectRoot: String?
-
-    @Option(name: .long, help: "Generator root directory relative to project root.")
-    var generatorRoot: String = "Library/UnitySolutionGenerator"
-
-    @Flag(name: .shortAndLong, help: "Print unresolved source directory samples.")
-    var verbose = false
-
-    @Flag(name: .long, help: "Target iOS platform.")
-    var ios = false
-
-    @Flag(name: .long, help: "Target Android platform.")
-    var android = false
-
-    @Flag(name: .long, help: "Editor configuration (all projects, keeps UNITY_EDITOR, always debug).")
-    var editor = false
-
-    @Flag(name: [.customShort("d"), .long], help: "Dev configuration (keeps DEBUG/TRACE defines).")
-    var debug = false
-
-    mutating func validate() throws {
-        guard !(ios && android) else {
-            throw ValidationError("Specify only one of --ios or --android.")
+        if args.isEmpty || args.contains("--help") || args.contains("-h") {
+            printUsage()
+            return
         }
-        guard !(editor && debug) else {
-            throw ValidationError("--editor and --debug are mutually exclusive.")
+
+        switch args.first {
+        case "generate":
+            args.removeFirst()
+            runGenerate(args)
+        case "extract-templates":
+            args.removeFirst()
+            runExtractTemplates(args)
+        default:
+            die("Unknown command '\(args.first!)'. Use 'generate' or 'extract-templates'.")
         }
     }
 
-    func run() throws {
-        let root = resolveProjectRoot(projectRoot)
-        let platform: BuildPlatform? = ios ? .ios : android ? .android : nil
-        let buildConfig: BuildConfig = editor ? .editor : debug ? .dev : .prod
-        let options = GenerateOptions(
-            projectRoot: root,
-            generatorRoot: generatorRoot,
-            verbose: verbose,
-            platform: platform,
-            buildConfig: buildConfig
-        )
-        let generator = SolutionGenerator()
-        let result = try generator.generate(options: options)
+    static func runGenerate(_ args: [String]) {
+        guard args.count >= 3 else {
+            die("generate requires: <unity-root> <platform> <config> [generator-root] [options]")
+        }
 
-        if platform == nil {
-            print("Source mapping summary:")
-            for (project, count) in result.stats.patternCountByProject.sorted(by: { $0.key < $1.key }) {
-                print("  - \(project): \(count) patterns")
+        let projectRoot = args[0]
+
+        let platform: BuildPlatform
+        switch args[1] {
+        case "ios": platform = .ios
+        case "android": platform = .android
+        default: die("Unknown platform '\(args[1])'. Use 'ios' or 'android'.")
+        }
+
+        let buildConfig: BuildConfig
+        switch args[2] {
+        case "prod": buildConfig = .prod
+        case "dev": buildConfig = .dev
+        case "editor": buildConfig = .editor
+        default: die("Unknown config '\(args[2])'. Use 'prod', 'dev', or 'editor'.")
+        }
+
+        var generatorRoot = defaultGeneratorRoot
+        var verbose = false
+        var i = 3
+        if i < args.count && !args[i].hasPrefix("-") {
+            generatorRoot = args[i]
+            i += 1
+        }
+        while i < args.count {
+            switch args[i] {
+            case "-v", "--verbose": verbose = true
+            default: die("Unknown option: \(args[i])")
             }
+            i += 1
+        }
 
-            if result.stats.unresolvedDirCount > 0 {
-                print("Unresolved directories: \(result.stats.unresolvedDirCount)")
+        do {
+            let result = try SolutionGenerator().generate(options: GenerateOptions(
+                projectRoot: resolveRealPath(projectRoot),
+                generatorRoot: generatorRoot,
+                verbose: verbose,
+                platform: platform,
+                buildConfig: buildConfig
+            ))
+
+            print(result.variantSlnPath)
+
+            for warning in result.warnings {
+                fputs("warning: \(warning)\n", stderr)
             }
-        } else if let slnPath = result.variantSlnPath {
-            print(slnPath)
-        }
-
-        for warning in result.warnings {
-            FileHandle.standardError.write(Data("warning: \(warning)\n".utf8))
+        } catch {
+            die("\(error)")
         }
     }
-}
 
-struct ExtractTemplates: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "extract-templates",
-        abstract: "Extract templates from Unity-generated csproj/sln."
-    )
+    static func runExtractTemplates(_ args: [String]) {
+        guard !args.isEmpty else {
+            die("extract-templates requires: <unity-root> [generator-root]")
+        }
 
-    @Option(name: .shortAndLong, help: "Project root path.")
-    var projectRoot: String?
+        let projectRoot = args[0]
+        let generatorRoot = args.count > 1 ? args[1] : defaultGeneratorRoot
 
-    @Option(name: .long, help: "Generator root directory relative to project root.")
-    var generatorRoot: String = "Library/UnitySolutionGenerator"
-
-    func run() throws {
-        let root = resolveProjectRoot(projectRoot)
-        let options = ExtractTemplatesOptions(projectRoot: root, generatorRoot: generatorRoot)
-        let updated = try TemplateExtractor.extract(options: options)
-
-        if !updated.isEmpty {
-            print("Extracted \(updated.count) template(s):")
-            for file in updated {
-                print("  - \(file)")
+        do {
+            let updated = try TemplateExtractor.extract(
+                options: ExtractTemplatesOptions(projectRoot: resolveRealPath(projectRoot), generatorRoot: generatorRoot)
+            )
+            if updated.isEmpty {
+                print("No changes.")
+            } else {
+                print("Extracted \(updated.count) template(s):")
+                for file in updated { print("  - \(file)") }
             }
-        } else {
-            print("No changes.")
+        } catch {
+            die("\(error)")
         }
     }
-}
 
-private func resolveProjectRoot(_ path: String?) -> String {
-    if let path {
-        return URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path
+    static func die(_ message: String) -> Never {
+        fputs("error: \(message)\n", stderr)
+        exit(1)
     }
-    return FileManager.default.currentDirectoryPath
+
+    static func printUsage() {
+        print("""
+        USAGE:
+          unity-solution-generator generate <unity-root> <platform> <config> [generator-root] [options]
+          unity-solution-generator extract-templates <unity-root> [generator-root]
+
+        COMMANDS:
+          generate              Regenerate .csproj/.sln for a platform+config variant
+          extract-templates     Extract .csproj templates from Unity-generated files
+
+        ARGUMENTS:
+          unity-root            Unity project root
+          platform              ios | android
+          config                prod | dev | editor
+          generator-root        Generator root (default: Library/UnitySolutionGenerator)
+
+        OPTIONS:
+          -v, --verbose         Print unresolved directory samples
+          -h, --help            Show help
+        """)
+    }
 }

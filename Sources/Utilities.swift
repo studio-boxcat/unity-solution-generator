@@ -1,5 +1,17 @@
 import Darwin
 
+let defaultGeneratorRoot = "Library/UnitySolutionGenerator"
+
+// MARK: - Concurrency
+
+struct SendablePtr<T>: @unchecked Sendable {
+    let ptr: UnsafeMutablePointer<T>
+    subscript(index: Int) -> T {
+        get { ptr[index] }
+        nonmutating set { ptr[index] = newValue }
+    }
+}
+
 // MARK: - Path manipulation
 
 func parentDirectory(of path: String) -> String {
@@ -20,19 +32,55 @@ func joinPath(_ base: String, _ component: String) -> String {
 
 // MARK: - String manipulation
 
-func xmlEscape(_ value: String) -> String {
-    value
-        .replacingOccurrences(of: "&", with: "&amp;")
-        .replacingOccurrences(of: "\"", with: "&quot;")
-        .replacingOccurrences(of: "<", with: "&lt;")
-        .replacingOccurrences(of: ">", with: "&gt;")
-        .replacingOccurrences(of: "'", with: "&apos;")
+extension String {
+    func replacingAll(_ target: String, with replacement: String) -> String {
+        guard !target.isEmpty else { return self }
+        var result = ""
+        var searchStart = startIndex
+        while let range = self[searchStart...].firstRange(of: target) {
+            result += self[searchStart..<range.lowerBound]
+            result += replacement
+            searchStart = range.upperBound
+        }
+        result += self[searchStart...]
+        return result
+    }
 }
 
-func renderTemplate(_ template: String, replacements: [String: String]) -> String {
-    replacements.reduce(template) { partial, item in
-        partial.replacingOccurrences(of: item.key, with: item.value)
+func xmlEscape(_ value: String) -> String {
+    var result = ""
+    result.reserveCapacity(value.count)
+    for ch in value {
+        switch ch {
+        case "&": result += "&amp;"
+        case "\"": result += "&quot;"
+        case "<": result += "&lt;"
+        case ">": result += "&gt;"
+        case "'": result += "&apos;"
+        default: result.append(ch)
+        }
     }
+    return result
+}
+
+func trimWhitespace(_ s: String) -> String {
+    var start = s.startIndex
+    while start < s.endIndex && (s[start] == " " || s[start] == "\t") {
+        s.formIndex(after: &start)
+    }
+    var end = s.endIndex
+    while end > start {
+        let prev = s.index(before: end)
+        guard s[prev] == " " || s[prev] == "\t" else { break }
+        end = prev
+    }
+    return String(s[start..<end])
+}
+
+private func hex(_ value: UInt64, _ width: Int) -> String {
+    var s = String(value, radix: 16, uppercase: true)
+    while s.count < width { s = "0" + s }
+    return s
 }
 
 func deterministicGuid(for name: String) -> String {
@@ -42,15 +90,7 @@ func deterministicGuid(for name: String) -> String {
         h1 = ((h1 << 5) &+ h1) &+ UInt64(byte)
         h2 = (h2 ^ UInt64(byte)) &* 0x100000001b3
     }
-    return String(
-        format: "{%08X-%04X-%04X-%04X-%04X%08X}",
-        UInt32(truncatingIfNeeded: h1 >> 32),
-        UInt16(truncatingIfNeeded: h1 >> 16),
-        UInt16(truncatingIfNeeded: h1),
-        UInt16(truncatingIfNeeded: h2 >> 48),
-        UInt16(truncatingIfNeeded: h2 >> 32),
-        UInt32(truncatingIfNeeded: h2)
-    )
+    return "{\(hex(h1 >> 32, 8))-\(hex((h1 >> 16) & 0xFFFF, 4))-\(hex(h1 & 0xFFFF, 4))-\(hex(h2 >> 48, 4))-\(hex((h2 >> 32) & 0xFFFF, 4))\(hex(h2 & 0xFFFFFFFF, 8))}"
 }
 
 // MARK: - File I/O (POSIX)
@@ -81,7 +121,6 @@ func readFile(_ path: String) throws -> String {
 func writeFileIfChanged(_ path: String, _ content: String) throws -> Bool {
     let bytes = Array(content.utf8)
 
-    // Compare with existing file.
     let fd = open(path, O_RDONLY)
     if fd >= 0 {
         defer { close(fd) }
@@ -101,7 +140,6 @@ func writeFileIfChanged(_ path: String, _ content: String) throws -> Bool {
         }
     }
 
-    // Write new content.
     let wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
     guard wfd >= 0 else { throw POSIXError(errno, path: path) }
     defer { close(wfd) }
@@ -147,7 +185,7 @@ func listDirectory(_ path: String) -> [String] {
 
 func extractJsonString(_ json: String, key: String) -> String? {
     let needle = "\"\(key)\""
-    guard let keyRange = json.range(of: needle) else { return nil }
+    guard let keyRange = json.firstRange(of: needle) else { return nil }
     var idx = keyRange.upperBound
     while idx < json.endIndex && json[idx] != ":" { json.formIndex(after: &idx) }
     guard idx < json.endIndex else { return nil }
@@ -165,7 +203,7 @@ func extractJsonString(_ json: String, key: String) -> String? {
 
 func extractJsonStringArray(_ json: String, key: String) -> [String] {
     let needle = "\"\(key)\""
-    guard let keyRange = json.range(of: needle) else { return [] }
+    guard let keyRange = json.firstRange(of: needle) else { return [] }
     var idx = keyRange.upperBound
     while idx < json.endIndex && json[idx] != "[" { json.formIndex(after: &idx) }
     guard idx < json.endIndex else { return [] }

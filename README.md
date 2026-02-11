@@ -14,33 +14,32 @@ Installs `unity-solution-generator` to `~/.local/bin/` (symlink).
 
 | Command | Description |
 |---------|-------------|
-| `generate` (default) | Regenerate `.csproj`/`.sln` from templates and filesystem |
+| `generate` | Regenerate `.csproj`/`.sln` from templates and filesystem |
 | `extract-templates` | Extract `.csproj` templates from Unity-generated project files |
 
 ```bash
-unity-solution-generator -p .                     # scan only (show stats)
-unity-solution-generator --ios -p .               # ios-prod
-unity-solution-generator --ios --debug -p .        # ios-dev
-unity-solution-generator --ios --editor -p .       # ios-editor
-unity-solution-generator --android -p .            # android-prod
-unity-solution-generator extract-templates -p .
+unity-solution-generator generate . ios prod              # ios-prod
+unity-solution-generator generate . ios dev               # ios-dev
+unity-solution-generator generate . ios editor            # ios-editor
+unity-solution-generator generate . android prod          # android-prod
+unity-solution-generator extract-templates .
 ```
 
-`-p` / `--project-root` sets the Unity project root. Both commands accept `--generator-root <path>` (default: `Library/UnitySolutionGenerator`).
+Positional args: `<command> <unity-root> <platform> <config>`. Optional 4th arg sets generator root (default: `Library/UnitySolutionGenerator`).
 
 ### Platform + configuration
 
-Two orthogonal axes: **platform** (`--ios`, `--android`) and **configuration** (`--editor`, `--debug`, default `prod`).
+Two orthogonal axes: **platform** (`ios`, `android`) and **configuration** (`prod`, `dev`, `editor`).
 
-| Config | Projects | UNITY_EDITOR | DEBUG/TRACE |
-|--------|----------|--------------|-------------|
-| `prod` (default) | runtime only | stripped | stripped |
-| `dev` (`--debug`) | runtime only | stripped | kept |
-| `editor` (`--editor`) | all | kept | kept |
+| Config | Projects | DefineConstants (via Directory.Build.props) |
+|--------|----------|---------------------------------------------|
+| `prod` | runtime only | platform defines only |
+| `dev` | runtime only | platform + `DEBUG;TRACE` |
+| `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE` |
 
-All configs swap platform defines (`UNITY_ANDROID` <-> `UNITY_IOS`) to match the target. Prod/dev also strip `<ProjectReference>` entries for excluded projects.
+Dynamic defines are injected via `Directory.Build.props` per variant — templates contain only static defines with a `$(DefineConstants)` reference. Prod/dev variants exclude `<ProjectReference>` entries for editor/test projects during rendering.
 
-Each invocation produces one variant in `{platform}-{config}/` containing `.csproj` files and a `.sln`. Generated files use relative paths (`../../../Assets/...`) to reach the project root.
+Each invocation produces one variant in `{platform}-{config}/` containing `.csproj` files, a `.sln`, and a `Directory.Build.props`.
 
 ## Directory structure
 
@@ -50,7 +49,7 @@ All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored
 Library/UnitySolutionGenerator/
   templates/                    ← extracted from Unity-generated .csproj files
     MyProject.csproj.template
-  ios-prod/                     ← each variant: .csproj files + .sln
+  ios-prod/                     ← variant: .csproj + .sln + Directory.Build.props
   ios-dev/
   ios-editor/
   android-prod/
@@ -62,23 +61,22 @@ Library/UnitySolutionGenerator/
 Output is the `.sln` path to stdout, for use with `dotnet build`:
 
 ```bash
-dotnet build "$(unity-solution-generator --ios -p .)" -m --no-restore -v q
+dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v q
 ```
 
 Full validation covers all 6 platform/config combinations:
 
 ```bash
-for flags in "--ios" "--ios --debug" "--ios --editor" \
-             "--android" "--android --debug" "--android --editor"; do
-  dotnet build "$(unity-solution-generator $flags -p .)" -m --no-restore -v q
-done
+for p in ios android; do for c in prod dev editor; do
+  dotnet build "$(unity-solution-generator generate . $p $c)" -m --no-restore -v q
+done; done
 ```
 
 ## How it works
 
-1. **Templates** are Unity-generated `.csproj` files with placeholders (`{{SOURCE_FOLDERS}}`, `{{PROJECT_REFERENCES}}`, `{{PROJECT_ROOT}}`) replacing the dynamic parts. Everything else (DLL references, analyzers, build settings, define symbols) is preserved as-is from Unity's output. The `.sln` is generated from a hardcoded minimal template.
-2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for directories containing `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, builds per-directory compile patterns, and renders the templates into a variant subdirectory.
-3. **Project categories** (runtime/editor/test) are inferred from `.asmdef` fields:
+1. **Templates** are Unity-generated `.csproj` files with dynamic parts stripped: `<Compile>`, `<ProjectReference>`, dynamic defines, and `</Project>` are removed. Absolute paths become `$(ProjectRoot)`, dynamic defines become `$(DefineConstants)`. Everything else (DLL references, analyzers, build settings) is preserved as-is. The `.sln` is generated from a minimal template.
+2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for directories containing `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, and appends `<ItemGroup>` (compile patterns + project references) + `</Project>` to each template fragment.
+3. **Directory.Build.props** is written per variant with `$(ProjectRoot)` (absolute path) and `$(DefineConstants)` (platform + config defines). MSBuild imports this before the `.csproj`, so `$(DefineConstants)` in templates inherits the variant-specific values.
 
 ### Category inference
 
@@ -108,21 +106,20 @@ Directories ending with `~` or starting with `.` are excluded from scanning.
 
 ## Performance
 
-Measured on meow-tower (19 projects, ~2.8k `.cs` dirs) with [`hyperfine`](https://github.com/sharkdp/hyperfine), M1 Max:
+Benchmarked on a project with 19 assemblies (~26k source files across Assets/ and Packages/):
 
-| Command | v1 (Foundation) | v2 (Darwin) |
-|---------|-----------------|-------------|
-| `extract-templates` | 122 ms | 119 ms |
-| `generate` (scan only) | 43 ms | 41 ms |
-| `generate --ios` (prod) | 53 ms | 66 ms |
-| `generate --ios --editor` | 46 ms | 44 ms |
+| Variant | Mean |
+|---------|------|
+| ios-prod | 26ms |
+| ios-editor | 27ms |
+| android-prod | 26ms |
 
-v2 drops Foundation for pure Darwin/POSIX. Prod variant is slower due to `stripNonRuntimeReferences` switching from NSRegularExpression to line-based scan. Filesystem scan (parallel POSIX readdir) dominates at ~41ms.
+No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch. Filesystem scan runs in parallel via GCD (`concurrentPerform`), and template rendering is append-only with no string replacement passes.
 
 ## Unity project setup
 
 After cloning, or after Unity upgrades / package changes, re-extract templates:
 
 ```bash
-unity-solution-generator extract-templates -p .
+unity-solution-generator extract-templates .
 ```

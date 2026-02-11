@@ -209,32 +209,13 @@ final class SolutionGeneratorTests: XCTestCase {
         return path
     }
 
-    private func writeTemplates(root: String, projectNames: [String]) throws {
+    private func writeTemplates(root: String, projectNames: [String], defines: String? = nil) throws {
         for name in projectNames {
-            try writeFile(root, "tpl/templates/\(name).csproj.template", """
-            <Project>
-              <ItemGroup>
-            {{SOURCE_FOLDERS}}
-            {{PROJECT_REFERENCES}}
-              </ItemGroup>
-            </Project>
-            """)
-        }
-    }
-
-    private func writeTemplatesWithDefines(root: String, projectNames: [String], defines: String = "UNITY_5;UNITY_EDITOR;UNITY_IOS") throws {
-        for name in projectNames {
-            try writeFile(root, "tpl/templates/\(name).csproj.template", """
-            <Project>
-              <PropertyGroup>
-                <DefineConstants>\(defines)</DefineConstants>
-              </PropertyGroup>
-              <ItemGroup>
-            {{SOURCE_FOLDERS}}
-            {{PROJECT_REFERENCES}}
-              </ItemGroup>
-            </Project>
-            """)
+            var content = "<Project>\n"
+            if let defines {
+                content += "  <PropertyGroup>\n    <DefineConstants>$(DefineConstants);\(defines)</DefineConstants>\n  </PropertyGroup>\n"
+            }
+            try writeFile(root, "tpl/templates/\(name).csproj.template", content)
         }
     }
 
@@ -247,27 +228,14 @@ final class SolutionGeneratorTests: XCTestCase {
 
     private func readCompileSet(root: String, csprojPath: String) throws -> Set<String> {
         let content = try readFile(root, csprojPath)
-        let entries = parseCompileEntries(from: content)
-        return expandCompileEntries(entries, root: root)
-    }
-
-    private func parseCompileEntries(from csproj: String) -> [CompileEntry] {
         let pattern = #"<Compile Include=\"([^\"]+)\"\s*/>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(csproj.startIndex..<csproj.endIndex, in: csproj)
+        let range = NSRange(content.startIndex..<content.endIndex, in: content)
 
-        return regex.matches(in: csproj, range: range).compactMap { match in
-            guard let includeRange = Range(match.range(at: 1), in: csproj) else {
-                return nil
-            }
-            return CompileEntry(include: xmlUnescape(String(csproj[includeRange])))
-        }
-    }
-
-    private func expandCompileEntries(_ entries: [CompileEntry], root: String) -> Set<String> {
         var result: Set<String> = []
-        for entry in entries {
-            result.formUnion(expandPattern(entry.include, root: root))
+        for match in regex.matches(in: content, range: range) {
+            guard let r = Range(match.range(at: 1), in: content) else { continue }
+            result.formUnion(expandPattern(xmlUnescape(String(content[r])), root: root))
         }
         return result
     }
@@ -327,7 +295,7 @@ final class SolutionGeneratorTests: XCTestCase {
 
     private func writeFile(_ root: String, _ relativePath: String, _ content: String) throws {
         let path = "\(root)/\(relativePath)"
-        let dir = (path as NSString).deletingLastPathComponent
+        let dir = String(path[..<path.lastIndex(of: "/")!])
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         try content.write(toFile: path, atomically: true, encoding: .utf8)
     }
@@ -336,58 +304,13 @@ final class SolutionGeneratorTests: XCTestCase {
         try String(contentsOfFile: "\(root)/\(relativePath)", encoding: .utf8)
     }
 
-    // MARK: - Build transform unit tests
-
-    func testStripEditorDefines() {
-        let gen = SolutionGenerator()
-        let input = "<DefineConstants>UNITY_5;UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE;UNITY_IOS</DefineConstants>"
-
-        let release = gen.stripEditorDefines(input, debugBuild: false)
-        XCTAssertEqual(release, "<DefineConstants>UNITY_5;UNITY_IOS</DefineConstants>")
-
-        let debug = gen.stripEditorDefines(input, debugBuild: true)
-        XCTAssertEqual(debug, "<DefineConstants>UNITY_5;DEBUG;TRACE;UNITY_IOS</DefineConstants>")
-    }
-
-    func testSwapPlatformDefinesIos() {
-        let gen = SolutionGenerator()
-        let input = "<DefineConstants>UNITY_ANDROID;UNITY_IPHONE;OTHER</DefineConstants>"
-        let result = gen.swapPlatformDefines(input, platform: .ios)
-        XCTAssertEqual(result, "<DefineConstants>UNITY_IOS;UNITY_IPHONE;OTHER</DefineConstants>")
-    }
-
-    func testSwapPlatformDefinesAndroid() {
-        let gen = SolutionGenerator()
-        let input = "<DefineConstants>UNITY_IOS;UNITY_IPHONE;OTHER</DefineConstants>"
-        let result = gen.swapPlatformDefines(input, platform: .android)
-        XCTAssertEqual(result, "<DefineConstants>UNITY_ANDROID;OTHER</DefineConstants>")
-    }
-
-    func testStripNonRuntimeReferences() {
-        let gen = SolutionGenerator()
-        let input = """
-        <ItemGroup>
-            <ProjectReference Include="Core.csproj">
-            </ProjectReference>
-            <ProjectReference Include="App.Editor.csproj">
-            </ProjectReference>
-            <ProjectReference Include="Game.Tests.Runner.csproj">
-            </ProjectReference>
-        </ItemGroup>
-        """
-        let result = gen.stripNonRuntimeReferences(input, nonRuntimeNames: ["App.Editor", "Game.Tests.Runner"])
-        XCTAssertTrue(result.contains("Core.csproj"))
-        XCTAssertFalse(result.contains("App.Editor.csproj"))
-        XCTAssertFalse(result.contains("Game.Tests.Runner.csproj"))
-    }
-
     // MARK: - Platform variant integration tests
 
     func testProdVariantCategoryFiltering() throws {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
 
-        try writeTemplatesWithDefines(root: root, projectNames: ["Runtime", "MyEditor", "MyTests"])
+        try writeTemplates(root: root, projectNames: ["Runtime", "MyEditor", "MyTests"], defines: "UNITY_5")
 
         try writeFile(root, "Assets/Assemblies/Runtime/Runtime.asmdef", """
         {"name":"Runtime","references":["MyEditor"]}
@@ -410,11 +333,14 @@ final class SolutionGeneratorTests: XCTestCase {
         ))
         XCTAssertEqual(prodResult.variantCsprojs, ["tpl/ios-prod/Runtime.csproj"])
 
+        let prodProps = try readFile(root, "tpl/ios-prod/Directory.Build.props")
+        XCTAssertFalse(prodProps.contains("UNITY_EDITOR"))
+        XCTAssertTrue(prodProps.contains("UNITY_IOS"))
+
         let variant = try readFile(root, "tpl/ios-prod/Runtime.csproj")
-        XCTAssertFalse(variant.contains("UNITY_EDITOR"))
         XCTAssertFalse(variant.contains("MyEditor.csproj\">"))
 
-        let prodSln = try readFile(root, prodResult.variantSlnPath!)
+        let prodSln = try readFile(root, prodResult.variantSlnPath)
         XCTAssertTrue(prodSln.contains("\"Runtime\""))
         XCTAssertFalse(prodSln.contains("\"MyEditor\""))
 
@@ -422,10 +348,10 @@ final class SolutionGeneratorTests: XCTestCase {
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor
         ))
         XCTAssertEqual(editorResult.variantCsprojs.count, 3)
-        let editorRuntime = try readFile(root, "tpl/ios-editor/Runtime.csproj")
-        XCTAssertTrue(editorRuntime.contains("UNITY_EDITOR"))
+        let editorProps = try readFile(root, "tpl/ios-editor/Directory.Build.props")
+        XCTAssertTrue(editorProps.contains("UNITY_EDITOR"))
 
-        let editorSln = try readFile(root, editorResult.variantSlnPath!)
+        let editorSln = try readFile(root, editorResult.variantSlnPath)
         XCTAssertTrue(editorSln.contains("\"MyEditor\""))
         XCTAssertTrue(editorSln.contains("\"MyTests\""))
     }
@@ -434,7 +360,7 @@ final class SolutionGeneratorTests: XCTestCase {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
 
-        try writeTemplatesWithDefines(root: root,
+        try writeTemplates(root: root,
             projectNames: ["Runtime", "PlatformLib", "EditorOnly", "EditorConstrained", "PlayTests"],
             defines: "UNITY_5"
         )
@@ -464,23 +390,17 @@ final class SolutionGeneratorTests: XCTestCase {
         let prodResult = try gen.generate(options: GenerateOptions(
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .prod
         ))
-        let prodNames = Set(prodResult.variantCsprojs.map { path in
-            let filename = (path as NSString).lastPathComponent
-            return String(filename.dropLast(".csproj".count))
+        let prodNames = Set(prodResult.variantCsprojs.map {
+            String($0.split(separator: "/").last!.dropLast(".csproj".count))
         })
         XCTAssertEqual(prodNames, ["Runtime", "PlatformLib"])
 
         let editorResult = try gen.generate(options: GenerateOptions(
             projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor
         ))
-        let editorNames = Set(editorResult.variantCsprojs.map { path in
-            let filename = (path as NSString).lastPathComponent
-            return String(filename.dropLast(".csproj".count))
+        let editorNames = Set(editorResult.variantCsprojs.map {
+            String($0.split(separator: "/").last!.dropLast(".csproj".count))
         })
         XCTAssertEqual(editorNames, ["Runtime", "PlatformLib", "EditorOnly", "EditorConstrained", "PlayTests"])
     }
-}
-
-private struct CompileEntry {
-    let include: String
 }

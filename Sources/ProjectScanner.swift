@@ -90,14 +90,6 @@ struct ProjectScanner {
 
 // MARK: - Parallel filesystem scan (POSIX readdir)
 
-private struct SendablePtr<T>: @unchecked Sendable {
-    let ptr: UnsafeMutablePointer<T>
-    subscript(index: Int) -> T {
-        get { ptr[index] }
-        nonmutating set { ptr[index] = newValue }
-    }
-}
-
 private struct ScanBucket {
     var csDirs: [String] = []
     var asmDefPaths: [String] = []

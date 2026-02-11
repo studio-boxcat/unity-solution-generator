@@ -10,15 +10,9 @@ let package = Package(
     products: [
         .executable(name: "unity-solution-generator", targets: ["unity-solution-generator"]),
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
-    ],
     targets: [
         .executableTarget(
             name: "unity-solution-generator",
-            dependencies: [
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ],
             path: "Sources"
         ),
         .testTarget(
