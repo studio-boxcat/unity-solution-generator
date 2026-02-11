@@ -226,6 +226,35 @@ func extractJsonStringArray(_ json: String, key: String) -> [String] {
     return results
 }
 
+// MARK: - Profiling
+
+struct ProfilerMark {
+    #if PROFILING
+    let label: String
+    let start: UInt64
+
+    init(_ label: String) {
+        self.label = label
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
+        start = UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+    }
+
+    func end() {
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
+        let elapsed = (UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)) &- start
+        let us = elapsed / 1000
+        let ms = us / 1000
+        let frac = (us % 1000) / 10
+        fputs("[\(label)] \(ms).\(frac < 10 ? "0" : "")\(frac)ms\n", stderr)
+    }
+    #else
+    @inline(__always) init(_ label: String) {}
+    @inline(__always) func end() {}
+    #endif
+}
+
 // MARK: - Error types
 
 struct POSIXError: Error, CustomStringConvertible {

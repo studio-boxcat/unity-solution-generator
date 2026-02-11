@@ -44,7 +44,10 @@ struct ProjectScanner {
 
     static func scan(projectRoot: String) throws -> Result {
         let rootPath = resolveRealPath(projectRoot)
+
+        let scanMark = ProfilerMark("scan.total")
         let fileScan = scanProjectFiles(rootPath: rootPath, roots: ["Assets", "Packages"])
+        scanMark.end()
 
         // Load .asmdef files and build name → record map.
         // Unity enforces globally unique assembly definition names.
