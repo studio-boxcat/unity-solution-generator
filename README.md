@@ -10,7 +10,7 @@ just install
 
 Installs to `~/.local/bin/` (symlinks):
 - `unity-solution-generator` — the generator binary
-- `build-unity-sln.sh` — build script with optimized MSBuild args
+- `build-unity-sln` — build script with optimized MSBuild args
 
 ## Commands
 

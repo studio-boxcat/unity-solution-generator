@@ -16,7 +16,7 @@ build:
 install: build
     mkdir -p ~/.local/bin
     ln -sf "{{bin}}" ~/.local/bin/unity-solution-generator
-    ln -sf "{{pkg}}/dist/build-unity-sln.sh" ~/.local/bin/build-unity-sln.sh
+    ln -sf "{{pkg}}/dist/build-unity-sln.sh" ~/.local/bin/build-unity-sln
 
 # Run tests
 test:
