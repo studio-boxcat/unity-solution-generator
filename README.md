@@ -8,7 +8,9 @@ Swift CLI that regenerates `.csproj` and `.sln` files for Unity projects from `a
 just install
 ```
 
-Installs `unity-solution-generator` to `~/.local/bin/` (symlink).
+Installs to `~/.local/bin/` (symlinks):
+- `unity-solution-generator` — the generator binary
+- `build-unity-sln.sh` — build script with optimized MSBuild args
 
 ## Commands
 
@@ -58,7 +60,15 @@ Library/UnitySolutionGenerator/
 
 ## Build validation
 
-Output is the `.sln` path to stdout, for use with `dotnet build`:
+`build-unity-sln.sh` wraps `unity-solution-generator generate` + `dotnet build` with optimized MSBuild args (quiet output, RAR skip, shared compilation). Run from a Unity project root:
+
+```bash
+build-unity-sln.sh ios prod          # build ios-prod variant
+build-unity-sln.sh android dev       # build android-dev variant
+build-unity-sln.sh --clean           # clean cached artifacts
+```
+
+Or call `unity-solution-generator` directly — output is the `.sln` path to stdout:
 
 ```bash
 dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v q
