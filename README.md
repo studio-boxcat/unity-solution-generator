@@ -60,26 +60,21 @@ Library/UnitySolutionGenerator/
 
 ## Build validation
 
-`build-unity-sln.sh` wraps `unity-solution-generator generate` + `dotnet build` with optimized MSBuild args (quiet output, RAR skip, shared compilation). Run from a Unity project root:
+`build-unity-sln` wraps `unity-solution-generator generate` + `dotnet build` with optimized MSBuild args (quiet output, RAR skip, shared compilation). Run from a Unity project root:
 
 ```bash
-build-unity-sln.sh ios prod          # build ios-prod variant
-build-unity-sln.sh android dev       # build android-dev variant
-build-unity-sln.sh --clean           # clean cached artifacts
+build-unity-sln ios prod                  # single variant
+build-unity-sln ios,android editor,dev    # 4 parallel builds (cartesian product)
+build-unity-sln ios,android prod,dev,editor  # all 6 variants in parallel
+build-unity-sln --clean                   # clean cached artifacts (default: ios-prod)
 ```
+
+Comma-separated platforms/configs are expanded into all combinations and built in parallel. Defaults: platform=`ios`, config=`prod`.
 
 Or call `unity-solution-generator` directly — output is the `.sln` path to stdout:
 
 ```bash
 dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v q
-```
-
-Full validation covers all 6 platform/config combinations:
-
-```bash
-for p in ios android; do for c in prod dev editor; do
-  dotnet build "$(unity-solution-generator generate . $p $c)" -m --no-restore -v q
-done; done
 ```
 
 ## How it works

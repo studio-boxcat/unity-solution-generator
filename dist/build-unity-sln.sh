@@ -33,12 +33,15 @@ BUILD_ARGS=(
 
 show_help() {
   cat << 'EOF'
-Usage: build-unity-sln.sh [platform] [config] [options]
-       build-unity-sln.sh --clean
+Usage: build-unity-sln [platforms] [configs] [options]
+       build-unity-sln --clean
 
 Arguments:
-  platform       ios | android (default: ios)
-  config         prod | dev | editor (default: prod)
+  platforms      ios | android | ios,android (default: ios)
+  configs        prod | dev | editor | dev,editor (default: prod)
+
+  Comma-separated values build all combinations in parallel:
+    build-unity-sln ios,android editor,dev   # 4 parallel builds
 
 Options:
   --clean        Remove cached build artifacts
@@ -54,17 +57,30 @@ EOF
 # Parse arguments
 #---------------------------------------
 
-PLATFORM=""
-CONFIG=""
+PLATFORMS=()
+CONFIGS=()
 CLEAN=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    ios|android)          PLATFORM=$1;  shift ;;
-    prod|dev|editor)      CONFIG=$1;    shift ;;
-    --clean)              CLEAN=true;   shift ;;
-    --help|-h)            show_help; exit 0 ;;
-    *)                    echo "Unknown argument: $1"; show_help; exit 1 ;;
+    --clean)   CLEAN=true; shift ;;
+    --help|-h) show_help; exit 0 ;;
+    *)
+      IFS=',' read -ra tokens <<< "$1"
+      all_platform=true all_config=true
+      for t in "${tokens[@]}"; do
+        case $t in ios|android) ;; *) all_platform=false ;; esac
+        case $t in prod|dev|editor) ;; *) all_config=false ;; esac
+      done
+      if $all_platform && [[ ${#PLATFORMS[@]} -eq 0 ]]; then
+        PLATFORMS=("${tokens[@]}")
+      elif $all_config && [[ ${#CONFIGS[@]} -eq 0 ]]; then
+        CONFIGS=("${tokens[@]}")
+      else
+        echo "Unknown argument: $1"; show_help; exit 1
+      fi
+      shift
+      ;;
   esac
 done
 
@@ -72,29 +88,54 @@ done
 # Main
 #---------------------------------------
 
-if [[ -z "$PLATFORM" ]]; then echo "platform: ios (default)"; fi
-if [[ -z "$CONFIG" ]]; then echo "config:   prod (default)"; fi
+if [[ ${#PLATFORMS[@]} -eq 0 ]]; then echo "platform: ios (default)"; PLATFORMS=(ios); fi
+if [[ ${#CONFIGS[@]} -eq 0 ]]; then echo "config:   prod (default)"; CONFIGS=(prod); fi
 
-PLATFORM=${PLATFORM:-ios}
-CONFIG=${CONFIG:-prod}
+ACTION="Building"
+[[ "$CLEAN" == true ]] && ACTION="Cleaning"
 
-SLN=$(unity-solution-generator generate . "$PLATFORM" "$CONFIG")
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
 
-if [[ "$CLEAN" == true ]]; then
-  echo "Cleaning ${PLATFORM} (${CONFIG})..."
-  dotnet build "$SLN" -t:Clean "${BUILD_ARGS[@]}"
-  exit
-fi
+pids=()
+variants=()
 
-echo "Building for ${PLATFORM} (${CONFIG})..."
-# NoSummary in -clp suppresses dotnet's default summary; print our own result
-set +e
-dotnet build "$SLN" -m -graph "${BUILD_ARGS[@]}"  # -graph: static dependency analysis for better parallelism
-rc=$?
-set -e
-if [[ $rc -eq 0 ]]; then
-  echo "Build succeeded."
+for p in "${PLATFORMS[@]}"; do
+  for c in "${CONFIGS[@]}"; do
+    variant="${p}-${c}"
+    variants+=("$variant")
+    echo "${ACTION} ${variant}..."
+    (
+      SLN=$(unity-solution-generator generate . "$p" "$c")
+      if [[ "$CLEAN" == true ]]; then
+        dotnet build "$SLN" -t:Clean "${BUILD_ARGS[@]}"
+      else
+        dotnet build "$SLN" -m -graph "${BUILD_ARGS[@]}"
+      fi
+    ) > "$tmpdir/${variant}.log" 2>&1 &
+    pids+=($!)
+  done
+done
+
+# Wait for all builds and collect results
+failed=()
+for i in "${!pids[@]}"; do
+  if ! wait "${pids[$i]}"; then
+    failed+=("${variants[$i]}")
+  fi
+done
+
+# Print errors from failed builds
+for v in "${failed[@]}"; do
+  echo ""
+  echo "=== ${v} errors ==="
+  cat "$tmpdir/${v}.log"
+done
+
+# Summary
+if [[ ${#failed[@]} -eq 0 ]]; then
+  echo "All ${#variants[@]} variant(s) succeeded."
 else
-  echo "Build failed. (exit code: $rc)"
-  exit $rc
+  echo "${#failed[@]}/${#variants[@]} variant(s) failed: ${failed[*]}"
+  exit 1
 fi
