@@ -103,6 +103,8 @@ variants=()
 for p in "${PLATFORMS[@]}"; do
   for c in "${CONFIGS[@]}"; do
     variant="${p}-${c}"
+    # skip duplicates (e.g. ios,ios)
+    for v in "${variants[@]+"${variants[@]}"}"; do [[ "$v" == "$variant" ]] && continue 2; done
     variants+=("$variant")
     echo "${ACTION} ${variant}..."
     (
@@ -126,16 +128,14 @@ for i in "${!pids[@]}"; do
 done
 
 # Print errors from failed builds
-for v in "${failed[@]}"; do
-  echo ""
-  echo "=== ${v} errors ==="
-  cat "$tmpdir/${v}.log"
-done
-
-# Summary
-if [[ ${#failed[@]} -eq 0 ]]; then
-  echo "All ${#variants[@]} variant(s) succeeded."
-else
+if [[ ${#failed[@]} -gt 0 ]]; then
+  for v in "${failed[@]}"; do
+    echo ""
+    echo "=== ${v} errors ==="
+    cat "$tmpdir/${v}.log"
+  done
   echo "${#failed[@]}/${#variants[@]} variant(s) failed: ${failed[*]}"
   exit 1
 fi
+
+echo "All ${#variants[@]} variant(s) succeeded."
