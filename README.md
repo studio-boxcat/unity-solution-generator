@@ -66,10 +66,10 @@ Library/UnitySolutionGenerator/
 build-unity-sln ios prod                  # single variant
 build-unity-sln ios,android editor,dev    # 4 parallel builds (cartesian product)
 build-unity-sln ios,android prod,dev,editor  # all 6 variants in parallel
-build-unity-sln --clean                   # clean cached artifacts (default: ios-prod)
+build-unity-sln --clean                   # clean cached artifacts (default: ios-editor)
 ```
 
-Comma-separated platforms/configs are expanded into all combinations and built in parallel. Defaults: platform=`ios`, config=`prod`.
+Comma-separated platforms/configs are expanded into all combinations and built in parallel. Defaults: platform=`ios`, config=`editor`.
 
 Or call `unity-solution-generator` directly — output is the `.sln` path to stdout:
 

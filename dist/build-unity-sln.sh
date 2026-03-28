@@ -38,7 +38,7 @@ Usage: build-unity-sln [platforms] [configs] [options]
 
 Arguments:
   platforms      ios | android | ios,android (default: ios)
-  configs        prod | dev | editor | dev,editor (default: prod)
+  configs        prod | dev | editor | dev,editor (default: editor)
 
   Comma-separated values build all combinations in parallel:
     build-unity-sln ios,android editor,dev   # 4 parallel builds
@@ -89,7 +89,7 @@ done
 #---------------------------------------
 
 if [[ ${#PLATFORMS[@]} -eq 0 ]]; then echo "platform: ios (default)"; PLATFORMS=(ios); fi
-if [[ ${#CONFIGS[@]} -eq 0 ]]; then echo "config:   prod (default)"; CONFIGS=(prod); fi
+if [[ ${#CONFIGS[@]} -eq 0 ]]; then echo "config:   editor (default)"; CONFIGS=(editor); fi
 
 ACTION="Building"
 [[ "$CLEAN" == true ]] && ACTION="Cleaning"
