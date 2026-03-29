@@ -9,12 +9,19 @@ enum ProjectCategory: String, Sendable {
     case test
 }
 
+struct VersionDefine: Sendable {
+    let packageName: String
+    let define: String
+}
+
 struct AsmDefRecord: Sendable {
     let name: String
     let directory: String
     let references: [String]
     let category: ProjectCategory
     let includePlatforms: [String]
+    let allowUnsafeCode: Bool
+    let versionDefines: [VersionDefine]
 
     static func load(rootPath: String, relativePath: String) throws -> AsmDefRecord? {
         let json = try readFile(joinPath(rootPath, relativePath))
@@ -28,9 +35,48 @@ struct AsmDefRecord: Sendable {
                 includePlatforms: includePlatforms,
                 defineConstraints: extractJsonStringArray(json, key: "defineConstraints")
             ),
-            includePlatforms: includePlatforms
+            includePlatforms: includePlatforms,
+            allowUnsafeCode: extractJsonBool(json, key: "allowUnsafeCode") ?? false,
+            versionDefines: parseVersionDefines(json)
         )
     }
+}
+
+func parseVersionDefines(_ json: String) -> [VersionDefine] {
+    let needle = "\"versionDefines\""
+    guard let keyRange = json.firstRange(of: needle) else { return [] }
+    var idx = keyRange.upperBound
+    // Find opening [
+    while idx < json.endIndex && json[idx] != "[" { json.formIndex(after: &idx) }
+    guard idx < json.endIndex else { return [] }
+    json.formIndex(after: &idx)
+
+    var results: [VersionDefine] = []
+    // Parse each object in the array
+    while idx < json.endIndex {
+        let ch = json[idx]
+        if ch == "]" { break }
+        if ch == "{" {
+            // Find the closing }
+            let objStart = idx
+            var depth = 1
+            json.formIndex(after: &idx)
+            while idx < json.endIndex && depth > 0 {
+                if json[idx] == "{" { depth += 1 }
+                else if json[idx] == "}" { depth -= 1 }
+                json.formIndex(after: &idx)
+            }
+            let objStr = String(json[objStart..<idx])
+            if let packageName = extractJsonString(objStr, key: "name"),
+               let define = extractJsonString(objStr, key: "define"),
+               !packageName.isEmpty, !define.isEmpty {
+                results.append(VersionDefine(packageName: packageName, define: define))
+            }
+        } else {
+            json.formIndex(after: &idx)
+        }
+    }
+    return results
 }
 
 // MARK: - Scanner
@@ -106,10 +152,7 @@ private struct FileScan {
 }
 
 private func processDirent(_ entry: UnsafeMutablePointer<dirent>, parentPath: String) -> (name: String, path: String, isDir: Bool)? {
-    var d_name = entry.pointee.d_name
-    let name = withUnsafePointer(to: &d_name) {
-        String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
-    }
+    let name = direntName(entry)
     if name.first == "." || name.hasSuffix("~") { return nil }
 
     let childPath = "\(parentPath)/\(name)"
@@ -118,10 +161,12 @@ private func processDirent(_ entry: UnsafeMutablePointer<dirent>, parentPath: St
     var isFile = dType == DT_REG
 
     if dType == DT_LNK || dType == DT_UNKNOWN {
-        var statBuf = stat()
-        guard stat(childPath, &statBuf) == 0 else { return nil }
-        isDir = (statBuf.st_mode & S_IFMT) == S_IFDIR
-        isFile = (statBuf.st_mode & S_IFMT) == S_IFREG
+        if isDirectory(childPath) { isDir = true }
+        else {
+            var statBuf = stat()
+            guard stat(childPath, &statBuf) == 0 else { return nil }
+            isFile = (statBuf.st_mode & S_IFMT) == S_IFREG
+        }
     }
 
     if isDir { return (name, childPath, true) }

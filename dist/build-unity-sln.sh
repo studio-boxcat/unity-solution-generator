@@ -97,29 +97,32 @@ ACTION="Building"
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
+build_variant() {
+  local p=$1 c=$2 variant="${1}-${2}"
+  echo "${ACTION} ${variant}..."
+  (
+    SLN=$(unity-solution-generator generate . "$p" "$c")
+    if [[ "$CLEAN" == true ]]; then
+      dotnet build "$SLN" -t:Clean "${BUILD_ARGS[@]}"
+    else
+      dotnet build "$SLN" -m -graph "${BUILD_ARGS[@]}"
+    fi
+  ) > "$tmpdir/${variant}.log" 2>&1
+}
+
+# Build all variants in parallel, collect failures.
 pids=()
 variants=()
-
 for p in "${PLATFORMS[@]}"; do
   for c in "${CONFIGS[@]}"; do
     variant="${p}-${c}"
-    # skip duplicates (e.g. ios,ios)
     for v in "${variants[@]+"${variants[@]}"}"; do [[ "$v" == "$variant" ]] && continue 2; done
     variants+=("$variant")
-    echo "${ACTION} ${variant}..."
-    (
-      SLN=$(unity-solution-generator generate . "$p" "$c")
-      if [[ "$CLEAN" == true ]]; then
-        dotnet build "$SLN" -t:Clean "${BUILD_ARGS[@]}"
-      else
-        dotnet build "$SLN" -m -graph "${BUILD_ARGS[@]}"
-      fi
-    ) > "$tmpdir/${variant}.log" 2>&1 &
+    build_variant "$p" "$c" &
     pids+=($!)
   done
 done
 
-# Wait for all builds and collect results
 failed=()
 for i in "${!pids[@]}"; do
   if ! wait "${pids[$i]}"; then
@@ -127,11 +130,37 @@ for i in "${!pids[@]}"; do
   fi
 done
 
-# Print errors from failed builds
+# On failure: re-lock and retry only the failed variants
 if [[ ${#failed[@]} -gt 0 ]]; then
   for v in "${failed[@]}"; do
     echo ""
-    echo "=== ${v} errors ==="
+    echo "=== ${v} errors (attempt 1) ==="
+    cat "$tmpdir/${v}.log"
+  done
+  echo ""
+  echo "${#failed[@]}/${#variants[@]} failed — re-locking and retrying..."
+  unity-solution-generator lock . 2>&1
+
+  retry_pids=()
+  retry_variants=("${failed[@]}")
+  for v in "${retry_variants[@]}"; do
+    IFS='-' read -r p c <<< "$v"
+    build_variant "$p" "$c" &
+    retry_pids+=($!)
+  done
+
+  failed=()
+  for i in "${!retry_pids[@]}"; do
+    if ! wait "${retry_pids[$i]}"; then
+      failed+=("${retry_variants[$i]}")
+    fi
+  done
+fi
+
+if [[ ${#failed[@]} -gt 0 ]]; then
+  for v in "${failed[@]}"; do
+    echo ""
+    echo "=== ${v} errors (attempt 2) ==="
     cat "$tmpdir/${v}.log"
   done
   echo "${#failed[@]}/${#variants[@]} variant(s) failed: ${failed[*]}"

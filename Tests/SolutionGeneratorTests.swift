@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import XCTest
 @testable import unity_solution_generator
@@ -355,6 +356,628 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertTrue(editorSln.contains("\"MyEditor\""))
         XCTAssertTrue(editorSln.contains("\"MyTests\""))
     }
+
+    // MARK: - Lockfile tests
+
+    func testLockfileRoundTrip() throws {
+        let lockfile = Lockfile(
+            unityVersion: "6000.2.7f2",
+            unityPath: "/Applications/Unity/Hub/Editor/6000.2.7f2",
+            langVersion: "9.0",
+            analyzers: [
+                "$(UnityPath)/Unity.app/Contents/Tools/Unity.SourceGenerators/Unity.SourceGenerators.dll",
+                "$(ProjectRoot)/Assets/Zenject.Analyzers.dll",
+            ],
+            refsEngine: [
+                DllRef(name: "UnityEngine", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.dll"),
+                DllRef(name: "UnityEngine.CoreModule", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.CoreModule.dll"),
+            ],
+            refsEditor: [
+                DllRef(name: "UnityEditor", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEditor.dll"),
+            ],
+            refsNetstandard: [
+                DllRef(name: "netstandard", path: "$(UnityPath)/Unity.app/Contents/NetStandard/ref/2.1.0/netstandard.dll"),
+                DllRef(name: "System.Collections", path: "$(UnityPath)/Unity.app/Contents/NetStandard/compat/2.1.0/shims/netstandard/System.Collections.dll"),
+            ],
+            refsPlaybackIos: [
+                DllRef(name: "UnityEditor.iOS.Extensions", path: "$(UnityPath)/PlaybackEngines/iOSSupport/UnityEditor.iOS.Extensions.dll"),
+            ],
+            refsPlaybackAndroid: [
+                DllRef(name: "UnityEditor.Android.Extensions", path: "$(UnityPath)/PlaybackEngines/AndroidPlayer/UnityEditor.Android.Extensions.dll"),
+            ],
+            refsPlaybackStandalone: [
+                DllRef(name: "UnityEditor.OSXStandalone.Extensions", path: "$(UnityPath)/Unity.app/Contents/PlaybackEngines/MacStandaloneSupport/UnityEditor.OSXStandalone.Extensions.dll"),
+            ],
+            refsProject: [
+                DllRef(name: "Firebase.App", path: "$(ProjectRoot)/Packages/com.google.firebase.app-pkg/Firebase/Plugins/Firebase.App.dll"),
+            ],
+            defines: ["UNITY_6000_2_7", "UNITY_6000", "ENABLE_AR"],
+            definesScripting: ["ODIN_INSPECTOR", "SINGULAR_SDK_IAP_ENABLED"]
+        )
+
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfilePath = "\(root)/csproj.lock"
+        try LockfileIO.write(lockfile, to: lockfilePath)
+        let reloaded = try LockfileIO.read(from: lockfilePath)
+
+        XCTAssertEqual(reloaded.unityVersion, lockfile.unityVersion)
+        XCTAssertEqual(reloaded.unityPath, lockfile.unityPath)
+        XCTAssertEqual(reloaded.langVersion, lockfile.langVersion)
+        XCTAssertEqual(reloaded.analyzers, lockfile.analyzers)
+        XCTAssertEqual(reloaded.refsEngine.count, lockfile.refsEngine.count)
+        XCTAssertEqual(reloaded.refsEngine.map(\.name), lockfile.refsEngine.map(\.name))
+        XCTAssertEqual(reloaded.refsEngine.map(\.path), lockfile.refsEngine.map(\.path))
+        XCTAssertEqual(reloaded.refsEditor.map(\.name), lockfile.refsEditor.map(\.name))
+        XCTAssertEqual(reloaded.refsNetstandard.count, lockfile.refsNetstandard.count)
+        XCTAssertEqual(reloaded.refsPlaybackIos.map(\.name), lockfile.refsPlaybackIos.map(\.name))
+        XCTAssertEqual(reloaded.refsPlaybackAndroid.map(\.name), lockfile.refsPlaybackAndroid.map(\.name))
+        XCTAssertEqual(reloaded.refsPlaybackStandalone.map(\.name), lockfile.refsPlaybackStandalone.map(\.name))
+        XCTAssertEqual(reloaded.refsProject.map(\.name), lockfile.refsProject.map(\.name))
+        XCTAssertEqual(reloaded.defines, lockfile.defines)
+        XCTAssertEqual(reloaded.definesScripting, lockfile.definesScripting)
+
+        // Write again and verify idempotency
+        let firstWrite = try String(contentsOfFile: lockfilePath, encoding: .utf8)
+        let secondPath = "\(root)/csproj2.lock"
+        try LockfileIO.write(reloaded, to: secondPath)
+        let secondWrite = try String(contentsOfFile: secondPath, encoding: .utf8)
+        XCTAssertEqual(firstWrite, secondWrite)
+    }
+
+    func testVersionDefinesGeneration() throws {
+        let defines = generateVersionDefines(version: "6000.2.7f2")
+
+        // Exact version defines
+        XCTAssertTrue(defines.contains("UNITY_6000_2_7"))
+        XCTAssertTrue(defines.contains("UNITY_6000_2"))
+        XCTAssertTrue(defines.contains("UNITY_6000"))
+
+        // OR_NEWER chain must be contiguous (no gaps)
+        XCTAssertTrue(defines.contains("UNITY_5_3_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_5_6_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_2017_1_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_2022_3_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_2023_3_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_6000_0_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_6000_1_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_6000_2_OR_NEWER"))
+
+        // Should NOT have future versions
+        XCTAssertFalse(defines.contains("UNITY_6000_3_OR_NEWER"))
+
+        // Verify no duplicates
+        XCTAssertEqual(defines.count, Set(defines).count)
+    }
+
+    func testVersionDefinesForOlderVersion() throws {
+        let defines = generateVersionDefines(version: "2022.3.10f1")
+
+        XCTAssertTrue(defines.contains("UNITY_2022_3_10"))
+        XCTAssertTrue(defines.contains("UNITY_2022_3"))
+        XCTAssertTrue(defines.contains("UNITY_2022"))
+        XCTAssertTrue(defines.contains("UNITY_2022_3_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_2022_1_OR_NEWER"))
+        XCTAssertTrue(defines.contains("UNITY_5_3_OR_NEWER"))
+
+        // Should NOT have Unity 6000+ defines
+        XCTAssertFalse(defines.contains("UNITY_6000_0_OR_NEWER"))
+        XCTAssertFalse(defines.contains("UNITY_2023_1_OR_NEWER"))
+    }
+
+    func testScriptingDefinesParsing() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        try writeFile(root, "ProjectSettings/ProjectSettings.asset", """
+        %YAML 1.1
+        %TAG !u! tag:unity3d.com,2011:
+        --- !u!129 &1
+        PlayerSettings:
+          scriptingDefineSymbols:
+            Android: ENABLE_SPAN_T;ODIN_INSPECTOR;CUSTOM_DEFINE
+            iPhone: ENABLE_SPAN_T;ODIN_INSPECTOR
+            Standalone: ENABLE_SPAN_T
+          someOtherSetting: true
+        """)
+
+        let defines = parseScriptingDefines(projectRoot: root)
+
+        XCTAssertTrue(defines.contains("ENABLE_SPAN_T"))
+        XCTAssertTrue(defines.contains("ODIN_INSPECTOR"))
+        XCTAssertTrue(defines.contains("CUSTOM_DEFINE"))
+        // Union of all platforms
+        XCTAssertEqual(defines.count, 3)
+    }
+
+    func testLockfileGenerateReferencesInCsproj() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+        let lockfilePath = "\(root)/\(generatorRoot)/csproj.lock"
+        try FileManager.default.createDirectory(
+            atPath: "\(root)/\(generatorRoot)",
+            withIntermediateDirectories: true
+        )
+        try LockfileIO.write(lockfile, to: lockfilePath)
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", """
+        {"name":"Main","references":["Lib"]}
+        """)
+        try writeFile(root, "Assets/Assemblies/Lib/Lib.asmdef", """
+        {"name":"Lib"}
+        """)
+        try writeFile(root, "Assets/Assemblies/Main/Foo.cs", "class Foo {}\n")
+        try writeFile(root, "Assets/Assemblies/Lib/Bar.cs", "class Bar {}\n")
+
+        let result = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        XCTAssertEqual(result.variantCsprojs.count, 2)
+
+        let mainCsproj = try readFile(root, "\(generatorRoot)/ios-editor/Main.csproj")
+
+        // Engine refs present
+        XCTAssertTrue(mainCsproj.contains("<Reference Include=\"UnityEngine\">"))
+        XCTAssertTrue(mainCsproj.contains("<Reference Include=\"UnityEngine.CoreModule\">"))
+        // Editor refs present (editor config)
+        XCTAssertTrue(mainCsproj.contains("<Reference Include=\"UnityEditor\">"))
+        // NetStandard refs present
+        XCTAssertTrue(mainCsproj.contains("<Reference Include=\"netstandard\">"))
+        // Analyzer present
+        XCTAssertTrue(mainCsproj.contains("<Analyzer Include="))
+        // Project reference present
+        XCTAssertTrue(mainCsproj.contains("<ProjectReference Include=\"Lib.csproj\">"))
+        // Source patterns present
+        XCTAssertTrue(mainCsproj.contains("<Compile Include="))
+        // iOS playback present
+        XCTAssertTrue(mainCsproj.contains("UnityEditor.iOS.Extensions"))
+        // Android playback absent (platform is ios)
+        XCTAssertFalse(mainCsproj.contains("UnityEditor.Android.Extensions"))
+    }
+
+    func testLockfileGenerateEditorRefsNotInProd() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Runtime/Runtime.asmdef", """
+        {"name":"Runtime"}
+        """)
+        try writeFile(root, "Assets/Assemblies/Runtime/Code.cs", "class Code {}\n")
+
+        let prodResult = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .android, buildConfig: .prod
+            ),
+            lockfile: lockfile
+        )
+
+        XCTAssertEqual(prodResult.variantCsprojs.count, 1)
+        let csproj = try readFile(root, "\(generatorRoot)/android-prod/Runtime.csproj")
+
+        // Engine refs present
+        XCTAssertTrue(csproj.contains("<Reference Include=\"UnityEngine\">"))
+        // Editor refs ABSENT in prod
+        XCTAssertFalse(csproj.contains("<Reference Include=\"UnityEditor\">"))
+        // Android playback present
+        XCTAssertTrue(csproj.contains("UnityEditor.Android.Extensions"))
+        // iOS playback absent
+        XCTAssertFalse(csproj.contains("UnityEditor.iOS.Extensions"))
+    }
+
+    func testLockfileGenerateAllowUnsafeBlocks() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/SafeLib/SafeLib.asmdef", """
+        {"name":"SafeLib"}
+        """)
+        try writeFile(root, "Assets/Assemblies/UnsafeLib/UnsafeLib.asmdef", """
+        {"name":"UnsafeLib","allowUnsafeCode":true}
+        """)
+        try writeFile(root, "Assets/Assemblies/SafeLib/S.cs", "class S {}\n")
+        try writeFile(root, "Assets/Assemblies/UnsafeLib/U.cs", "class U {}\n")
+
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        let safeCsproj = try readFile(root, "\(generatorRoot)/ios-editor/SafeLib.csproj")
+        XCTAssertTrue(safeCsproj.contains("<AllowUnsafeBlocks>False</AllowUnsafeBlocks>"))
+
+        let unsafeCsproj = try readFile(root, "\(generatorRoot)/ios-editor/UnsafeLib.csproj")
+        XCTAssertTrue(unsafeCsproj.contains("<AllowUnsafeBlocks>True</AllowUnsafeBlocks>"))
+    }
+
+    func testLockfileGenerateDefinesInProps() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = Lockfile(
+            unityVersion: "6000.2.7f2",
+            unityPath: "/test/unity",
+            langVersion: "9.0",
+            analyzers: [],
+            refsEngine: [], refsEditor: [], refsNetstandard: [],
+            refsPlaybackIos: [], refsPlaybackAndroid: [], refsPlaybackStandalone: [],
+            refsProject: [],
+            defines: ["UNITY_6000", "ENABLE_AR"],
+            definesScripting: ["ODIN_INSPECTOR"]
+        )
+
+        try writeFile(root, "Assets/Assemblies/Lib/Lib.asmdef", "{\"name\":\"Lib\"}\n")
+        try writeFile(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n")
+
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        let props = try readFile(root, "\(generatorRoot)/ios-editor/Directory.Build.props")
+
+        // Static defines from lockfile
+        XCTAssertTrue(props.contains("UNITY_6000"))
+        XCTAssertTrue(props.contains("ENABLE_AR"))
+        XCTAssertTrue(props.contains("ODIN_INSPECTOR"))
+        // Dynamic per-variant defines
+        XCTAssertTrue(props.contains("UNITY_IOS"))
+        XCTAssertTrue(props.contains("UNITY_EDITOR"))
+        XCTAssertTrue(props.contains("DEBUG"))
+    }
+
+    func testLockfileGenerateSourcePatternsPreserved() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Game/Assembly.asmref", "{\"reference\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/A.cs", "class A {}\n")
+        try writeFile(root, "Assets/Game/B.cs", "class B {}\n")
+        try writeFile(root, "Assets/Game/Sub/C.cs", "class C {}\n")
+
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        try assertCompileSet(
+            root: root,
+            csprojPath: "\(generatorRoot)/ios-editor/Main.csproj",
+            expected: [
+                "Assets/Assemblies/Main/A.cs",
+                "Assets/Game/B.cs",
+                "Assets/Game/Sub/C.cs",
+            ]
+        )
+    }
+
+    func testLockfileGeneratePlatformFiltering() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/IOSOnly/IOSOnly.asmdef", """
+        {"name":"IOSOnly","includePlatforms":["iOS"]}
+        """)
+        try writeFile(root, "Assets/Assemblies/AllPlatforms/AllPlatforms.asmdef", """
+        {"name":"AllPlatforms"}
+        """)
+        try writeFile(root, "Assets/Assemblies/IOSOnly/Code.cs", "class IOSCode {}\n")
+        try writeFile(root, "Assets/Assemblies/AllPlatforms/Code.cs", "class AllCode {}\n")
+
+        // iOS prod should include both
+        let iosResult = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .ios, buildConfig: .prod
+            ),
+            lockfile: lockfile
+        )
+        let iosNames = Set(iosResult.variantCsprojs.map {
+            String($0.split(separator: "/").last!.dropLast(".csproj".count))
+        })
+        XCTAssertTrue(iosNames.contains("IOSOnly"))
+        XCTAssertTrue(iosNames.contains("AllPlatforms"))
+
+        // Android prod should exclude IOSOnly
+        let androidResult = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .android, buildConfig: .prod
+            ),
+            lockfile: lockfile
+        )
+        let androidNames = Set(androidResult.variantCsprojs.map {
+            String($0.split(separator: "/").last!.dropLast(".csproj".count))
+        })
+        XCTAssertFalse(androidNames.contains("IOSOnly"))
+        XCTAssertTrue(androidNames.contains("AllPlatforms"))
+    }
+
+    func testLockfileGenerateAsmdefVersionDefines() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        // Test that asmdef versionDefines are parsed
+        try writeFile(root, "Assets/Assemblies/Lib/Lib.asmdef", """
+        {"name":"Lib","versionDefines":[{"name":"com.unity.modules.physics2d","expression":"","define":"PACKAGE_PHYSICS2D"},{"name":"Unity","expression":"","define":"MY_FEATURE"}]}
+        """)
+        try writeFile(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n")
+
+        let scan = try ProjectScanner.scan(projectRoot: root)
+        let asmDef = scan.asmDefByName["Lib"]!
+
+        XCTAssertEqual(asmDef.versionDefines.count, 2)
+        XCTAssertEqual(asmDef.versionDefines[0].packageName, "com.unity.modules.physics2d")
+        XCTAssertEqual(asmDef.versionDefines[0].define, "PACKAGE_PHYSICS2D")
+        XCTAssertEqual(asmDef.versionDefines[1].define, "MY_FEATURE")
+    }
+
+    func testLockfileGenerateCsprojXmlWellFormed() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n")
+
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        let csproj = try readFile(root, "\(generatorRoot)/ios-editor/Main.csproj")
+
+        // Check essential XML structure
+        XCTAssertTrue(csproj.hasPrefix("<?xml version=\"1.0\""))
+        XCTAssertTrue(csproj.contains("<Project ToolsVersion=\"4.0\""))
+        XCTAssertTrue(csproj.contains("</Project>"))
+        XCTAssertTrue(csproj.contains("<AssemblyName>Main</AssemblyName>"))
+        XCTAssertTrue(csproj.contains("<LangVersion>9.0</LangVersion>"))
+        XCTAssertTrue(csproj.contains("<TargetFrameworkVersion>v4.7.1</TargetFrameworkVersion>"))
+        XCTAssertTrue(csproj.contains("<NoStdLib>true</NoStdLib>"))
+        XCTAssertTrue(csproj.contains("<Import Project=\"$(MSBuildToolsPath)"))
+
+        // Verify all opening tags have closing tags
+        let openItemGroups = csproj.components(separatedBy: "<ItemGroup>").count - 1
+        let closeItemGroups = csproj.components(separatedBy: "</ItemGroup>").count - 1
+        XCTAssertEqual(openItemGroups, closeItemGroups)
+    }
+
+    // MARK: - Performance tests
+
+    func testLockfileGeneratePerformance() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        // Create 20 assemblies with source files
+        for i in 0..<20 {
+            let name = "Assembly\(i)"
+            try writeFile(root, "Assets/Assemblies/\(name)/\(name).asmdef", "{\"name\":\"\(name)\"}\n")
+            for j in 0..<50 {
+                try writeFile(root, "Assets/Assemblies/\(name)/File\(j).cs", "class C\(i)_\(j) {}\n")
+            }
+        }
+
+        let options = GenerateOptions(
+            projectRoot: root, generatorRoot: generatorRoot,
+            platform: .ios, buildConfig: .editor
+        )
+
+        // Warm up
+        _ = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
+
+        let start = DispatchTime.now()
+        let iterations = 10
+        for _ in 0..<iterations {
+            _ = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
+        }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+        let perIteration = elapsed / Double(iterations)
+
+        // 20 assemblies x 50 files should generate in < 100ms per iteration
+        XCTAssertLessThan(perIteration, 100.0, "generateFromLockfile took \(perIteration)ms per call (20 assemblies, 50 files each)")
+    }
+
+    // MARK: - Lockfile test helpers
+
+    private func makeMinimalLockfile() -> Lockfile {
+        Lockfile(
+            unityVersion: "6000.2.7f2",
+            unityPath: "/test/unity",
+            langVersion: "9.0",
+            analyzers: [
+                "$(UnityPath)/Unity.app/Contents/Tools/Unity.SourceGenerators/Unity.SourceGenerators.dll",
+            ],
+            refsEngine: [
+                DllRef(name: "UnityEngine", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.dll"),
+                DllRef(name: "UnityEngine.CoreModule", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.CoreModule.dll"),
+            ],
+            refsEditor: [
+                DllRef(name: "UnityEditor", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEditor.dll"),
+            ],
+            refsNetstandard: [
+                DllRef(name: "netstandard", path: "$(UnityPath)/Unity.app/Contents/NetStandard/ref/2.1.0/netstandard.dll"),
+            ],
+            refsPlaybackIos: [
+                DllRef(name: "UnityEditor.iOS.Extensions", path: "$(UnityPath)/PlaybackEngines/iOSSupport/UnityEditor.iOS.Extensions.dll"),
+            ],
+            refsPlaybackAndroid: [
+                DllRef(name: "UnityEditor.Android.Extensions", path: "$(UnityPath)/PlaybackEngines/AndroidPlayer/UnityEditor.Android.Extensions.dll"),
+            ],
+            refsPlaybackStandalone: [],
+            refsProject: [
+                DllRef(name: "Firebase.App", path: "$(ProjectRoot)/Packages/com.google.firebase.app-pkg/Firebase/Plugins/Firebase.App.dll"),
+            ],
+            defines: ["UNITY_6000", "ENABLE_AR"],
+            definesScripting: ["ODIN_INSPECTOR"]
+        )
+    }
+
+    // MARK: - Regression tests
+
+    /// Lockfile generate must produce the same project set and source assignments as template generate.
+    func testLockfileAndTemplateProduceSameProjects() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeTemplates(root: root, projectNames: ["Runtime", "EditorLib", "Tests"])
+
+        try writeFile(root, "Assets/A/Runtime.asmdef", "{\"name\":\"Runtime\",\"references\":[\"EditorLib\"]}\n")
+        try writeFile(root, "Assets/B/EditorLib.asmdef", "{\"name\":\"EditorLib\",\"includePlatforms\":[\"Editor\"]}\n")
+        try writeFile(root, "Assets/C/Tests.asmdef", "{\"name\":\"Tests\",\"defineConstraints\":[\"UNITY_INCLUDE_TESTS\"]}\n")
+        try writeFile(root, "Assets/A/Code.cs", "class A {}\n")
+        try writeFile(root, "Assets/B/Code.cs", "class B {}\n")
+        try writeFile(root, "Assets/C/Code.cs", "class C {}\n")
+
+        let gen = SolutionGenerator()
+
+        // Template-based
+        let templateResult = try gen.generate(options: GenerateOptions(
+            projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .prod
+        ))
+        // Lockfile-based
+        let lockfileResult = try gen.generateFromLockfile(options: GenerateOptions(
+            projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .prod
+        ), lockfile: lockfile)
+
+        // Same project set
+        let templateNames = Set(templateResult.variantCsprojs.map {
+            String($0.split(separator: "/").last!)
+        })
+        let lockfileNames = Set(lockfileResult.variantCsprojs.map {
+            String($0.split(separator: "/").last!)
+        })
+        XCTAssertEqual(templateNames, lockfileNames)
+
+        // Same compile sets
+        for name in templateNames {
+            let templateSources = try readCompileSet(root: root, csprojPath: "\(generatorRoot)/ios-prod/\(name)")
+            let lockfileSources = try readCompileSet(root: root, csprojPath: "\(generatorRoot)/ios-prod/\(name)")
+            XCTAssertEqual(templateSources, lockfileSources, "Compile set mismatch for \(name)")
+        }
+    }
+
+    /// Template-based generate must still work after the refactor (shared scaffolding).
+    func testTemplateLegacyPathStillWorks() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        try writeTemplates(root: root, projectNames: ["Main"], defines: "MY_DEFINE")
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n")
+
+        let result = try SolutionGenerator().generate(options: GenerateOptions(
+            projectRoot: root, generatorRoot: generatorRoot, platform: .android, buildConfig: .dev
+        ))
+
+        XCTAssertEqual(result.variantCsprojs.count, 1)
+
+        let csproj = try readFile(root, "\(generatorRoot)/android-dev/Main.csproj")
+        XCTAssertTrue(csproj.contains("<Compile Include="))
+        XCTAssertTrue(csproj.contains("</Project>"))
+
+        let props = try readFile(root, "\(generatorRoot)/android-dev/Directory.Build.props")
+        XCTAssertTrue(props.contains("UNITY_ANDROID"))
+        XCTAssertTrue(props.contains("DEBUG"))
+        XCTAssertFalse(props.contains("UNITY_EDITOR"))
+        // Template path should NOT have UnityPath
+        XCTAssertFalse(props.contains("<UnityPath>"))
+    }
+
+    /// extractJsonObjectKeys must return keys, not values.
+    func testExtractJsonObjectKeys() throws {
+        let json = """
+        {
+          "dependencies": {
+            "com.unity.modules.audio": "1.0.0",
+            "com.unity.modules.physics2d": "2.0.0",
+            "singular-unity-package": "3.1.0"
+          }
+        }
+        """
+        let keys = extractJsonObjectKeys(json, key: "dependencies")
+        XCTAssertEqual(Set(keys), ["com.unity.modules.audio", "com.unity.modules.physics2d", "singular-unity-package"])
+    }
+
+    /// Shared direntName and isDirectory helpers must work correctly.
+    func testDirentNameHelper() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        try writeFile(root, "test.txt", "content")
+        XCTAssertTrue(isDirectory(root))
+        XCTAssertFalse(isDirectory("\(root)/test.txt"))
+        XCTAssertFalse(isDirectory("\(root)/nonexistent"))
+    }
+
+    /// BuildPlatform.unityPlatformName must map correctly.
+    func testBuildPlatformUnityName() throws {
+        XCTAssertEqual(BuildPlatform.ios.unityPlatformName, "iOS")
+        XCTAssertEqual(BuildPlatform.android.unityPlatformName, "Android")
+    }
+
+    /// Merged renderDirectoryBuildProps must handle both lockfile (with unityPath) and template (without) paths.
+    func testRenderDirectoryBuildPropsUnified() throws {
+        // With unityPath (lockfile path)
+        let withUnity = SolutionGenerator.renderDirectoryBuildProps(
+            projectRoot: "/project",
+            unityPath: "/unity",
+            platform: .ios,
+            buildConfig: .editor,
+            staticDefines: ["CUSTOM"]
+        )
+        XCTAssertTrue(withUnity.contains("<UnityPath>/unity</UnityPath>"))
+        XCTAssertTrue(withUnity.contains("CUSTOM"))
+        XCTAssertTrue(withUnity.contains("UNITY_IOS"))
+        XCTAssertTrue(withUnity.contains("UNITY_EDITOR"))
+
+        // Without unityPath (template path)
+        let withoutUnity = SolutionGenerator.renderDirectoryBuildProps(
+            projectRoot: "/project",
+            platform: .android,
+            buildConfig: .prod
+        )
+        XCTAssertFalse(withoutUnity.contains("<UnityPath>"))
+        XCTAssertTrue(withoutUnity.contains("UNITY_ANDROID"))
+        XCTAssertFalse(withoutUnity.contains("UNITY_EDITOR"))
+    }
+
+    // MARK: - Legacy template tests
 
     func testCategoryInferenceFromAsmDefFields() throws {
         let root = try makeTempProjectRoot()

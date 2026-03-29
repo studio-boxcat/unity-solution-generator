@@ -16,15 +16,14 @@ Installs to `~/.local/bin/` (symlinks):
 
 | Command | Description |
 |---------|-------------|
-| `init` | Extract `.csproj` templates from Unity-generated project files |
-| `generate` | Regenerate `.csproj`/`.sln` from templates and filesystem |
+| `lock` | Scan Unity installation + project to generate `csproj.lock` |
+| `generate` | Regenerate `.csproj`/`.sln` from lockfile and filesystem |
+| `init` | *(deprecated)* Alias for `lock` |
 
 ```bash
-unity-solution-generator init .                           # extract templates
-unity-solution-generator generate . ios prod              # ios-prod
-unity-solution-generator generate . ios dev               # ios-dev
-unity-solution-generator generate . ios editor            # ios-editor
-unity-solution-generator generate . android prod          # android-prod
+unity-solution-generator lock .                             # scan + write lockfile
+unity-solution-generator generate . ios editor              # ios-editor
+unity-solution-generator generate . android prod            # android-prod
 ```
 
 Positional args: `<command> <unity-root> <platform> <config>`.
@@ -39,8 +38,6 @@ Two orthogonal axes: **platform** (`ios`, `android`) and **configuration** (`pro
 | `dev` | runtime only | platform + `DEBUG;TRACE;UNITY_ASSERTIONS` |
 | `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE;UNITY_ASSERTIONS` |
 
-Dynamic defines are injected via `Directory.Build.props` per variant — templates contain only static defines with a `$(DefineConstants)` reference. Prod/dev variants exclude `<ProjectReference>` entries for editor/test projects during rendering.
-
 Each invocation produces one variant in `{platform}-{config}/` containing `.csproj` files, a `.sln`, and a `Directory.Build.props`.
 
 ## Directory structure
@@ -49,10 +46,9 @@ All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored
 
 ```
 Library/UnitySolutionGenerator/
-  templates/                    ← extracted from Unity-generated .csproj files
-    MyProject.csproj.template
-  ios-prod/                     ← variant: .csproj + .sln + Directory.Build.props
-  ios-dev/
+  csproj.lock                     ← lockfile: DLL refs, analyzers, defines
+  templates/                      ← (legacy) extracted from Unity-generated .csproj files
+  ios-prod/                       ← variant: .csproj + .sln + Directory.Build.props
   ios-editor/
   android-prod/
   ...
@@ -60,12 +56,11 @@ Library/UnitySolutionGenerator/
 
 ## Build validation
 
-`build-unity-sln` wraps `unity-solution-generator generate` + `dotnet build` with optimized MSBuild args (quiet output, RAR skip, shared compilation). Run from a Unity project root:
+`build-unity-sln` wraps `unity-solution-generator generate` + `dotnet build` with optimized MSBuild args. On build failure, it automatically re-runs `lock` and retries the failed variants once.
 
 ```bash
 build-unity-sln ios prod                  # single variant
 build-unity-sln ios,android editor,dev    # 4 parallel builds (cartesian product)
-build-unity-sln ios,android prod,dev,editor  # all 6 variants in parallel
 build-unity-sln --clean                   # clean cached artifacts (default: ios-editor)
 ```
 
@@ -79,9 +74,34 @@ dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -
 
 ## How it works
 
-1. **Init** reads Unity-generated `.csproj` files and strips dynamic parts: `<Compile>`, `<ProjectReference>`, dynamic defines, and `</Project>` are removed. Absolute paths become `$(ProjectRoot)`, dynamic defines become `$(DefineConstants)`. Everything else (DLL references, analyzers, build settings) is preserved as-is.
-2. **Generate** discovers projects from the templates directory, scans `Assets/` and `Packages/` for directories containing `.cs` files, resolves ownership via `asmdef`/`asmref` assembly roots, and appends `<ItemGroup>` (compile patterns + project references) + `</Project>` to each template fragment. The `.sln` is generated from a minimal template.
-3. **Directory.Build.props** is written per variant with `$(ProjectRoot)` (absolute path) and `$(DefineConstants)` (platform + config defines). Both the props file and the templates use `$(DefineConstants)` with append semantics so static and dynamic defines are combined correctly.
+```mermaid
+graph LR
+    A[lock] -->|scan Unity + project| B[csproj.lock]
+    B --> C[generate]
+    C -->|+ asmdef scan| D[variant .csproj/.sln]
+```
+
+1. **Lock** scans the Unity installation and project filesystem to discover all DLL references, analyzers, and preprocessor defines. No Unity Editor required — it reads from `ProjectSettings/ProjectVersion.txt` to find the Unity install path, then scans `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, and `Library/PackageCache/` for DLLs. Feature defines (`ENABLE_*`) use a hardcoded superset; scripting defines come from `ProjectSettings.asset`; per-asmdef `versionDefines` are evaluated against `manifest.json`. Output: `csproj.lock`.
+
+2. **Generate** reads the lockfile, scans `Assets/` and `Packages/` for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, and renders complete `.csproj` files (XML header + analyzers + DLL refs + compile patterns + project references). `Directory.Build.props` injects `$(ProjectRoot)`, `$(UnityPath)`, and all defines (static from lockfile + dynamic per variant).
+
+3. **Legacy fallback**: If no lockfile exists but templates do, `generate` uses the old template-based path (with a deprecation warning).
+
+### What lock discovers
+
+| Source | Data |
+|--------|------|
+| `ProjectVersion.txt` | Unity version, editor install path |
+| `Managed/UnityEngine/` | Engine + editor module DLLs |
+| `NetStandard/` | System.* shim DLLs |
+| `PlaybackEngines/` | Platform-specific extension DLLs |
+| `Tools/Unity.SourceGenerators/` | Analyzer DLLs |
+| `Assets/`, `Packages/`, `Library/PackageCache/` | Third-party project DLLs + analyzers |
+| Unity version string | `UNITY_X_Y_Z`, `_OR_NEWER` defines |
+| Hardcoded superset | `ENABLE_*` feature flags |
+| `ProjectSettings.asset` | Scripting define symbols |
+| asmdef `versionDefines` | Conditional defines per installed package |
+| asmdef `allowUnsafeCode` | `AllowUnsafeBlocks` per project |
 
 ### Category inference
 
@@ -92,15 +112,15 @@ dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -
 | `defineConstraints` contains `"UNITY_EDITOR"` | **editor** |
 | Everything else | **runtime** |
 
-Platform-specific assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`) are treated as **runtime**, but only included in prod/dev variants when the target platform matches. Editor variants include all projects regardless. Projects without `.asmdef` files (legacy assemblies) are treated as **runtime** with no platform restriction.
+Platform-specific assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`) are treated as **runtime**, but only included in prod/dev variants when the target platform matches. Editor variants include all projects regardless.
 
 ### Source ownership resolution
 
-Source files are assigned per-directory: for each directory containing `.cs` files, the generator walks upward looking for the nearest `asmdef` or `asmref` assembly root. All `.cs` files in that directory belong to that assembly. Directories with no assembly root fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.).
+For each directory containing `.cs` files, the generator walks upward looking for the nearest `asmdef` or `asmref` assembly root. Directories with no assembly root fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.).
 
 ### Compile patterns
 
-Instead of listing every `.cs` file individually, the generator emits per-directory relative glob patterns:
+Per-directory relative glob patterns instead of individual file listings:
 
 ```xml
 <Compile Include="../../../Assets/Game/*.cs" />
@@ -111,20 +131,22 @@ Directories ending with `~` or starting with `.` are excluded from scanning.
 
 ## Performance
 
-Benchmarked on a project with 19 assemblies (~26k source files across Assets/ and Packages/):
+Benchmarked on meow-tower (13 assemblies, ~26k source files):
 
-| Variant | Mean |
+| Command | Mean |
 |---------|------|
-| ios-prod | 26ms |
-| ios-editor | 27ms |
-| android-prod | 26ms |
+| `lock` | 70ms |
+| `generate` (any variant) | 23ms |
+| `dotnet build` (ios-editor) | ~2s |
 
-No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch. Filesystem scan runs in parallel via GCD (`concurrentPerform`), and template rendering is append-only with no string replacement passes.
+No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch. Filesystem scan runs in parallel via GCD.
 
 ## Unity project setup
 
-After cloning, or after Unity upgrades / package changes, re-initialize templates:
+After cloning, or after Unity upgrades / package changes:
 
 ```bash
-unity-solution-generator init .
+unity-solution-generator lock .
 ```
+
+The lockfile is auto-generated on first `generate` if missing. Re-run `lock` when Unity version changes or packages are added/removed. `build-unity-sln` auto-retries with a fresh lock on build failure.

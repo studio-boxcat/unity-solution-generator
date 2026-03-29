@@ -11,32 +11,45 @@ struct CLI {
         }
 
         switch args.first {
+        case "lock":
+            args.removeFirst()
+            runLock(args)
         case "init":
             args.removeFirst()
-            runInit(args)
+            fputs("warning: 'init' is deprecated, use 'lock' instead.\n", stderr)
+            runLock(args)
         case "generate":
             args.removeFirst()
             runGenerate(args)
         default:
-            die("Unknown command '\(args.first!)'. Use 'init' or 'generate'.")
+            die("Unknown command '\(args.first!)'. Use 'lock', 'generate', or 'init'.")
         }
     }
 
-    static func runInit(_ args: [String]) {
+    static func runLock(_ args: [String]) {
         guard !args.isEmpty else {
-            die("init requires: <unity-root>")
+            die("lock requires: <unity-root>")
         }
 
+        let projectRoot = resolveRealPath(args[0])
+        let generatorRoot = defaultGeneratorRoot
+        let generatorDir = joinPath(projectRoot, generatorRoot)
+        createDirectoryRecursive(generatorDir)
+        let lockfilePath = joinPath(generatorDir, "csproj.lock")
+
         do {
-            let updated = try TemplateExtractor.extract(
-                options: ExtractTemplatesOptions(projectRoot: args[0])
-            )
-            if updated.isEmpty {
-                print("No changes.")
-            } else {
-                print("Extracted \(updated.count) template(s):")
-                for file in updated { print("  - \(file)") }
-            }
+            let lockfile = try LockfileScanner.scan(projectRoot: projectRoot)
+            try LockfileIO.write(lockfile, to: lockfilePath)
+
+            let totalRefs = lockfile.refsEngine.count + lockfile.refsEditor.count
+                + lockfile.refsNetstandard.count + lockfile.refsPlaybackIos.count
+                + lockfile.refsPlaybackAndroid.count + lockfile.refsPlaybackStandalone.count
+                + lockfile.refsProject.count
+
+            print("Locked csproj.lock:")
+            print("  Unity \(lockfile.unityVersion) (\(lockfile.unityPath))")
+            print("  \(totalRefs) DLL references, \(lockfile.analyzers.count) analyzers")
+            print("  \(lockfile.defines.count) defines, \(lockfile.definesScripting.count) scripting defines")
         } catch {
             die("\(error)")
         }
@@ -72,13 +85,41 @@ struct CLI {
             }
         }
 
+        let resolvedRoot = resolveRealPath(projectRoot)
+        let generatorRoot = defaultGeneratorRoot
+        let lockfilePath = joinPath(resolvedRoot, joinPath(generatorRoot, "csproj.lock"))
+
         do {
-            let result = try SolutionGenerator().generate(options: GenerateOptions(
+            let options = GenerateOptions(
                 projectRoot: projectRoot,
                 verbose: verbose,
                 platform: platform,
                 buildConfig: buildConfig
-            ))
+            )
+
+            let result: GenerateResult
+
+            if fileExists(lockfilePath) {
+                // Lockfile-based generation
+                let lockfile = try LockfileIO.read(from: lockfilePath)
+                result = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
+            } else {
+                // Check for templates (legacy fallback)
+                let templatesDir = joinPath(resolvedRoot, joinPath(generatorRoot, "templates"))
+                if fileExists(templatesDir) && !listDirectory(templatesDir).isEmpty {
+                    fputs("warning: Using legacy templates. Run 'unity-solution-generator lock' to migrate.\n", stderr)
+                    result = try SolutionGenerator().generate(options: options)
+                } else {
+                    // Auto-run lock
+                    fputs("No lockfile found, running lock...\n", stderr)
+                    let generatorDir = joinPath(resolvedRoot, generatorRoot)
+                    createDirectoryRecursive(generatorDir)
+                    let lockfile = try LockfileScanner.scan(projectRoot: resolvedRoot)
+                    try LockfileIO.write(lockfile, to: lockfilePath)
+                    fputs("Locked: \(lockfile.unityVersion)\n", stderr)
+                    result = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
+                }
+            }
 
             print(result.variantSlnPath)
 
@@ -98,12 +139,13 @@ struct CLI {
     static func printUsage() {
         print("""
         USAGE:
-          unity-solution-generator init <unity-root>
+          unity-solution-generator lock <unity-root>
           unity-solution-generator generate <unity-root> <platform> <config> [options]
 
         COMMANDS:
-          init                  Extract .csproj templates from Unity-generated project files
+          lock                  Scan Unity installation and project to generate csproj.lock
           generate              Regenerate .csproj/.sln for a platform+config variant
+          init                  (deprecated) Alias for lock
 
         ARGUMENTS:
           unity-root            Unity project root

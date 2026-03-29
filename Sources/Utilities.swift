@@ -166,22 +166,83 @@ func createDirectoryRecursive(_ path: String) {
     }
 }
 
+func direntName(_ entry: UnsafeMutablePointer<dirent>) -> String {
+    var d_name = entry.pointee.d_name
+    return withUnsafePointer(to: &d_name) {
+        String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
+    }
+}
+
+func isDirectory(_ path: String) -> Bool {
+    var st = stat()
+    guard stat(path, &st) == 0 else { return false }
+    return (st.st_mode & S_IFMT) == S_IFDIR
+}
+
 func listDirectory(_ path: String) -> [String] {
     guard let dir = opendir(path) else { return [] }
     defer { closedir(dir) }
     var entries: [String] = []
     while let entry = readdir(dir) {
-        var d_name = entry.pointee.d_name
-        let name = withUnsafePointer(to: &d_name) {
-            String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
-        }
+        let name = direntName(entry)
         if name == "." || name == ".." { continue }
         entries.append(name)
     }
     return entries
 }
 
+/// Extract JSON object keys (for parsing manifest.json dependencies).
+func extractJsonObjectKeys(_ json: String, key: String) -> [String] {
+    let needle = "\"\(key)\""
+    guard let keyRange = json.firstRange(of: needle) else { return [] }
+    var idx = keyRange.upperBound
+    while idx < json.endIndex && json[idx] != "{" { json.formIndex(after: &idx) }
+    guard idx < json.endIndex else { return [] }
+    json.formIndex(after: &idx)
+    var results: [String] = []
+    var depth = 1
+    while idx < json.endIndex && depth > 0 {
+        let ch = json[idx]
+        if ch == "{" { depth += 1 }
+        else if ch == "}" { depth -= 1; if depth == 0 { break } }
+        else if ch == "\"" && depth == 1 {
+            json.formIndex(after: &idx)
+            let start = idx
+            while idx < json.endIndex && json[idx] != "\"" { json.formIndex(after: &idx) }
+            guard idx < json.endIndex else { break }
+            let k = String(json[start..<idx])
+            json.formIndex(after: &idx)
+            // Skip to colon to confirm this is a key
+            while idx < json.endIndex && (json[idx] == " " || json[idx] == "\t" || json[idx] == "\n" || json[idx] == "\r") {
+                json.formIndex(after: &idx)
+            }
+            if idx < json.endIndex && json[idx] == ":" {
+                results.append(k)
+            }
+            continue
+        }
+        json.formIndex(after: &idx)
+    }
+    return results
+}
+
 // MARK: - Minimal JSON extraction
+
+func extractJsonBool(_ json: String, key: String) -> Bool? {
+    let needle = "\"\(key)\""
+    guard let keyRange = json.firstRange(of: needle) else { return nil }
+    var idx = keyRange.upperBound
+    while idx < json.endIndex && json[idx] != ":" { json.formIndex(after: &idx) }
+    guard idx < json.endIndex else { return nil }
+    json.formIndex(after: &idx)
+    while idx < json.endIndex && (json[idx] == " " || json[idx] == "\t" || json[idx] == "\n" || json[idx] == "\r") {
+        json.formIndex(after: &idx)
+    }
+    guard idx < json.endIndex else { return nil }
+    if json[idx...].hasPrefix("true") { return true }
+    if json[idx...].hasPrefix("false") { return false }
+    return nil
+}
 
 func extractJsonString(_ json: String, key: String) -> String? {
     let needle = "\"\(key)\""
