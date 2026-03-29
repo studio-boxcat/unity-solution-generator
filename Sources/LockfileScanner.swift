@@ -253,6 +253,8 @@ func generateVersionDefines(version: String) -> [String] {
         (2021, 1), (2021, 2), (2021, 3),
         (2022, 1), (2022, 2), (2022, 3),
         (2023, 1), (2023, 2), (2023, 3),
+        (2024, 1), (2024, 2), (2024, 3),
+        (2025, 1), (2025, 2), (2025, 3),
     ]
     for (maj, min) in versionPoints {
         if major > maj || (major == maj && minor >= min) {

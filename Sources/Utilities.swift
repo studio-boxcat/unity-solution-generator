@@ -115,7 +115,7 @@ func readFile(_ path: String) throws -> String {
         if n == 0 { break } // unexpected EOF (file truncated)
         read += n
     }
-    return String(decoding: UnsafeBufferPointer(start: buf, count: size), as: UTF8.self)
+    return String(decoding: UnsafeBufferPointer(start: buf, count: read), as: UTF8.self)
 }
 
 @discardableResult

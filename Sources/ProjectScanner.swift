@@ -364,18 +364,19 @@ private func scanAndCache(rootPath: String, cachePath: String) -> FileScan {
     let fileScan = scanProjectFiles(rootPath: rootPath, roots: ["Assets", "Packages"])
 
     // Collect mtimes: scan roots + all directories that contributed to the scan result.
-    // Including scan roots ensures new child directories trigger invalidation.
+    // Track scan roots + all directories that contributed to results + all ancestors.
+    // This ensures new files/dirs at any depth trigger cache invalidation.
     var allDirs: Set<String> = ["Assets", "Packages"]
-    for dir in fileScan.csDirs { allDirs.insert(dir) }
-    for path in fileScan.asmDefPaths { allDirs.insert(parentDirectory(of: path)) }
-    for path in fileScan.asmRefPaths { allDirs.insert(parentDirectory(of: path)) }
-    // Also include intermediate directories so new subtrees are detected
-    for dir in fileScan.csDirs {
+    var addWithAncestors = { (dir: String) in
+        allDirs.insert(dir)
         var parent = parentDirectory(of: dir)
         while !parent.isEmpty && allDirs.insert(parent).inserted {
             parent = parentDirectory(of: parent)
         }
     }
+    for dir in fileScan.csDirs { addWithAncestors(dir) }
+    for path in fileScan.asmDefPaths { addWithAncestors(parentDirectory(of: path)) }
+    for path in fileScan.asmRefPaths { addWithAncestors(parentDirectory(of: path)) }
 
     var s = "# scan-cache — auto-generated, do not edit\n"
     s += "[cs]\n"

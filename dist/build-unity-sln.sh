@@ -88,6 +88,9 @@ done
 # Main
 #---------------------------------------
 
+command -v unity-solution-generator >/dev/null 2>&1 || { echo "error: unity-solution-generator not found in PATH"; exit 1; }
+command -v dotnet >/dev/null 2>&1 || { echo "error: dotnet not found in PATH"; exit 1; }
+
 if [[ ${#PLATFORMS[@]} -eq 0 ]]; then echo "platform: ios (default)"; PLATFORMS=(ios); fi
 if [[ ${#CONFIGS[@]} -eq 0 ]]; then echo "config:   editor (default)"; CONFIGS=(editor); fi
 

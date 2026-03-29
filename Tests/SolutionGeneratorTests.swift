@@ -939,8 +939,7 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertEqual(Set(keys), ["com.unity.modules.audio", "com.unity.modules.physics2d", "singular-unity-package"])
     }
 
-    /// Shared direntName and isDirectory helpers must work correctly.
-    func testDirentNameHelper() throws {
+    func testIsDirectoryHelper() throws {
         let root = try makeTempProjectRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
 
@@ -948,6 +947,36 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertTrue(isDirectory(root))
         XCTAssertFalse(isDirectory("\(root)/test.txt"))
         XCTAssertFalse(isDirectory("\(root)/nonexistent"))
+    }
+
+    func testScanCacheInvalidatesOnNewCsFile() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/A.cs", "class A {}\n")
+
+        // First generate populates scan cache
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor),
+            lockfile: lockfile
+        )
+        try assertCompileSet(root: root, csprojPath: "\(generatorRoot)/ios-editor/Main.csproj", expected: ["Assets/Assemblies/Main/A.cs"])
+
+        // Add a new .cs file in a previously empty dir (the cache bug scenario)
+        try writeFile(root, "Assets/Assemblies/Main/Sub/B.cs", "class B {}\n")
+
+        // Second generate must pick up the new file
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor),
+            lockfile: lockfile
+        )
+        try assertCompileSet(root: root, csprojPath: "\(generatorRoot)/ios-editor/Main.csproj", expected: [
+            "Assets/Assemblies/Main/A.cs",
+            "Assets/Assemblies/Main/Sub/B.cs",
+        ])
     }
 
     /// BuildPlatform.unityPlatformName must map correctly.
