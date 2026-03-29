@@ -92,7 +92,10 @@ struct ProjectScanner {
         let rootPath = projectRoot
 
         let scanMark = ProfilerMark("scan.total")
-        let fileScan = scanProjectFiles(rootPath: rootPath, roots: ["Assets", "Packages"])
+        let generatorDir = joinPath(rootPath, defaultGeneratorRoot)
+        let cachePath = joinPath(generatorDir, "scan-cache")
+        let fileScan = loadCachedScan(cachePath, rootPath: rootPath)
+            ?? scanAndCache(rootPath: rootPath, cachePath: cachePath)
         scanMark.end()
 
         // Load .asmdef files and build name → record map.
@@ -301,5 +304,91 @@ private func resolveLegacyProject(forDirectory directory: String) -> String? {
         return isFirstPass ? "Assembly-CSharp-Editor-firstpass" : "Assembly-CSharp-Editor"
     }
     return isFirstPass ? "Assembly-CSharp-firstpass" : "Assembly-CSharp"
+}
+
+// MARK: - Scan cache
+
+/// Try loading cached scan results. Returns nil if cache is missing or stale.
+private func loadCachedScan(_ cachePath: String, rootPath: String) -> FileScan? {
+    guard let content = try? readFile(cachePath) else { return nil }
+
+    var csDirs: [String] = []
+    var asmDefPaths: [String] = []
+    var asmRefPaths: [String] = []
+    var dirMtimes: [(String, UInt64)] = []
+
+    enum CacheSection { case cs, asmdef, asmref, mtimes }
+    var section: CacheSection? = nil
+
+    for rawLine in content.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = String(rawLine)
+        if line.isEmpty || line.hasPrefix("#") { continue }
+        switch line {
+        case "[cs]": section = .cs; continue
+        case "[asmdef]": section = .asmdef; continue
+        case "[asmref]": section = .asmref; continue
+        case "[mtimes]": section = .mtimes; continue
+        default: break
+        }
+        switch section {
+        case .cs: csDirs.append(line)
+        case .asmdef: asmDefPaths.append(line)
+        case .asmref: asmRefPaths.append(line)
+        case .mtimes:
+            if let pipeIdx = line.firstIndex(of: "|"),
+               let mtime = UInt64(line[line.index(after: pipeIdx)...]) {
+                dirMtimes.append((String(line[..<pipeIdx]), mtime))
+            }
+        case nil: break
+        }
+    }
+
+    guard !dirMtimes.isEmpty else { return nil }
+
+    // Validate: stat each cached directory, check mtime matches
+    let validateMark = ProfilerMark("scan.cache-validate")
+    for (relDir, cachedMtime) in dirMtimes {
+        let fullPath = relDir.isEmpty ? rootPath : joinPath(rootPath, relDir)
+        var st = stat()
+        guard stat(fullPath, &st) == 0 else { return nil }
+        let currentMtime = UInt64(st.st_mtimespec.tv_sec) &* 1_000_000_000 &+ UInt64(st.st_mtimespec.tv_nsec)
+        if currentMtime != cachedMtime { return nil }
+    }
+    validateMark.end()
+
+    return FileScan(csDirs: csDirs, asmDefPaths: asmDefPaths, asmRefPaths: asmRefPaths)
+}
+
+/// Full scan + write cache for next time.
+private func scanAndCache(rootPath: String, cachePath: String) -> FileScan {
+    let fileScan = scanProjectFiles(rootPath: rootPath, roots: ["Assets", "Packages"])
+
+    // Collect mtimes for all scanned directories (parents of csDirs + asmdef/asmref dirs)
+    var allDirs: Set<String> = []
+    for dir in fileScan.csDirs { allDirs.insert(dir) }
+    for path in fileScan.asmDefPaths { allDirs.insert(parentDirectory(of: path)) }
+    for path in fileScan.asmRefPaths { allDirs.insert(parentDirectory(of: path)) }
+
+    var s = "# scan-cache — auto-generated, do not edit\n"
+    s += "[cs]\n"
+    for dir in fileScan.csDirs { s += "\(dir)\n" }
+    s += "[asmdef]\n"
+    for path in fileScan.asmDefPaths { s += "\(path)\n" }
+    s += "[asmref]\n"
+    for path in fileScan.asmRefPaths { s += "\(path)\n" }
+    s += "[mtimes]\n"
+    for dir in allDirs.sorted() {
+        let fullPath = dir.isEmpty ? rootPath : joinPath(rootPath, dir)
+        var st = stat()
+        if stat(fullPath, &st) == 0 {
+            let ns = UInt64(st.st_mtimespec.tv_sec) &* 1_000_000_000 &+ UInt64(st.st_mtimespec.tv_nsec)
+            s += "\(dir)|\(ns)\n"
+        }
+    }
+
+    createDirectoryRecursive(parentDirectory(of: cachePath))
+    try? writeFileIfChanged(cachePath, s)
+
+    return fileScan
 }
 
