@@ -853,8 +853,13 @@ final class SolutionGeneratorTests: XCTestCase {
         defer { try? FileManager.default.removeItem(atPath: root) }
 
         let lockfile = makeMinimalLockfile()
+        let templateRoot = "tpl-template"
+        let lockfileRoot = "tpl-lockfile"
 
-        try writeTemplates(root: root, projectNames: ["Runtime", "EditorLib", "Tests"])
+        // Write templates for the template-based path
+        for name in ["Runtime", "EditorLib", "Tests"] {
+            try writeFile(root, "\(templateRoot)/templates/\(name).csproj.template", "<Project>\n")
+        }
 
         try writeFile(root, "Assets/A/Runtime.asmdef", "{\"name\":\"Runtime\",\"references\":[\"EditorLib\"]}\n")
         try writeFile(root, "Assets/B/EditorLib.asmdef", "{\"name\":\"EditorLib\",\"includePlatforms\":[\"Editor\"]}\n")
@@ -865,13 +870,13 @@ final class SolutionGeneratorTests: XCTestCase {
 
         let gen = SolutionGenerator()
 
-        // Template-based
+        // Template-based (writes to tpl-template/ios-prod/)
         let templateResult = try gen.generate(options: GenerateOptions(
-            projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .prod
+            projectRoot: root, generatorRoot: templateRoot, platform: .ios, buildConfig: .prod
         ))
-        // Lockfile-based
+        // Lockfile-based (writes to tpl-lockfile/ios-prod/)
         let lockfileResult = try gen.generateFromLockfile(options: GenerateOptions(
-            projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .prod
+            projectRoot: root, generatorRoot: lockfileRoot, platform: .ios, buildConfig: .prod
         ), lockfile: lockfile)
 
         // Same project set
@@ -883,10 +888,10 @@ final class SolutionGeneratorTests: XCTestCase {
         })
         XCTAssertEqual(templateNames, lockfileNames)
 
-        // Same compile sets
+        // Same compile sets (read from separate output directories)
         for name in templateNames {
-            let templateSources = try readCompileSet(root: root, csprojPath: "\(generatorRoot)/ios-prod/\(name)")
-            let lockfileSources = try readCompileSet(root: root, csprojPath: "\(generatorRoot)/ios-prod/\(name)")
+            let templateSources = try readCompileSet(root: root, csprojPath: "\(templateRoot)/ios-prod/\(name)")
+            let lockfileSources = try readCompileSet(root: root, csprojPath: "\(lockfileRoot)/ios-prod/\(name)")
             XCTAssertEqual(templateSources, lockfileSources, "Compile set mismatch for \(name)")
         }
     }

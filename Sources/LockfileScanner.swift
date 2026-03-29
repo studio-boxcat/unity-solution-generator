@@ -44,7 +44,6 @@ struct LockfileScanner {
         let (version, unityPath) = try resolveUnityPath(projectRoot: projectRoot)
         let appContents = joinPath(unityPath, "Unity.app/Contents")
 
-        // Engine + editor DLLs from Managed/UnityEngine/
         let managedEngineDir = joinPath(appContents, "Managed/UnityEngine")
         var engineRefs: [DllRef] = []
         var editorRefs: [DllRef] = []
@@ -59,13 +58,12 @@ struct LockfileScanner {
             }
         }
 
-        // UnityEditor.Graphs from Contents/Managed/ (check directly instead of scanning)
+        // Not in Managed/UnityEngine/ — lives one level up
         let graphsDll = joinPath(appContents, "Managed/UnityEditor.Graphs.dll")
         if fileExists(graphsDll) {
             editorRefs.append(DllRef(name: "UnityEditor.Graphs", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEditor.Graphs.dll"))
         }
 
-        // NetStandard shims
         let netstdBase = joinPath(appContents, "NetStandard")
         var netstdRefs: [DllRef] = []
         walkFiles(directory: netstdBase, basePath: netstdBase, extensions: [".dll"], skipNativePluginDirs: false) { relPath, dll in
@@ -73,25 +71,22 @@ struct LockfileScanner {
             netstdRefs.append(DllRef(name: name, path: "$(UnityPath)/Unity.app/Contents/NetStandard/\(relPath)"))
         }
 
-        // Playback engines
         let playbackBase = joinPath(unityPath, "PlaybackEngines")
         let iosRefs = scanPlaybackDlls(joinPath(playbackBase, "iOSSupport"), prefix: "PlaybackEngines/iOSSupport")
         let androidRefs = scanPlaybackDlls(joinPath(playbackBase, "AndroidPlayer"), prefix: "PlaybackEngines/AndroidPlayer")
         let standaloneDir = joinPath(appContents, "PlaybackEngines/MacStandaloneSupport")
         let standaloneRefs = scanPlaybackDlls(standaloneDir, prefix: "Unity.app/Contents/PlaybackEngines/MacStandaloneSupport")
 
-        // Unity source generators (analyzers)
         let sourceGenDir = joinPath(appContents, "Tools/Unity.SourceGenerators")
         var analyzers: [String] = []
         for dll in listDirectory(sourceGenDir).filter({ $0.hasSuffix(".dll") }).sorted() {
             analyzers.append("$(UnityPath)/Unity.app/Contents/Tools/Unity.SourceGenerators/\(dll)")
         }
 
-        // Project DLLs + analyzers (deduplicate by assembly name, first wins)
+        // Deduplicate by assembly name (first wins across Assets > Packages > PackageCache)
         var projectRefs: [DllRef] = []
         var seenProjectDlls: Set<String> = []
         var seenAnalyzers: Set<String> = []
-        // Also collect asmdef paths during the same walk to avoid a second traversal
         var asmdefPaths: [String] = []
         for root in ["Assets", "Packages", "Library/PackageCache"] {
             let rootDir = joinPath(projectRoot, root)
@@ -115,7 +110,6 @@ struct LockfileScanner {
         analyzers.sort()
         projectRefs.sort { $0.name < $1.name }
 
-        // Defines
         let versionDefines = generateVersionDefines(version: version)
         let asmdefDefines = collectAsmdefVersionDefines(projectRoot: projectRoot, asmdefPaths: asmdefPaths)
         let allDefines = versionDefines + defaultFeatureDefines + asmdefDefines

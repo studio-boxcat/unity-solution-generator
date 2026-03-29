@@ -95,7 +95,6 @@ private struct GenerationContext {
     let projectRoot: String
     let generatorRoot: String
     let scan: ProjectScanner.Result
-    let projects: [ProjectInfo]
     let projectByName: [String: ProjectInfo]
     let patternsByProject: [String: [String]]
     let includedProjects: [ProjectInfo]
@@ -167,7 +166,6 @@ private func buildContext(options: GenerateOptions, projects: [ProjectInfo], sca
         projectRoot: projectRoot,
         generatorRoot: generatorRoot,
         scan: scan,
-        projects: projects,
         projectByName: projectByName,
         patternsByProject: patternsByProject,
         includedProjects: includedProjects,

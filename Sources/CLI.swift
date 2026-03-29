@@ -62,19 +62,12 @@ struct CLI {
 
         let projectRoot = args[0]
 
-        let platform: BuildPlatform
-        switch args[1] {
-        case "ios": platform = .ios
-        case "android": platform = .android
-        default: die("Unknown platform '\(args[1])'. Use 'ios' or 'android'.")
+        guard let platform = BuildPlatform(rawValue: args[1]) else {
+            die("Unknown platform '\(args[1])'. Use 'ios' or 'android'.")
         }
 
-        let buildConfig: BuildConfig
-        switch args[2] {
-        case "prod": buildConfig = .prod
-        case "dev": buildConfig = .dev
-        case "editor": buildConfig = .editor
-        default: die("Unknown config '\(args[2])'. Use 'prod', 'dev', or 'editor'.")
+        guard let buildConfig = BuildConfig(rawValue: args[2]) else {
+            die("Unknown config '\(args[2])'. Use 'prod', 'dev', or 'editor'.")
         }
 
         var verbose = false
