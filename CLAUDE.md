@@ -136,10 +136,13 @@ Benchmarked on meow-tower (13 assemblies, ~5k .cs files, ~43k total files across
 | Command | Mean | Notes |
 |---------|------|-------|
 | `lock` | 67ms | Scans Unity install + project DLLs/asmdefs |
-| `generate` (any variant) | 23ms | ~21ms filesystem scan + ~2ms render |
+| `generate` (cold) | 23ms | Full filesystem scan + render |
+| `generate` (warm) | 3ms | Cached scan validated via directory mtimes |
 | `dotnet build` (ios-editor) | ~2s | Cached incremental build |
 
-The filesystem scan (90% of generate time) uses parallel POSIX readdir via GCD `concurrentPerform`. At 23ms for 43k files across 2.3k directories, it's already ~2.8x faster than sequential C readdir on the same data.
+Generate caches filesystem scan results (`scan-cache`) with nanosecond-precision directory mtimes. On subsequent runs, validates cached mtimes with `stat()` (~1ms) instead of a full readdir walk (~21ms). Any file add/remove/change automatically invalidates the cache and triggers a full re-scan.
+
+Process startup overhead on macOS is ~22ms (dynamic linking + Swift runtime), so wall-clock time is ~22ms regardless of cache state — the speedup matters when called as a library or when startup costs decrease.
 
 No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch.
 
