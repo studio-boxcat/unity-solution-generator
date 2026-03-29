@@ -131,15 +131,17 @@ Directories ending with `~` or starting with `.` are excluded from scanning.
 
 ## Performance
 
-Benchmarked on meow-tower (13 assemblies, ~26k source files):
+Benchmarked on meow-tower (13 assemblies, ~5k .cs files, ~43k total files across 2.3k directories):
 
-| Command | Mean |
-|---------|------|
-| `lock` | 70ms |
-| `generate` (any variant) | 23ms |
-| `dotnet build` (ios-editor) | ~2s |
+| Command | Mean | Notes |
+|---------|------|-------|
+| `lock` | 67ms | Scans Unity install + project DLLs/asmdefs |
+| `generate` (any variant) | 23ms | ~21ms filesystem scan + ~2ms render |
+| `dotnet build` (ios-editor) | ~2s | Cached incremental build |
 
-No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch. Filesystem scan runs in parallel via GCD.
+The filesystem scan (90% of generate time) uses parallel POSIX readdir via GCD `concurrentPerform`. At 23ms for 43k files across 2.3k directories, it's already ~2.8x faster than sequential C readdir on the same data.
+
+No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch.
 
 ## Unity project setup
 
