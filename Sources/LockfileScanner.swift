@@ -68,7 +68,7 @@ struct LockfileScanner {
         // NetStandard shims
         let netstdBase = joinPath(appContents, "NetStandard")
         var netstdRefs: [DllRef] = []
-        walkDlls(directory: netstdBase, basePath: netstdBase) { relPath, dll in
+        walkFiles(directory: netstdBase, basePath: netstdBase, extensions: [".dll"], skipNativePluginDirs: false) { relPath, dll in
             let name = String(dll.dropLast(4))
             netstdRefs.append(DllRef(name: name, path: "$(UnityPath)/Unity.app/Contents/NetStandard/\(relPath)"))
         }
@@ -175,6 +175,7 @@ private func walkFiles(
     directory: String,
     basePath: String,
     extensions: [String],
+    skipNativePluginDirs: Bool = true,
     handler: (String, String) -> Void
 ) {
     guard let dir = opendir(directory) else { return }
@@ -188,8 +189,8 @@ private func walkFiles(
         let dType = entry.pointee.d_type
 
         if dType == DT_DIR || (dType == DT_LNK || dType == DT_UNKNOWN) && isDirectory(childPath) {
-            if isNativePluginDir(name) { continue }
-            walkFiles(directory: childPath, basePath: basePath, extensions: extensions, handler: handler)
+            if skipNativePluginDirs && isNativePluginDir(name) { continue }
+            walkFiles(directory: childPath, basePath: basePath, extensions: extensions, skipNativePluginDirs: skipNativePluginDirs, handler: handler)
         } else {
             for ext in extensions {
                 if name.hasSuffix(ext) {
@@ -199,33 +200,6 @@ private func walkFiles(
                     }
                     break
                 }
-            }
-        }
-    }
-}
-
-/// Walk for DLLs only (NetStandard dirs have no native plugin concerns).
-private func walkDlls(
-    directory: String,
-    basePath: String,
-    handler: (String, String) -> Void
-) {
-    guard let dir = opendir(directory) else { return }
-    defer { closedir(dir) }
-
-    while let entry = readdir(dir) {
-        let name = direntName(entry)
-        if name == "." || name == ".." || name.first == "." { continue }
-
-        let childPath = "\(directory)/\(name)"
-        let dType = entry.pointee.d_type
-
-        if dType == DT_DIR || (dType == DT_LNK || dType == DT_UNKNOWN) && isDirectory(childPath) {
-            walkDlls(directory: childPath, basePath: basePath, handler: handler)
-        } else if name.hasSuffix(".dll") {
-            let prefixLen = basePath.count + 1
-            if childPath.count > prefixLen {
-                handler(String(childPath.dropFirst(prefixLen)), name)
             }
         }
     }

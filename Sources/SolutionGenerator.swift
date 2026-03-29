@@ -105,13 +105,13 @@ private struct GenerationContext {
     let warnings: [String]
 }
 
-private func buildContext(options: GenerateOptions, projects: [ProjectInfo]) throws -> GenerationContext {
+private func buildContext(options: GenerateOptions, projects: [ProjectInfo], scan: ProjectScanner.Result? = nil) throws -> GenerationContext {
     let projectRoot = resolveRealPath(options.projectRoot)
     let generatorRoot = options.generatorRoot
     let generatorDir = joinPath(projectRoot, generatorRoot)
     let platform = options.platform
 
-    let scan = try ProjectScanner.scan(projectRoot: projectRoot)
+    let scan = try scan ?? ProjectScanner.scan(projectRoot: projectRoot)
 
     let projectByName = Dictionary(uniqueKeysWithValues: projects.map { ($0.name, $0) })
 
@@ -254,7 +254,7 @@ struct SolutionGenerator {
         }
         projects.sort { $0.name < $1.name }
 
-        let ctx = try buildContext(options: options, projects: projects)
+        let ctx = try buildContext(options: options, projects: projects, scan: scan)
 
         let staticDefines = lockfile.defines + lockfile.definesScripting
         try writeFileIfChanged(
