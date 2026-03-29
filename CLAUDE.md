@@ -131,18 +131,18 @@ Directories ending with `~` or starting with `.` are excluded from scanning.
 
 ## Performance
 
-Benchmarked on meow-tower (13 assemblies, ~5k .cs files, ~43k total files across 2.3k directories):
+Benchmarked on meow-tower (13 assemblies, ~5k .cs files, ~43k total files across 2.3k directories) via `hyperfine`:
 
-| Command | Mean | Notes |
-|---------|------|-------|
-| `lock` | 67ms | Scans Unity install + project DLLs/asmdefs |
-| `generate` (cold) | 23ms | Full filesystem scan + render |
-| `generate` (warm) | 3ms | Cached scan validated via directory mtimes |
-| `dotnet build` (ios-editor) | ~2s | Cached incremental build |
+| Command | Mean ± σ |
+|---------|----------|
+| `generate` (warm cache) | 14.6 ± 2.3 ms |
+| `generate` (cold cache) | 47.5 ± 11.0 ms |
+| `lock` | 87.2 ± 10.9 ms |
+| Process startup (`--help`) | 1.5 ± 1.6 ms |
 
 Generate caches filesystem scan results (`scan-cache`) with nanosecond-precision directory mtimes. On subsequent runs, validates cached mtimes with `stat()` (~1ms) instead of a full readdir walk (~21ms). Any file add/remove/change automatically invalidates the cache and triggers a full re-scan.
 
-Process startup overhead on macOS is ~22ms (dynamic linking + Swift runtime), so wall-clock time is ~22ms regardless of cache state — the speedup matters when called as a library or when startup costs decrease.
+Static linking is not beneficial — Swift runtime ships with macOS (`/usr/lib/swift/`), adding only ~1ms startup overhead over bare C.
 
 No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch.
 
