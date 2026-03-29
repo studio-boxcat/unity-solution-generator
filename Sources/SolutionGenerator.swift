@@ -104,8 +104,7 @@ private struct GenerationContext {
     let warnings: [String]
 }
 
-private func buildContext(options: GenerateOptions, projects: [ProjectInfo], scan: ProjectScanner.Result? = nil) throws -> GenerationContext {
-    let projectRoot = resolveRealPath(options.projectRoot)
+private func buildContext(options: GenerateOptions, projectRoot: String, projects: [ProjectInfo], scan: ProjectScanner.Result? = nil) throws -> GenerationContext {
     let generatorRoot = options.generatorRoot
     let generatorDir = joinPath(projectRoot, generatorRoot)
     let platform = options.platform
@@ -252,7 +251,7 @@ struct SolutionGenerator {
         }
         projects.sort { $0.name < $1.name }
 
-        let ctx = try buildContext(options: options, projects: projects, scan: scan)
+        let ctx = try buildContext(options: options, projectRoot: projectRoot, projects: projects, scan: scan)
 
         let staticDefines = lockfile.defines + lockfile.definesScripting
         try writeFileIfChanged(
@@ -312,7 +311,7 @@ struct SolutionGenerator {
             }
         }
 
-        let ctx = try buildContext(options: options, projects: projects)
+        let ctx = try buildContext(options: options, projectRoot: projectRoot, projects: projects)
 
         try writeFileIfChanged(
             joinPath(ctx.variantDir, "Directory.Build.props"),

@@ -111,7 +111,8 @@ func readFile(_ path: String) throws -> String {
     var read = 0
     while read < size {
         let n = Darwin.read(fd, buf + read, size - read)
-        guard n > 0 else { throw POSIXError(errno, path: path) }
+        if n < 0 { throw POSIXError(errno, path: path) }
+        if n == 0 { break } // unexpected EOF (file truncated)
         read += n
     }
     return String(decoding: UnsafeBufferPointer(start: buf, count: size), as: UTF8.self)
