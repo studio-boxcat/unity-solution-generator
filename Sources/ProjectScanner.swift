@@ -367,7 +367,7 @@ private func scanAndCache(rootPath: String, cachePath: String) -> FileScan {
     // Track scan roots + all directories that contributed to results + all ancestors.
     // This ensures new files/dirs at any depth trigger cache invalidation.
     var allDirs: Set<String> = ["Assets", "Packages"]
-    var addWithAncestors = { (dir: String) in
+    let addWithAncestors = { (dir: String) in
         allDirs.insert(dir)
         var parent = parentDirectory(of: dir)
         while !parent.isEmpty && allDirs.insert(parent).inserted {

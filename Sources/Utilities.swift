@@ -120,27 +120,39 @@ func readFile(_ path: String) throws -> String {
 
 @discardableResult
 func writeFileIfChanged(_ path: String, _ content: String) throws -> Bool {
-    let bytes = Array(content.utf8)
+    let contentCount = content.utf8.count
 
+    // Fast path: compare with existing file by size then content
     let fd = open(path, O_RDONLY)
     if fd >= 0 {
         defer { close(fd) }
         var st = stat()
-        if fstat(fd, &st) == 0, Int(st.st_size) == bytes.count {
-            let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
+        if fstat(fd, &st) == 0, Int(st.st_size) == contentCount {
+            let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: contentCount)
             defer { buf.deallocate() }
             var read = 0
-            while read < bytes.count {
-                let n = Darwin.read(fd, buf + read, bytes.count - read)
+            while read < contentCount {
+                let n = Darwin.read(fd, buf + read, contentCount - read)
                 if n <= 0 { break }
                 read += n
             }
-            if read == bytes.count, memcmp(buf, bytes, bytes.count) == 0 {
-                return false
+            if read == contentCount {
+                var unchanged = false
+                content.utf8.withContiguousStorageIfAvailable { utf8 in
+                    unchanged = memcmp(buf, utf8.baseAddress!, contentCount) == 0
+                }
+                if !unchanged {
+                    // Fallback if utf8 not contiguous (rare)
+                    let bytes = Array(content.utf8)
+                    unchanged = memcmp(buf, bytes, contentCount) == 0
+                }
+                if unchanged { return false }
             }
         }
     }
 
+    // Write the file
+    let bytes = Array(content.utf8)
     let wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
     guard wfd >= 0 else { throw POSIXError(errno, path: path) }
     defer { close(wfd) }

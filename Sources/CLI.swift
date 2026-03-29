@@ -84,7 +84,7 @@ struct CLI {
 
         do {
             let options = GenerateOptions(
-                projectRoot: projectRoot,
+                projectRoot: resolvedRoot,
                 verbose: verbose,
                 platform: platform,
                 buildConfig: buildConfig

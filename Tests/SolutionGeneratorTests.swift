@@ -979,7 +979,25 @@ final class SolutionGeneratorTests: XCTestCase {
         ])
     }
 
-    /// BuildPlatform.unityPlatformName must map correctly.
+    /// ProjectRoot in Directory.Build.props must be an absolute path, not relative.
+    func testProjectRootIsAbsoluteInProps() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+        try writeFile(root, "Assets/Assemblies/Lib/Lib.asmdef", "{\"name\":\"Lib\"}\n")
+        try writeFile(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n")
+
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(projectRoot: root, generatorRoot: generatorRoot, platform: .ios, buildConfig: .editor),
+            lockfile: lockfile
+        )
+
+        let props = try readFile(root, "\(generatorRoot)/ios-editor/Directory.Build.props")
+        // Must contain an absolute path, not "." or a relative path
+        XCTAssertTrue(props.contains("<ProjectRoot>/"), "ProjectRoot must be absolute, got: \(props)")
+    }
+
     func testBuildPlatformUnityName() throws {
         XCTAssertEqual(BuildPlatform.ios.unityPlatformName, "iOS")
         XCTAssertEqual(BuildPlatform.android.unityPlatformName, "Android")
