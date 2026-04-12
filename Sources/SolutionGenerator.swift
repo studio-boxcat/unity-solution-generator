@@ -358,8 +358,13 @@ struct SolutionGenerator {
     // MARK: - Rendering
 
     static func renderCompilePatterns(_ patterns: [String]) -> String {
+        // Exclude dotfiles (e.g. .Scratch.cs) — MSBuild *.cs globs match them
         patterns
-            .map { "    <Compile Include=\"\(xmlEscape($0))\" />" }
+            .map {
+                let escaped = xmlEscape($0)
+                let excludePattern = xmlEscape(String($0.dropLast(4)) + ".*.cs")
+                return "    <Compile Include=\"\(escaped)\" Exclude=\"\(excludePattern)\" />"
+            }
             .joined(separator: "\n")
     }
 
