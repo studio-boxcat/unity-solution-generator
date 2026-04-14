@@ -121,6 +121,7 @@ func readFile(_ path: String) throws -> String {
 @discardableResult
 func writeFileIfChanged(_ path: String, _ content: String) throws -> Bool {
     let contentCount = content.utf8.count
+    var bytesForWrite: [UInt8]?
 
     // Fast path: compare with existing file by size then content
     let fd = open(path, O_RDONLY)
@@ -142,17 +143,17 @@ func writeFileIfChanged(_ path: String, _ content: String) throws -> Bool {
                     unchanged = memcmp(buf, utf8.baseAddress!, contentCount) == 0
                 }
                 if !unchanged {
-                    // Fallback if utf8 not contiguous (rare)
-                    let bytes = Array(content.utf8)
-                    unchanged = memcmp(buf, bytes, contentCount) == 0
+                    // Fallback if utf8 not contiguous (rare) — keep for write reuse
+                    bytesForWrite = Array(content.utf8)
+                    unchanged = memcmp(buf, bytesForWrite!, contentCount) == 0
                 }
                 if unchanged { return false }
             }
         }
     }
 
-    // Write the file
-    let bytes = Array(content.utf8)
+    // Write the file — reuse fallback allocation if available
+    let bytes = bytesForWrite ?? Array(content.utf8)
     let wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
     guard wfd >= 0 else { throw POSIXError(errno, path: path) }
     defer { close(wfd) }
@@ -190,6 +191,29 @@ func isDirectory(_ path: String) -> Bool {
     var st = stat()
     guard stat(path, &st) == 0 else { return false }
     return (st.st_mode & S_IFMT) == S_IFDIR
+}
+
+/// Shared dirent processor: extracts name, resolves symlinks, skips dotfiles and tilde-suffixed entries.
+func processDirent(_ entry: UnsafeMutablePointer<dirent>, parentPath: String) -> (name: String, path: String, isDir: Bool)? {
+    let name = direntName(entry)
+    if name.first == "." || name.hasSuffix("~") { return nil }
+
+    let childPath = "\(parentPath)/\(name)"
+    let dType = entry.pointee.d_type
+    var isDir = dType == DT_DIR
+    var isFile = dType == DT_REG
+
+    if dType == DT_LNK || dType == DT_UNKNOWN {
+        var statBuf = stat()
+        guard stat(childPath, &statBuf) == 0 else { return nil }
+        let mode = statBuf.st_mode & S_IFMT
+        if mode == S_IFDIR { isDir = true }
+        else if mode == S_IFREG { isFile = true }
+    }
+
+    if isDir { return (name, childPath, true) }
+    if isFile { return (name, childPath, false) }
+    return nil
 }
 
 func listDirectory(_ path: String) -> [String] {

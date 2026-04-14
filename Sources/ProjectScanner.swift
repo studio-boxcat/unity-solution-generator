@@ -154,29 +154,6 @@ private struct FileScan {
     let asmRefPaths: [String]
 }
 
-private func processDirent(_ entry: UnsafeMutablePointer<dirent>, parentPath: String) -> (name: String, path: String, isDir: Bool)? {
-    let name = direntName(entry)
-    if name.first == "." || name.hasSuffix("~") { return nil }
-
-    let childPath = "\(parentPath)/\(name)"
-    let dType = entry.pointee.d_type
-    var isDir = dType == DT_DIR
-    var isFile = dType == DT_REG
-
-    if dType == DT_LNK || dType == DT_UNKNOWN {
-        if isDirectory(childPath) { isDir = true }
-        else {
-            var statBuf = stat()
-            guard stat(childPath, &statBuf) == 0 else { return nil }
-            isFile = (statBuf.st_mode & S_IFMT) == S_IFREG
-        }
-    }
-
-    if isDir { return (name, childPath, true) }
-    if isFile { return (name, childPath, false) }
-    return nil
-}
-
 private func collectFile(name: String, path: String, prefixLen: Int, hasCS: inout Bool, bucket: inout ScanBucket) {
     if name.hasSuffix(".cs") {
         hasCS = true

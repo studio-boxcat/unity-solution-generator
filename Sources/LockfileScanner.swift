@@ -176,13 +176,9 @@ private func walkFiles(
     defer { closedir(dir) }
 
     while let entry = readdir(dir) {
-        let name = direntName(entry)
-        if name == "." || name == ".." || name.first == "." || name.hasSuffix("~") { continue }
+        guard let (name, childPath, isDir) = processDirent(entry, parentPath: directory) else { continue }
 
-        let childPath = "\(directory)/\(name)"
-        let dType = entry.pointee.d_type
-
-        if dType == DT_DIR || (dType == DT_LNK || dType == DT_UNKNOWN) && isDirectory(childPath) {
+        if isDir {
             if skipNativePluginDirs && isNativePluginDir(name) { continue }
             walkFiles(directory: childPath, basePath: basePath, extensions: extensions, skipNativePluginDirs: skipNativePluginDirs, handler: handler)
         } else {
