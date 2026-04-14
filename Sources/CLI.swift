@@ -68,9 +68,11 @@ struct CLI {
         }
 
         var verbose = false
+        var rootOutput = false
         for i in 3..<args.count {
             switch args[i] {
             case "-v", "--verbose": verbose = true
+            case "--root": rootOutput = true
             default: die("Unknown option: \(args[i])")
             }
         }
@@ -83,6 +85,7 @@ struct CLI {
             let options = GenerateOptions(
                 projectRoot: resolvedRoot,
                 verbose: verbose,
+                rootOutput: rootOutput,
                 platform: platform,
                 buildConfig: buildConfig
             )
@@ -143,6 +146,7 @@ struct CLI {
           config                prod | dev | editor
 
         OPTIONS:
+          --root                Output to project root instead of variant dir
           -v, --verbose         Print unresolved directory samples
           -h, --help            Show help
         """)

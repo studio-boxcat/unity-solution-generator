@@ -11,13 +11,15 @@ struct GenerateOptions: Sendable {
     let projectRoot: String
     let generatorRoot: String
     let verbose: Bool
+    let rootOutput: Bool
     let platform: BuildPlatform
     let buildConfig: BuildConfig
 
-    init(projectRoot: String, generatorRoot: String = defaultGeneratorRoot, verbose: Bool = false, platform: BuildPlatform, buildConfig: BuildConfig = .prod) {
+    init(projectRoot: String, generatorRoot: String = defaultGeneratorRoot, verbose: Bool = false, rootOutput: Bool = false, platform: BuildPlatform, buildConfig: BuildConfig = .prod) {
         self.projectRoot = projectRoot
         self.generatorRoot = generatorRoot
         self.verbose = verbose
+        self.rootOutput = rootOutput
         self.platform = platform
         self.buildConfig = buildConfig
     }
@@ -94,6 +96,7 @@ enum GeneratorError: Error, CustomStringConvertible {
 private struct GenerationContext {
     let projectRoot: String
     let generatorRoot: String
+    let rootOutput: Bool
     let scan: ProjectScanner.Result
     let projectByName: [String: ProjectInfo]
     let patternsByProject: [String: [String]]
@@ -121,7 +124,7 @@ private func buildContext(options: GenerateOptions, projectRoot: String, project
         warnings += scan.unresolvedDirs.prefix(20).map { "Unresolved: \($0)/" }
     }
 
-    let variantPrefix = String(repeating: "../", count: generatorRoot.split(separator: "/").count + 1)
+    let variantPrefix = options.rootOutput ? "" : String(repeating: "../", count: generatorRoot.split(separator: "/").count + 1)
 
     var patternsByProject: [String: [String]] = [:]
     for project in projects {
@@ -158,12 +161,18 @@ private func buildContext(options: GenerateOptions, projectRoot: String, project
     }
 
     let config = "\(platform.rawValue)-\(options.buildConfig.rawValue)"
-    let variantDir = joinPath(generatorDir, config)
-    createDirectoryRecursive(variantDir)
+    let variantDir: String
+    if options.rootOutput {
+        variantDir = projectRoot
+    } else {
+        variantDir = joinPath(generatorDir, config)
+        createDirectoryRecursive(variantDir)
+    }
 
     return GenerationContext(
         projectRoot: projectRoot,
         generatorRoot: generatorRoot,
+        rootOutput: options.rootOutput,
         scan: scan,
         projectByName: projectByName,
         patternsByProject: patternsByProject,
@@ -223,8 +232,10 @@ private func writeVariant(
 
     return GenerateResult(
         warnings: ctx.warnings,
-        variantCsprojs: ctx.includedProjects.map { "\(ctx.generatorRoot)/\(ctx.config)/\($0.csprojPath)" }.sorted(),
-        variantSlnPath: "\(ctx.generatorRoot)/\(ctx.config)/\(slnName)"
+        variantCsprojs: ctx.includedProjects.map {
+            ctx.rootOutput ? $0.csprojPath : "\(ctx.generatorRoot)/\(ctx.config)/\($0.csprojPath)"
+        }.sorted(),
+        variantSlnPath: ctx.rootOutput ? slnName : "\(ctx.generatorRoot)/\(ctx.config)/\(slnName)"
     )
 }
 
