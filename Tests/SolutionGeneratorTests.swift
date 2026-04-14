@@ -368,28 +368,30 @@ final class SolutionGeneratorTests: XCTestCase {
                 "$(UnityPath)/Unity.app/Contents/Tools/Unity.SourceGenerators/Unity.SourceGenerators.dll",
                 "$(ProjectRoot)/Assets/Zenject.Analyzers.dll",
             ],
-            refsEngine: [
-                DllRef(name: "UnityEngine", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.dll"),
-                DllRef(name: "UnityEngine.CoreModule", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.CoreModule.dll"),
-            ],
-            refsEditor: [
-                DllRef(name: "UnityEditor", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEditor.dll"),
-            ],
-            refsNetstandard: [
-                DllRef(name: "netstandard", path: "$(UnityPath)/Unity.app/Contents/NetStandard/ref/2.1.0/netstandard.dll"),
-                DllRef(name: "System.Collections", path: "$(UnityPath)/Unity.app/Contents/NetStandard/compat/2.1.0/shims/netstandard/System.Collections.dll"),
-            ],
-            refsPlaybackIos: [
-                DllRef(name: "UnityEditor.iOS.Extensions", path: "$(UnityPath)/PlaybackEngines/iOSSupport/UnityEditor.iOS.Extensions.dll"),
-            ],
-            refsPlaybackAndroid: [
-                DllRef(name: "UnityEditor.Android.Extensions", path: "$(UnityPath)/PlaybackEngines/AndroidPlayer/UnityEditor.Android.Extensions.dll"),
-            ],
-            refsPlaybackStandalone: [
-                DllRef(name: "UnityEditor.OSXStandalone.Extensions", path: "$(UnityPath)/Unity.app/Contents/PlaybackEngines/MacStandaloneSupport/UnityEditor.OSXStandalone.Extensions.dll"),
-            ],
-            refsProject: [
-                DllRef(name: "Firebase.App", path: "$(ProjectRoot)/Packages/com.google.firebase.app-pkg/Firebase/Plugins/Firebase.App.dll"),
+            refs: [
+                .engine: [
+                    DllRef(name: "UnityEngine", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.dll"),
+                    DllRef(name: "UnityEngine.CoreModule", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.CoreModule.dll"),
+                ],
+                .editor: [
+                    DllRef(name: "UnityEditor", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEditor.dll"),
+                ],
+                .netstandard: [
+                    DllRef(name: "netstandard", path: "$(UnityPath)/Unity.app/Contents/NetStandard/ref/2.1.0/netstandard.dll"),
+                    DllRef(name: "System.Collections", path: "$(UnityPath)/Unity.app/Contents/NetStandard/compat/2.1.0/shims/netstandard/System.Collections.dll"),
+                ],
+                .playbackIos: [
+                    DllRef(name: "UnityEditor.iOS.Extensions", path: "$(UnityPath)/PlaybackEngines/iOSSupport/UnityEditor.iOS.Extensions.dll"),
+                ],
+                .playbackAndroid: [
+                    DllRef(name: "UnityEditor.Android.Extensions", path: "$(UnityPath)/PlaybackEngines/AndroidPlayer/UnityEditor.Android.Extensions.dll"),
+                ],
+                .playbackStandalone: [
+                    DllRef(name: "UnityEditor.OSXStandalone.Extensions", path: "$(UnityPath)/Unity.app/Contents/PlaybackEngines/MacStandaloneSupport/UnityEditor.OSXStandalone.Extensions.dll"),
+                ],
+                .project: [
+                    DllRef(name: "Firebase.App", path: "$(ProjectRoot)/Packages/com.google.firebase.app-pkg/Firebase/Plugins/Firebase.App.dll"),
+                ],
             ],
             defines: ["UNITY_6000_2_7", "UNITY_6000", "ENABLE_AR"],
             definesScripting: ["ODIN_INSPECTOR", "SINGULAR_SDK_IAP_ENABLED"]
@@ -406,15 +408,11 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertEqual(reloaded.unityPath, lockfile.unityPath)
         XCTAssertEqual(reloaded.langVersion, lockfile.langVersion)
         XCTAssertEqual(reloaded.analyzers, lockfile.analyzers)
-        XCTAssertEqual(reloaded.refsEngine.count, lockfile.refsEngine.count)
-        XCTAssertEqual(reloaded.refsEngine.map(\.name), lockfile.refsEngine.map(\.name))
-        XCTAssertEqual(reloaded.refsEngine.map(\.path), lockfile.refsEngine.map(\.path))
-        XCTAssertEqual(reloaded.refsEditor.map(\.name), lockfile.refsEditor.map(\.name))
-        XCTAssertEqual(reloaded.refsNetstandard.count, lockfile.refsNetstandard.count)
-        XCTAssertEqual(reloaded.refsPlaybackIos.map(\.name), lockfile.refsPlaybackIos.map(\.name))
-        XCTAssertEqual(reloaded.refsPlaybackAndroid.map(\.name), lockfile.refsPlaybackAndroid.map(\.name))
-        XCTAssertEqual(reloaded.refsPlaybackStandalone.map(\.name), lockfile.refsPlaybackStandalone.map(\.name))
-        XCTAssertEqual(reloaded.refsProject.map(\.name), lockfile.refsProject.map(\.name))
+        for cat in RefCategory.allCases {
+            XCTAssertEqual(reloaded.refs[cat]?.map(\.name), lockfile.refs[cat]?.map(\.name), "\(cat)")
+            XCTAssertEqual(reloaded.refs[cat]?.map(\.path), lockfile.refs[cat]?.map(\.path), "\(cat)")
+        }
+        XCTAssertEqual(reloaded.totalRefCount, lockfile.totalRefCount)
         XCTAssertEqual(reloaded.defines, lockfile.defines)
         XCTAssertEqual(reloaded.definesScripting, lockfile.definesScripting)
 
@@ -614,9 +612,7 @@ final class SolutionGeneratorTests: XCTestCase {
             unityPath: "/test/unity",
             langVersion: "9.0",
             analyzers: [],
-            refsEngine: [], refsEditor: [], refsNetstandard: [],
-            refsPlaybackIos: [], refsPlaybackAndroid: [], refsPlaybackStandalone: [],
-            refsProject: [],
+            refs: [:],
             defines: ["UNITY_6000", "ENABLE_AR"],
             definesScripting: ["ODIN_INSPECTOR"]
         )
@@ -820,25 +816,26 @@ final class SolutionGeneratorTests: XCTestCase {
             analyzers: [
                 "$(UnityPath)/Unity.app/Contents/Tools/Unity.SourceGenerators/Unity.SourceGenerators.dll",
             ],
-            refsEngine: [
-                DllRef(name: "UnityEngine", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.dll"),
-                DllRef(name: "UnityEngine.CoreModule", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.CoreModule.dll"),
-            ],
-            refsEditor: [
-                DllRef(name: "UnityEditor", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEditor.dll"),
-            ],
-            refsNetstandard: [
-                DllRef(name: "netstandard", path: "$(UnityPath)/Unity.app/Contents/NetStandard/ref/2.1.0/netstandard.dll"),
-            ],
-            refsPlaybackIos: [
-                DllRef(name: "UnityEditor.iOS.Extensions", path: "$(UnityPath)/PlaybackEngines/iOSSupport/UnityEditor.iOS.Extensions.dll"),
-            ],
-            refsPlaybackAndroid: [
-                DllRef(name: "UnityEditor.Android.Extensions", path: "$(UnityPath)/PlaybackEngines/AndroidPlayer/UnityEditor.Android.Extensions.dll"),
-            ],
-            refsPlaybackStandalone: [],
-            refsProject: [
-                DllRef(name: "Firebase.App", path: "$(ProjectRoot)/Packages/com.google.firebase.app-pkg/Firebase/Plugins/Firebase.App.dll"),
+            refs: [
+                .engine: [
+                    DllRef(name: "UnityEngine", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.dll"),
+                    DllRef(name: "UnityEngine.CoreModule", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.CoreModule.dll"),
+                ],
+                .editor: [
+                    DllRef(name: "UnityEditor", path: "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEditor.dll"),
+                ],
+                .netstandard: [
+                    DllRef(name: "netstandard", path: "$(UnityPath)/Unity.app/Contents/NetStandard/ref/2.1.0/netstandard.dll"),
+                ],
+                .playbackIos: [
+                    DllRef(name: "UnityEditor.iOS.Extensions", path: "$(UnityPath)/PlaybackEngines/iOSSupport/UnityEditor.iOS.Extensions.dll"),
+                ],
+                .playbackAndroid: [
+                    DllRef(name: "UnityEditor.Android.Extensions", path: "$(UnityPath)/PlaybackEngines/AndroidPlayer/UnityEditor.Android.Extensions.dll"),
+                ],
+                .project: [
+                    DllRef(name: "Firebase.App", path: "$(ProjectRoot)/Packages/com.google.firebase.app-pkg/Firebase/Plugins/Firebase.App.dll"),
+                ],
             ],
             defines: ["UNITY_6000", "ENABLE_AR"],
             definesScripting: ["ODIN_INSPECTOR"]

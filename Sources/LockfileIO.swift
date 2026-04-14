@@ -10,19 +10,15 @@ struct LockfileIO {
         s += "unity-path: \(lockfile.unityPath)\n"
         s += "lang-version: \(lockfile.langVersion)\n"
 
-        writeSection(&s, .analyzers, lines: lockfile.analyzers)
-        writeRefSection(&s, .refsEngine, refs: lockfile.refsEngine)
-        writeRefSection(&s, .refsEditor, refs: lockfile.refsEditor)
-        writeRefSection(&s, .refsNetstandard, refs: lockfile.refsNetstandard)
-        writeRefSection(&s, .refsPlaybackIos, refs: lockfile.refsPlaybackIos)
-        writeRefSection(&s, .refsPlaybackAndroid, refs: lockfile.refsPlaybackAndroid)
-        writeRefSection(&s, .refsPlaybackStandalone, refs: lockfile.refsPlaybackStandalone)
-        writeRefSection(&s, .refsProject, refs: lockfile.refsProject)
+        writeSection(&s, "analyzers", lines: lockfile.analyzers)
+        for cat in RefCategory.allCases {
+            writeRefSection(&s, cat.rawValue, refs: lockfile.refs[cat] ?? [])
+        }
 
-        s += "\n[\(Section.defines.rawValue)]\n"
+        s += "\n[defines]\n"
         s += lockfile.defines.joined(separator: ";") + "\n"
 
-        s += "\n[\(Section.definesScripting.rawValue)]\n"
+        s += "\n[defines.scripting]\n"
         s += lockfile.definesScripting.joined(separator: ";") + "\n"
 
         try writeFileIfChanged(path, s)
@@ -35,16 +31,16 @@ struct LockfileIO {
         var unityPath = ""
         var langVersion = "9.0"
         var analyzers: [String] = []
-        var refsEngine: [DllRef] = []
-        var refsEditor: [DllRef] = []
-        var refsNetstandard: [DllRef] = []
-        var refsPlaybackIos: [DllRef] = []
-        var refsPlaybackAndroid: [DllRef] = []
-        var refsPlaybackStandalone: [DllRef] = []
-        var refsProject: [DllRef] = []
+        var refs: [RefCategory: [DllRef]] = [:]
         var defines: [String] = []
         var definesScripting: [String] = []
 
+        enum Section {
+            case analyzers
+            case ref(RefCategory)
+            case defines
+            case definesScripting
+        }
         var currentSection: Section? = nil
 
         for rawLine in content.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -54,7 +50,16 @@ struct LockfileIO {
             // Section header
             if line.hasPrefix("[") && line.hasSuffix("]") {
                 let name = String(line.dropFirst().dropLast())
-                currentSection = Section(rawValue: name)
+                if let cat = RefCategory(rawValue: name) {
+                    currentSection = .ref(cat)
+                } else {
+                    switch name {
+                    case "analyzers": currentSection = .analyzers
+                    case "defines": currentSection = .defines
+                    case "defines.scripting": currentSection = .definesScripting
+                    default: currentSection = nil
+                    }
+                }
                 continue
             }
 
@@ -75,20 +80,8 @@ struct LockfileIO {
             switch currentSection {
             case .analyzers:
                 analyzers.append(line)
-            case .refsEngine:
-                if let ref = parseDllRef(line) { refsEngine.append(ref) }
-            case .refsEditor:
-                if let ref = parseDllRef(line) { refsEditor.append(ref) }
-            case .refsNetstandard:
-                if let ref = parseDllRef(line) { refsNetstandard.append(ref) }
-            case .refsPlaybackIos:
-                if let ref = parseDllRef(line) { refsPlaybackIos.append(ref) }
-            case .refsPlaybackAndroid:
-                if let ref = parseDllRef(line) { refsPlaybackAndroid.append(ref) }
-            case .refsPlaybackStandalone:
-                if let ref = parseDllRef(line) { refsPlaybackStandalone.append(ref) }
-            case .refsProject:
-                if let ref = parseDllRef(line) { refsProject.append(ref) }
+            case .ref(let cat):
+                if let ref = parseDllRef(line) { refs[cat, default: []].append(ref) }
             case .defines:
                 if !line.isEmpty {
                     defines = line.split(separator: ";").map(String.init)
@@ -114,43 +107,22 @@ struct LockfileIO {
             unityPath: unityPath,
             langVersion: langVersion,
             analyzers: analyzers,
-            refsEngine: refsEngine,
-            refsEditor: refsEditor,
-            refsNetstandard: refsNetstandard,
-            refsPlaybackIos: refsPlaybackIos,
-            refsPlaybackAndroid: refsPlaybackAndroid,
-            refsPlaybackStandalone: refsPlaybackStandalone,
-            refsProject: refsProject,
+            refs: refs,
             defines: defines,
             definesScripting: definesScripting
         )
     }
 }
 
-// MARK: - Sections
-
-private enum Section: String {
-    case analyzers
-    case refsEngine = "refs.engine"
-    case refsEditor = "refs.editor"
-    case refsNetstandard = "refs.netstandard"
-    case refsPlaybackIos = "refs.playback.ios"
-    case refsPlaybackAndroid = "refs.playback.android"
-    case refsPlaybackStandalone = "refs.playback.standalone"
-    case refsProject = "refs.project"
-    case defines
-    case definesScripting = "defines.scripting"
-}
-
 // MARK: - Writing helpers
 
-private func writeSection(_ s: inout String, _ section: Section, lines: [String]) {
-    s += "\n[\(section.rawValue)]\n"
+private func writeSection(_ s: inout String, _ name: String, lines: [String]) {
+    s += "\n[\(name)]\n"
     for line in lines { s += "\(line)\n" }
 }
 
-private func writeRefSection(_ s: inout String, _ section: Section, refs: [DllRef]) {
-    s += "\n[\(section.rawValue)]\n"
+private func writeRefSection(_ s: inout String, _ name: String, refs: [DllRef]) {
+    s += "\n[\(name)]\n"
     for ref in refs { s += "\(ref.name)|\(ref.path)\n" }
 }
 

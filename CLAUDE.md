@@ -47,6 +47,7 @@ All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored
 ```
 Library/UnitySolutionGenerator/
   csproj.lock                     ← lockfile: DLL refs, analyzers, defines
+  scan-cache                      ← cached filesystem scan (auto-invalidated by mtime)
   templates/                      ← (legacy) extracted from Unity-generated .csproj files
   ios-prod/                       ← variant: .csproj + .sln + Directory.Build.props
   ios-editor/

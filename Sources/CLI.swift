@@ -41,10 +41,7 @@ struct CLI {
             let lockfile = try LockfileScanner.scan(projectRoot: projectRoot)
             try LockfileIO.write(lockfile, to: lockfilePath)
 
-            let totalRefs = lockfile.refsEngine.count + lockfile.refsEditor.count
-                + lockfile.refsNetstandard.count + lockfile.refsPlaybackIos.count
-                + lockfile.refsPlaybackAndroid.count + lockfile.refsPlaybackStandalone.count
-                + lockfile.refsProject.count
+            let totalRefs = lockfile.totalRefCount
 
             print("Locked csproj.lock:")
             print("  Unity \(lockfile.unityVersion) (\(lockfile.unityPath))")

@@ -265,7 +265,7 @@ func extractJsonObjectKeys(_ json: String, key: String) -> [String] {
 
 // MARK: - Minimal JSON extraction
 
-func extractJsonBool(_ json: String, key: String) -> Bool? {
+private func findJsonValueStart(_ json: String, key: String) -> String.Index? {
     let needle = "\"\(key)\""
     guard let keyRange = json.firstRange(of: needle) else { return nil }
     var idx = keyRange.upperBound
@@ -276,35 +276,27 @@ func extractJsonBool(_ json: String, key: String) -> Bool? {
         json.formIndex(after: &idx)
     }
     guard idx < json.endIndex else { return nil }
+    return idx
+}
+
+func extractJsonBool(_ json: String, key: String) -> Bool? {
+    guard let idx = findJsonValueStart(json, key: key) else { return nil }
     if json[idx...].hasPrefix("true") { return true }
     if json[idx...].hasPrefix("false") { return false }
     return nil
 }
 
 func extractJsonString(_ json: String, key: String) -> String? {
-    let needle = "\"\(key)\""
-    guard let keyRange = json.firstRange(of: needle) else { return nil }
-    var idx = keyRange.upperBound
-    while idx < json.endIndex && json[idx] != ":" { json.formIndex(after: &idx) }
-    guard idx < json.endIndex else { return nil }
-    json.formIndex(after: &idx)
-    while idx < json.endIndex && (json[idx] == " " || json[idx] == "\t" || json[idx] == "\n" || json[idx] == "\r") {
-        json.formIndex(after: &idx)
-    }
-    guard idx < json.endIndex, json[idx] == "\"" else { return nil }
-    json.formIndex(after: &idx)
-    let start = idx
-    while idx < json.endIndex && json[idx] != "\"" { json.formIndex(after: &idx) }
-    guard idx < json.endIndex else { return nil }
-    return String(json[start..<idx])
+    guard let idx = findJsonValueStart(json, key: key), json[idx] == "\"" else { return nil }
+    let start = json.index(after: idx)
+    var end = start
+    while end < json.endIndex && json[end] != "\"" { json.formIndex(after: &end) }
+    guard end < json.endIndex else { return nil }
+    return String(json[start..<end])
 }
 
 func extractJsonStringArray(_ json: String, key: String) -> [String] {
-    let needle = "\"\(key)\""
-    guard let keyRange = json.firstRange(of: needle) else { return [] }
-    var idx = keyRange.upperBound
-    while idx < json.endIndex && json[idx] != "[" { json.formIndex(after: &idx) }
-    guard idx < json.endIndex else { return [] }
+    guard var idx = findJsonValueStart(json, key: key), json[idx] == "[" else { return [] }
     json.formIndex(after: &idx)
     var results: [String] = []
     while idx < json.endIndex {

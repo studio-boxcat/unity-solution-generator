@@ -463,18 +463,19 @@ struct SolutionGenerator {
         func add(_ ref: DllRef) {
             if seen.insert(ref.name).inserted { refs.append(ref) }
         }
+        func addAll(_ cat: RefCategory) {
+            for ref in lockfile.refs[cat] ?? [] { add(ref) }
+        }
 
-        for ref in lockfile.refsEngine { add(ref) }
-        if isEditor {
-            for ref in lockfile.refsEditor { add(ref) }
-        }
-        for ref in lockfile.refsPlaybackStandalone { add(ref) }
+        addAll(.engine)
+        if isEditor { addAll(.editor) }
+        addAll(.playbackStandalone)
         switch platform {
-        case .ios: for ref in lockfile.refsPlaybackIos { add(ref) }
-        case .android: for ref in lockfile.refsPlaybackAndroid { add(ref) }
+        case .ios: addAll(.playbackIos)
+        case .android: addAll(.playbackAndroid)
         }
-        for ref in lockfile.refsProject { add(ref) }
-        for ref in lockfile.refsNetstandard { add(ref) }
+        addAll(.project)
+        addAll(.netstandard)
 
         guard !refs.isEmpty else { return "" }
         var s = "  <ItemGroup>\n"

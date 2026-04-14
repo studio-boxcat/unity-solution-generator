@@ -5,20 +5,28 @@ struct DllRef: Sendable {
     let path: String
 }
 
+enum RefCategory: String, CaseIterable, Sendable {
+    case engine = "refs.engine"
+    case editor = "refs.editor"
+    case netstandard = "refs.netstandard"
+    case playbackIos = "refs.playback.ios"
+    case playbackAndroid = "refs.playback.android"
+    case playbackStandalone = "refs.playback.standalone"
+    case project = "refs.project"
+}
+
 struct Lockfile: Sendable {
     let unityVersion: String
     let unityPath: String
     let langVersion: String
     let analyzers: [String]
-    let refsEngine: [DllRef]
-    let refsEditor: [DllRef]
-    let refsNetstandard: [DllRef]
-    let refsPlaybackIos: [DllRef]
-    let refsPlaybackAndroid: [DllRef]
-    let refsPlaybackStandalone: [DllRef]
-    let refsProject: [DllRef]
+    let refs: [RefCategory: [DllRef]]
     let defines: [String]
     let definesScripting: [String]
+
+    var totalRefCount: Int {
+        refs.values.reduce(0) { $0 + $1.count }
+    }
 }
 
 enum LockfileError: Error, CustomStringConvertible {
@@ -120,13 +128,15 @@ struct LockfileScanner {
             unityPath: unityPath,
             langVersion: "9.0",
             analyzers: analyzers,
-            refsEngine: engineRefs,
-            refsEditor: editorRefs,
-            refsNetstandard: netstdRefs.sorted { $0.name < $1.name },
-            refsPlaybackIos: iosRefs,
-            refsPlaybackAndroid: androidRefs,
-            refsPlaybackStandalone: standaloneRefs,
-            refsProject: projectRefs,
+            refs: [
+                .engine: engineRefs,
+                .editor: editorRefs,
+                .netstandard: netstdRefs.sorted { $0.name < $1.name },
+                .playbackIos: iosRefs,
+                .playbackAndroid: androidRefs,
+                .playbackStandalone: standaloneRefs,
+                .project: projectRefs,
+            ],
             defines: allDefines,
             definesScripting: scriptingDefines
         )
