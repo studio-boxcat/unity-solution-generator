@@ -13,7 +13,8 @@ just profile                  # benchmark against meow-tower
 
 **Output** (`dist/`):
 - `unity-solution-generator` — CLI binary
-- `libUnitySolutionGenerator.dylib` — dynamic library
+- `libUnitySolutionGenerator.dylib` — dynamic library (C ABI via `@_cdecl`)
+- `UnitySolutionGenerator.h` — C header for the dylib
 - `build-unity-sln.sh` — build script wrapping generate + dotnet build
 
 ## CLI
@@ -65,9 +66,43 @@ dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -
 
 ## Library
 
-`libUnitySolutionGenerator.dylib` exposes the generation API for embedding (e.g. Hot Reload's project generation).
+`libUnitySolutionGenerator.dylib` exposes both a C ABI (for Unity `[DllImport]`) and Swift API.
 
-### Public API (`import SolutionGeneratorCore`)
+### C ABI (`dist/UnitySolutionGenerator.h`)
+
+```c
+int32_t usg_generate(const char *projectRoot, const char *platform, const char *config,
+                     const char *outputDir, const char *extraRefs,
+                     char *slnPathOut, int32_t slnPathOutLen);
+int32_t usg_lock(const char *projectRoot);
+const char *usg_last_error(void);  // valid until next usg_ call
+```
+
+C# usage:
+
+```csharp
+[DllImport("UnitySolutionGenerator")]
+static extern int usg_generate(string projectRoot, string platform, string config,
+                               string outputDir, string extraRefs,
+                               StringBuilder slnPathOut, int slnPathOutLen);
+
+[DllImport("UnitySolutionGenerator")]
+static extern int usg_lock(string projectRoot);
+
+[DllImport("UnitySolutionGenerator")]
+static extern IntPtr usg_last_error();
+
+// Usage:
+var buf = new StringBuilder(512);
+if (usg_generate(root, "ios", "editor", "Library/hotreload/Solution",
+                 "/path/to/Extra.dll", buf, buf.Capacity + 1) != 0)
+    throw new Exception(Marshal.PtrToStringAnsi(usg_last_error()));
+string slnPath = buf.ToString();
+```
+
+`outputDir`: relative path, `"."` for project root, `null` for default variant dir. `extraRefs`: comma-separated absolute DLL paths, `null` for none. Both functions auto-resolve the lockfile from `Library/UnitySolutionGenerator/csproj.lock`; `usg_generate` auto-runs lock if the lockfile is missing.
+
+### Swift API (`import SolutionGeneratorCore`)
 
 | Type | Description |
 |------|-------------|
