@@ -7,25 +7,34 @@ struct ProjectInfo: Sendable {
     var csprojPath: String { "\(name).csproj" }
 }
 
-struct GenerateOptions: Sendable {
-    let projectRoot: String
-    let generatorRoot: String
-    let verbose: Bool
-    let rootOutput: Bool
-    let platform: BuildPlatform
-    let buildConfig: BuildConfig
+public struct GenerateOptions: Sendable {
+    public let projectRoot: String
+    public let generatorRoot: String
+    public let verbose: Bool
+    /// nil = default (variant subdir), "." = project root, else relative path from project root
+    public let outputDir: String?
+    public let extraRefs: [DllRef]
+    public let platform: BuildPlatform
+    public let buildConfig: BuildConfig
 
-    init(projectRoot: String, generatorRoot: String = defaultGeneratorRoot, verbose: Bool = false, rootOutput: Bool = false, platform: BuildPlatform, buildConfig: BuildConfig = .prod) {
+    public init(projectRoot: String, generatorRoot: String = defaultGeneratorRoot, verbose: Bool = false, outputDir: String? = nil, extraRefs: [DllRef] = [], platform: BuildPlatform, buildConfig: BuildConfig = .prod) {
         self.projectRoot = projectRoot
         self.generatorRoot = generatorRoot
         self.verbose = verbose
-        self.rootOutput = rootOutput
+        if let dir = outputDir {
+            var d = dir
+            while d.hasSuffix("/") { d = String(d.dropLast()) }
+            self.outputDir = d.isEmpty ? "." : d
+        } else {
+            self.outputDir = nil
+        }
+        self.extraRefs = extraRefs
         self.platform = platform
         self.buildConfig = buildConfig
     }
 }
 
-enum BuildPlatform: String, Sendable {
+public enum BuildPlatform: String, Sendable {
     case ios
     case android
 
@@ -37,7 +46,7 @@ enum BuildPlatform: String, Sendable {
     }
 }
 
-enum BuildConfig: String, Sendable {
+public enum BuildConfig: String, Sendable {
     case editor
     case dev
     case prod
@@ -61,10 +70,10 @@ enum DynamicDefines {
     }()
 }
 
-struct GenerateResult: Sendable {
-    let warnings: [String]
-    let variantCsprojs: [String]
-    let variantSlnPath: String
+public struct GenerateResult: Sendable {
+    public let warnings: [String]
+    public let variantCsprojs: [String]
+    public let variantSlnPath: String
 }
 
 enum GeneratorError: Error, CustomStringConvertible {
@@ -96,7 +105,6 @@ enum GeneratorError: Error, CustomStringConvertible {
 private struct GenerationContext {
     let projectRoot: String
     let generatorRoot: String
-    let rootOutput: Bool
     let scan: ProjectScanner.Result
     let projectByName: [String: ProjectInfo]
     let patternsByProject: [String: [String]]
@@ -104,6 +112,8 @@ private struct GenerationContext {
     let nonRuntimeNames: Set<String>
     let variantDir: String
     let config: String
+    /// Prefix for result paths (e.g. "" for root, "output/" for custom, "tpl/ios-editor/" for default)
+    let resultPrefix: String
     let warnings: [String]
 }
 
@@ -124,7 +134,13 @@ private func buildContext(options: GenerateOptions, projectRoot: String, project
         warnings += scan.unresolvedDirs.prefix(20).map { "Unresolved: \($0)/" }
     }
 
-    let variantPrefix = options.rootOutput ? "" : String(repeating: "../", count: generatorRoot.split(separator: "/").count + 1)
+    let depth: Int
+    if let outputDir = options.outputDir {
+        depth = outputDir == "." ? 0 : outputDir.split(separator: "/").count
+    } else {
+        depth = generatorRoot.split(separator: "/").count + 1  // +1 for config subdir
+    }
+    let variantPrefix = depth == 0 ? "" : String(repeating: "../", count: depth)
 
     var patternsByProject: [String: [String]] = [:]
     for project in projects {
@@ -162,17 +178,25 @@ private func buildContext(options: GenerateOptions, projectRoot: String, project
 
     let config = "\(platform.rawValue)-\(options.buildConfig.rawValue)"
     let variantDir: String
-    if options.rootOutput {
-        variantDir = projectRoot
+    let resultPrefix: String
+    if let outputDir = options.outputDir {
+        if outputDir == "." {
+            variantDir = projectRoot
+            resultPrefix = ""
+        } else {
+            variantDir = joinPath(projectRoot, outputDir)
+            createDirectoryRecursive(variantDir)
+            resultPrefix = "\(outputDir)/"
+        }
     } else {
         variantDir = joinPath(generatorDir, config)
         createDirectoryRecursive(variantDir)
+        resultPrefix = "\(generatorRoot)/\(config)/"
     }
 
     return GenerationContext(
         projectRoot: projectRoot,
         generatorRoot: generatorRoot,
-        rootOutput: options.rootOutput,
         scan: scan,
         projectByName: projectByName,
         patternsByProject: patternsByProject,
@@ -180,6 +204,7 @@ private func buildContext(options: GenerateOptions, projectRoot: String, project
         nonRuntimeNames: nonRuntimeNames,
         variantDir: variantDir,
         config: config,
+        resultPrefix: resultPrefix,
         warnings: warnings
     )
 }
@@ -233,19 +258,21 @@ private func writeVariant(
     return GenerateResult(
         warnings: ctx.warnings,
         variantCsprojs: ctx.includedProjects.map {
-            ctx.rootOutput ? $0.csprojPath : "\(ctx.generatorRoot)/\(ctx.config)/\($0.csprojPath)"
+            "\(ctx.resultPrefix)\($0.csprojPath)"
         }.sorted(),
-        variantSlnPath: ctx.rootOutput ? slnName : "\(ctx.generatorRoot)/\(ctx.config)/\(slnName)"
+        variantSlnPath: "\(ctx.resultPrefix)\(slnName)"
     )
 }
 
 // MARK: - SolutionGenerator
 
-struct SolutionGenerator {
+public struct SolutionGenerator {
+
+    public init() {}
 
     // MARK: - Lockfile-based generation
 
-    func generateFromLockfile(options: GenerateOptions, lockfile: Lockfile) throws -> GenerateResult {
+    public func generateFromLockfile(options: GenerateOptions, lockfile: Lockfile) throws -> GenerateResult {
         let projectRoot = resolveRealPath(options.projectRoot)
         let scan = try ProjectScanner.scan(projectRoot: projectRoot)
 
@@ -276,7 +303,7 @@ struct SolutionGenerator {
             )
         )
 
-        let refs = Self.collectReferences(lockfile: lockfile, platform: options.platform, isEditor: options.buildConfig == .editor)
+        let refs = Self.collectReferences(lockfile: lockfile, platform: options.platform, isEditor: options.buildConfig == .editor, extraRefs: options.extraRefs)
         let analyzerBlock = Self.renderAnalyzers(lockfile.analyzers)
         let langVersion = lockfile.langVersion
         let asmDefByName = ctx.scan.asmDefByName
@@ -303,7 +330,7 @@ struct SolutionGenerator {
 
     // MARK: - Template-based generation (legacy)
 
-    func generate(options: GenerateOptions) throws -> GenerateResult {
+    public func generate(options: GenerateOptions) throws -> GenerateResult {
         let projectRoot = resolveRealPath(options.projectRoot)
         let generatorRoot = options.generatorRoot
         let generatorDir = joinPath(projectRoot, generatorRoot)
@@ -467,7 +494,7 @@ struct SolutionGenerator {
         return s
     }
 
-    private static func collectReferences(lockfile: Lockfile, platform: BuildPlatform, isEditor: Bool) -> String {
+    private static func collectReferences(lockfile: Lockfile, platform: BuildPlatform, isEditor: Bool, extraRefs: [DllRef] = []) -> String {
         var refs: [DllRef] = []
         var seen: Set<String> = []
 
@@ -487,6 +514,7 @@ struct SolutionGenerator {
         }
         addAll(.project)
         addAll(.netstandard)
+        for ref in extraRefs { add(ref) }
 
         guard !refs.isEmpty else { return "" }
         var s = "  <ItemGroup>\n"

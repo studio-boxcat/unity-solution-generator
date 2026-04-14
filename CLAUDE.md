@@ -1,36 +1,45 @@
 # Unity Solution Generator
 
-Swift CLI that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
+Swift CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
 
-## Install
+## Build
 
 ```bash
-just install
+just build                    # release binary + dylib → dist/
+just test                     # run tests
+just install                  # symlink to ~/.local/bin
+just profile                  # benchmark against meow-tower
 ```
 
-Installs to `~/.local/bin/` (symlinks):
-- `unity-solution-generator` — the generator binary
-- `build-unity-sln` — build script with optimized MSBuild args
+**Output** (`dist/`):
+- `unity-solution-generator` — CLI binary
+- `libUnitySolutionGenerator.dylib` — dynamic library
+- `build-unity-sln.sh` — build script wrapping generate + dotnet build
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `lock` | Scan Unity installation + project to generate `csproj.lock` |
-| `generate` | Regenerate `.csproj`/`.sln` from lockfile and filesystem |
-| `init` | *(deprecated)* Alias for `lock` |
+## CLI
 
 ```bash
 unity-solution-generator lock .                             # scan + write lockfile
-unity-solution-generator generate . ios editor              # ios-editor
-unity-solution-generator generate . android prod            # android-prod
+unity-solution-generator generate . ios editor              # default: Library/UnitySolutionGenerator/ios-editor/
+unity-solution-generator generate . ios editor --root       # output to project root
+unity-solution-generator generate . ios editor \
+  --output Library/hotreload/Solution                       # output to custom dir
+unity-solution-generator generate . ios editor \
+  --extra-refs "/path/to/Extra.dll,/path/to/Other.dll"     # additional DLL references
 ```
 
-Positional args: `<command> <unity-root> <platform> <config>`.
+`init` is a deprecated alias for `lock`.
+
+Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android`. Config: `prod` | `dev` | `editor`.
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output <dir>` | Output to `<dir>` (relative to project root) instead of variant subdir |
+| `--root` | Alias for `--output .` (output to project root) |
+| `--extra-refs <paths>` | Comma-separated absolute paths to additional DLLs |
+| `-v`, `--verbose` | Print unresolved directory samples |
 
 ### Platform + configuration
-
-Two orthogonal axes: **platform** (`ios`, `android`) and **configuration** (`prod`, `dev`, `editor`).
 
 | Config | Projects | DefineConstants (via Directory.Build.props) |
 |--------|----------|---------------------------------------------|
@@ -38,39 +47,55 @@ Two orthogonal axes: **platform** (`ios`, `android`) and **configuration** (`pro
 | `dev` | runtime only | platform + `DEBUG;TRACE;UNITY_ASSERTIONS` |
 | `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE;UNITY_ASSERTIONS` |
 
-Each invocation produces one variant in `{platform}-{config}/` containing `.csproj` files, a `.sln`, and a `Directory.Build.props`.
+### Build validation
 
-## Directory structure
-
-All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored):
-
-```
-Library/UnitySolutionGenerator/
-  csproj.lock                     ← lockfile: DLL refs, analyzers, defines
-  scan-cache                      ← cached filesystem scan (auto-invalidated by mtime)
-  templates/                      ← (legacy) extracted from Unity-generated .csproj files
-  ios-prod/                       ← variant: .csproj + .sln + Directory.Build.props
-  ios-editor/
-  android-prod/
-  ...
-```
-
-## Build validation
-
-`build-unity-sln` wraps `unity-solution-generator generate` + `dotnet build` with optimized MSBuild args. On build failure, it automatically re-runs `lock` and retries the failed variants once.
+`build-unity-sln` wraps generate + `dotnet build`. Auto-retries with fresh lock on build failure. Defaults: platform=`ios`, config=`editor`.
 
 ```bash
 build-unity-sln ios prod                  # single variant
 build-unity-sln ios,android editor,dev    # 4 parallel builds (cartesian product)
-build-unity-sln --clean                   # clean cached artifacts (default: ios-editor)
+build-unity-sln --clean                   # clean cached artifacts
 ```
 
-Comma-separated platforms/configs are expanded into all combinations and built in parallel. Defaults: platform=`ios`, config=`editor`.
-
-Or call `unity-solution-generator` directly — output is the `.sln` path to stdout:
+Or call the generator directly — output is the `.sln` path to stdout:
 
 ```bash
 dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v q
+```
+
+## Library
+
+`libUnitySolutionGenerator.dylib` exposes the generation API for embedding (e.g. Hot Reload's project generation).
+
+### Public API (`import SolutionGeneratorCore`)
+
+| Type | Description |
+|------|-------------|
+| `SolutionGenerator` | `.generateFromLockfile(options:lockfile:)`, `.generate(options:)` |
+| `GenerateOptions` | `projectRoot`, `platform`, `buildConfig`, `outputDir`, `extraRefs` |
+| `GenerateResult` | `variantSlnPath`, `variantCsprojs`, `warnings` |
+| `BuildPlatform` | `.ios`, `.android` |
+| `BuildConfig` | `.prod`, `.dev`, `.editor` |
+| `LockfileIO` | `.read(from:)` — load lockfile |
+| `Lockfile` | Unity version, DLL refs, defines, analyzers (constructible via init or `LockfileIO.read`) |
+| `DllRef` | `name`, `path` |
+| `RefCategory` | `.engine`, `.editor`, `.netstandard`, `.playbackIos`, `.playbackAndroid`, `.playbackStandalone`, `.project` |
+
+```swift
+import SolutionGeneratorCore
+
+let lockfile = try LockfileIO.read(from: "Library/UnitySolutionGenerator/csproj.lock")
+let result = try SolutionGenerator().generateFromLockfile(
+    options: GenerateOptions(
+        projectRoot: projectRoot,
+        outputDir: "Library/com.example/Solution",
+        extraRefs: [DllRef(name: "MyLib", path: "/abs/path/to/MyLib.dll")],
+        platform: .ios,
+        buildConfig: .editor
+    ),
+    lockfile: lockfile
+)
+// result.variantSlnPath → path to generated .sln
 ```
 
 ## How it works
@@ -79,30 +104,14 @@ dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -
 graph LR
     A[lock] -->|scan Unity + project| B[csproj.lock]
     B --> C[generate]
-    C -->|+ asmdef scan| D[variant .csproj/.sln]
+    C -->|+ asmdef scan| D[.csproj/.sln]
 ```
 
-1. **Lock** scans the Unity installation and project filesystem to discover all DLL references, analyzers, and preprocessor defines. No Unity Editor required — it reads from `ProjectSettings/ProjectVersion.txt` to find the Unity install path, then scans `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, and `Library/PackageCache/` for DLLs. Feature defines (`ENABLE_*`) use a hardcoded superset; scripting defines come from `ProjectSettings.asset`; per-asmdef `versionDefines` are evaluated against `manifest.json`. Output: `csproj.lock`.
+1. **Lock** scans the Unity installation and project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` to find the Unity install path, then scans `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, and `Library/PackageCache/`. Output: `csproj.lock`.
 
-2. **Generate** reads the lockfile, scans `Assets/` and `Packages/` for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, and renders complete `.csproj` files (XML header + analyzers + DLL refs + compile patterns + project references). `Directory.Build.props` injects `$(ProjectRoot)`, `$(UnityPath)`, and all defines (static from lockfile + dynamic per variant).
+2. **Generate** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, and renders `.csproj` files (XML header + analyzers + DLL refs + compile patterns + project references) + `.sln` + `Directory.Build.props` (injects `$(ProjectRoot)`, `$(UnityPath)`, and all defines). `--output` controls compile pattern prefix depth — one `../` per path component from output directory back to project root.
 
 3. **Legacy fallback**: If no lockfile exists but templates do, `generate` uses the old template-based path (with a deprecation warning).
-
-### What lock discovers
-
-| Source | Data |
-|--------|------|
-| `ProjectVersion.txt` | Unity version, editor install path |
-| `Managed/UnityEngine/` | Engine + editor module DLLs |
-| `NetStandard/` | System.* shim DLLs |
-| `PlaybackEngines/` | Platform-specific extension DLLs |
-| `Tools/Unity.SourceGenerators/` | Analyzer DLLs |
-| `Assets/`, `Packages/`, `Library/PackageCache/` | Third-party project DLLs + analyzers |
-| Unity version string | `UNITY_X_Y_Z`, `_OR_NEWER` defines |
-| Hardcoded superset | `ENABLE_*` feature flags |
-| `ProjectSettings.asset` | Scripting define symbols |
-| asmdef `versionDefines` | Conditional defines per installed package |
-| asmdef `allowUnsafeCode` | `AllowUnsafeBlocks` per project |
 
 ### Category inference
 
@@ -115,44 +124,42 @@ graph LR
 
 Platform-specific assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`) are treated as **runtime**, but only included in prod/dev variants when the target platform matches. Editor variants include all projects regardless.
 
-### Source ownership resolution
+### Source ownership
 
-For each directory containing `.cs` files, the generator walks upward looking for the nearest `asmdef` or `asmref` assembly root. Directories with no assembly root fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.).
+For each directory containing `.cs` files, the generator walks upward to the nearest `asmdef` or `asmref` assembly root. Unresolved directories fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.). Directories ending with `~` or starting with `.` are excluded.
 
-### Compile patterns
+### Directory structure
 
-Per-directory relative glob patterns instead of individual file listings:
+All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored):
 
-```xml
-<Compile Include="../../../Assets/Game/*.cs" />
-<Compile Include="../../../Assets/Game/Feature/*.cs" />
 ```
-
-Directories ending with `~` or starting with `.` are excluded from scanning.
+Library/UnitySolutionGenerator/
+  csproj.lock                     ← lockfile
+  scan-cache                      ← cached filesystem scan (auto-invalidated by mtime)
+  ios-editor/                     ← variant: .csproj + .sln + Directory.Build.props
+  android-prod/
+  ...
+```
 
 ## Performance
 
-Benchmarked on meow-tower (13 assemblies, ~5k .cs files, ~43k total files across 2.3k directories) via `hyperfine`:
+Benchmarked on meow-tower (13 assemblies, ~5k .cs files) via `hyperfine`:
 
 | Command | Mean ± σ |
 |---------|----------|
-| `generate` (warm cache) | 11.4 ± 1.0 ms |
-| `generate` (cold cache) | 32.4 ± 2.1 ms |
-| `lock` | 47.8 ± 3.5 ms |
-| Process startup (`--help`) | 3.0 ± 0.3 ms |
+| `generate` (warm cache) | 11.5 ± 0.6 ms |
+| `generate --root` | 11.8 ± 0.6 ms |
+| `lock` | 49.3 ± 0.5 ms |
+| startup (`--help`) | 1.8 ± 0.4 ms |
 
-Generate caches filesystem scan results (`scan-cache`) with nanosecond-precision directory mtimes. On subsequent runs, validates cached mtimes with `stat()` (~1ms) instead of a full readdir walk (~21ms). Any file add/remove/change automatically invalidates the cache and triggers a full re-scan.
-
-Static linking is not beneficial — Swift runtime ships with macOS (`/usr/lib/swift/`), adding only ~1ms startup overhead over bare C.
+Generate caches filesystem scan results (`scan-cache`) with nanosecond-precision directory mtimes. Cache validated via `stat()` (~1ms) instead of full readdir (~21ms). Any file add/remove/change invalidates the cache and triggers a full re-scan.
 
 No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch.
 
 ## Unity project setup
 
-After cloning, or after Unity upgrades / package changes:
-
 ```bash
 unity-solution-generator lock .
 ```
 
-The lockfile is auto-generated on first `generate` if missing. Re-run `lock` when Unity version changes or packages are added/removed. `build-unity-sln` auto-retries with a fresh lock on build failure.
+Re-run `lock` when Unity version changes or packages are added/removed. The lockfile is auto-generated on first `generate` if missing. `build-unity-sln` auto-retries with a fresh lock on build failure.

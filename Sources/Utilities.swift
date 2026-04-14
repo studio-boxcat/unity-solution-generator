@@ -1,6 +1,6 @@
 import Darwin
 
-let defaultGeneratorRoot = "Library/UnitySolutionGenerator"
+public let defaultGeneratorRoot = "Library/UnitySolutionGenerator"
 
 // MARK: - Concurrency
 
@@ -19,13 +19,13 @@ func parentDirectory(of path: String) -> String {
     return String(path[..<slash])
 }
 
-func resolveRealPath(_ path: String) -> String {
+package func resolveRealPath(_ path: String) -> String {
     guard let resolved = realpath(path, nil) else { return path }
     defer { free(resolved) }
     return String(cString: resolved)
 }
 
-func joinPath(_ base: String, _ component: String) -> String {
+package func joinPath(_ base: String, _ component: String) -> String {
     if base.hasSuffix("/") { return "\(base)\(component)" }
     return "\(base)/\(component)"
 }
@@ -168,11 +168,11 @@ func writeFileIfChanged(_ path: String, _ content: String) throws -> Bool {
     return true
 }
 
-func fileExists(_ path: String) -> Bool {
+package func fileExists(_ path: String) -> Bool {
     access(path, F_OK) == 0
 }
 
-func createDirectoryRecursive(_ path: String) {
+package func createDirectoryRecursive(_ path: String) {
     var current = ""
     for component in path.split(separator: "/") {
         current += "/\(component)"
@@ -216,7 +216,7 @@ func processDirent(_ entry: UnsafeMutablePointer<dirent>, parentPath: String) ->
     return nil
 }
 
-func listDirectory(_ path: String) -> [String] {
+package func listDirectory(_ path: String) -> [String] {
     guard let dir = opendir(path) else { return [] }
     defer { closedir(dir) }
     var entries: [String] = []

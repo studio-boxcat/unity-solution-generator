@@ -1,7 +1,7 @@
 import Dispatch
 import Foundation
 import XCTest
-@testable import unity_solution_generator
+@testable import SolutionGeneratorCore
 
 final class SolutionGeneratorTests: XCTestCase {
     private let generatorRoot = "tpl"
@@ -1024,6 +1024,209 @@ final class SolutionGeneratorTests: XCTestCase {
         XCTAssertFalse(withoutUnity.contains("<UnityPath>"))
         XCTAssertTrue(withoutUnity.contains("UNITY_ANDROID"))
         XCTAssertFalse(withoutUnity.contains("UNITY_EDITOR"))
+    }
+
+    // MARK: - Output dir tests
+
+    func testOutputDotProducesRootOutput() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Game/Assembly.asmref", "{\"reference\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/A.cs", "class A {}\n")
+        try writeFile(root, "Assets/Game/B.cs", "class B {}\n")
+
+        let result = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                outputDir: ".",
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        // Result paths should have no directory prefix
+        XCTAssertEqual(result.variantCsprojs, ["Main.csproj"])
+        XCTAssertTrue(result.variantSlnPath.hasSuffix(".sln"))
+        XCTAssertFalse(result.variantSlnPath.contains("/"))
+
+        // Csproj written to project root
+        let csproj = try readFile(root, "Main.csproj")
+        // Compile paths should have no ../ prefix (depth 0)
+        XCTAssertTrue(csproj.contains("Assets/Assemblies/Main/*.cs"))
+        XCTAssertTrue(csproj.contains("Assets/Game/*.cs"))
+        XCTAssertFalse(csproj.contains("../"))
+    }
+
+    func testOutputDeepPathProducesCorrectPrefix() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/A.cs", "class A {}\n")
+
+        let outputDir = "Library/com.example/deep/output"
+        let result = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                outputDir: outputDir,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        // Result paths should include the output dir
+        XCTAssertEqual(result.variantCsprojs, ["\(outputDir)/Main.csproj"])
+        XCTAssertTrue(result.variantSlnPath.hasPrefix("\(outputDir)/"))
+
+        // Csproj written to the deep path
+        let csproj = try readFile(root, "\(outputDir)/Main.csproj")
+        // depth=4 → 4x "../"
+        XCTAssertTrue(csproj.contains("../../../../Assets/Assemblies/Main/*.cs"))
+    }
+
+    func testOutputSingleDirDepthOne() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Lib/Lib.asmdef", "{\"name\":\"Lib\"}\n")
+        try writeFile(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n")
+
+        let result = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                outputDir: "output",
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        XCTAssertEqual(result.variantCsprojs, ["output/Lib.csproj"])
+        let csproj = try readFile(root, "output/Lib.csproj")
+        // depth=1 → 1x "../"
+        XCTAssertTrue(csproj.contains("../Assets/Assemblies/Lib/*.cs"))
+    }
+
+    func testDefaultOutputUnchanged() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/A.cs", "class A {}\n")
+
+        let result = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        // Default: outputs to generatorRoot/config/
+        XCTAssertEqual(result.variantCsprojs, ["\(generatorRoot)/ios-editor/Main.csproj"])
+        let csproj = try readFile(root, "\(generatorRoot)/ios-editor/Main.csproj")
+        // generatorRoot="tpl" → depth = 1+1 = 2 → "../../"
+        XCTAssertTrue(csproj.contains("../../Assets/Assemblies/Main/*.cs"))
+    }
+
+    // MARK: - Extra refs tests
+
+    func testExtraRefsAppearInCsproj() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n")
+
+        let extraRefs = [
+            DllRef(name: "SingularityGroup.HotReload.RuntimeDependencies", path: "/path/to/SingularityGroup.HotReload.RuntimeDependencies.dll"),
+            DllRef(name: "SingularityGroup.HotReload.RuntimeDependencies2022", path: "/path/to/SingularityGroup.HotReload.RuntimeDependencies2022.dll"),
+        ]
+
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                extraRefs: extraRefs,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        let csproj = try readFile(root, "\(generatorRoot)/ios-editor/Main.csproj")
+        XCTAssertTrue(csproj.contains("<Reference Include=\"SingularityGroup.HotReload.RuntimeDependencies\">"))
+        XCTAssertTrue(csproj.contains("<HintPath>/path/to/SingularityGroup.HotReload.RuntimeDependencies.dll</HintPath>"))
+        XCTAssertTrue(csproj.contains("<Reference Include=\"SingularityGroup.HotReload.RuntimeDependencies2022\">"))
+    }
+
+    func testExtraRefsDeduplicatedWithLockfileRefs() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n")
+
+        // Pass an extra ref with the same name as a lockfile ref
+        let extraRefs = [
+            DllRef(name: "UnityEngine", path: "/duplicate/UnityEngine.dll"),
+        ]
+
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                extraRefs: extraRefs,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        let csproj = try readFile(root, "\(generatorRoot)/ios-editor/Main.csproj")
+        // Should only appear once (the lockfile version wins)
+        let count = csproj.components(separatedBy: "Include=\"UnityEngine\"").count - 1
+        XCTAssertEqual(count, 1)
+    }
+
+    func testExtraRefsWithOutputDir() throws {
+        let root = try makeTempProjectRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let lockfile = makeMinimalLockfile()
+
+        try writeFile(root, "Assets/Assemblies/Main/Main.asmdef", "{\"name\":\"Main\"}\n")
+        try writeFile(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n")
+
+        let extraRefs = [
+            DllRef(name: "TestLib", path: "/path/to/TestLib.dll"),
+        ]
+
+        let outputDir = "Library/hotreload/Solution"
+        _ = try SolutionGenerator().generateFromLockfile(
+            options: GenerateOptions(
+                projectRoot: root, generatorRoot: generatorRoot,
+                outputDir: outputDir,
+                extraRefs: extraRefs,
+                platform: .ios, buildConfig: .editor
+            ),
+            lockfile: lockfile
+        )
+
+        let csproj = try readFile(root, "\(outputDir)/Main.csproj")
+        // Extra refs present
+        XCTAssertTrue(csproj.contains("<Reference Include=\"TestLib\">"))
+        // Correct depth prefix (3 levels)
+        XCTAssertTrue(csproj.contains("../../../Assets/Assemblies/Main/*.cs"))
     }
 
     // MARK: - Legacy template tests

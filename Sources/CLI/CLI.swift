@@ -1,4 +1,5 @@
 import Darwin
+import SolutionGeneratorCore
 
 @main
 struct CLI {
@@ -68,13 +69,32 @@ struct CLI {
         }
 
         var verbose = false
-        var rootOutput = false
-        for i in 3..<args.count {
+        var outputDir: String? = nil
+        var extraRefPaths: [String] = []
+        var i = 3
+        while i < args.count {
             switch args[i] {
-            case "-v", "--verbose": verbose = true
-            case "--root": rootOutput = true
+            case "-v", "--verbose":
+                verbose = true
+            case "--root":
+                outputDir = "."
+            case "-o", "--output":
+                i += 1
+                guard i < args.count else { die("--output requires a directory argument") }
+                outputDir = args[i]
+            case "--extra-refs":
+                i += 1
+                guard i < args.count else { die("--extra-refs requires a comma-separated list of DLL paths") }
+                extraRefPaths = args[i].split(separator: ",").map(String.init)
             default: die("Unknown option: \(args[i])")
             }
+            i += 1
+        }
+
+        let extraRefs = extraRefPaths.map { path in
+            let filename = path.split(separator: "/").last.map(String.init) ?? path
+            let name = filename.hasSuffix(".dll") ? String(filename.dropLast(4)) : filename
+            return DllRef(name: name, path: path)
         }
 
         let resolvedRoot = resolveRealPath(projectRoot)
@@ -85,7 +105,8 @@ struct CLI {
             let options = GenerateOptions(
                 projectRoot: resolvedRoot,
                 verbose: verbose,
-                rootOutput: rootOutput,
+                outputDir: outputDir,
+                extraRefs: extraRefs,
                 platform: platform,
                 buildConfig: buildConfig
             )
@@ -146,7 +167,9 @@ struct CLI {
           config                prod | dev | editor
 
         OPTIONS:
-          --root                Output to project root instead of variant dir
+          -o, --output <dir>    Output to <dir> (relative to project root) instead of variant dir
+          --root                Alias for --output . (output to project root)
+          --extra-refs <paths>  Comma-separated absolute paths to additional DLLs
           -v, --verbose         Print unresolved directory samples
           -h, --help            Show help
         """)

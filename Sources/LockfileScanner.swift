@@ -1,11 +1,15 @@
 import Darwin
 
-struct DllRef: Sendable {
-    let name: String
-    let path: String
+public struct DllRef: Sendable {
+    public let name: String
+    public let path: String
+    public init(name: String, path: String) {
+        self.name = name
+        self.path = path
+    }
 }
 
-enum RefCategory: String, CaseIterable, Sendable {
+public enum RefCategory: String, CaseIterable, Sendable {
     case engine = "refs.engine"
     case editor = "refs.editor"
     case netstandard = "refs.netstandard"
@@ -15,16 +19,26 @@ enum RefCategory: String, CaseIterable, Sendable {
     case project = "refs.project"
 }
 
-struct Lockfile: Sendable {
-    let unityVersion: String
-    let unityPath: String
-    let langVersion: String
-    let analyzers: [String]
-    let refs: [RefCategory: [DllRef]]
-    let defines: [String]
-    let definesScripting: [String]
+public struct Lockfile: Sendable {
+    public let unityVersion: String
+    public let unityPath: String
+    public let langVersion: String
+    public let analyzers: [String]
+    public let refs: [RefCategory: [DllRef]]
+    public let defines: [String]
+    public let definesScripting: [String]
 
-    var totalRefCount: Int {
+    public init(unityVersion: String, unityPath: String, langVersion: String, analyzers: [String], refs: [RefCategory: [DllRef]], defines: [String], definesScripting: [String]) {
+        self.unityVersion = unityVersion
+        self.unityPath = unityPath
+        self.langVersion = langVersion
+        self.analyzers = analyzers
+        self.refs = refs
+        self.defines = defines
+        self.definesScripting = definesScripting
+    }
+
+    public var totalRefCount: Int {
         refs.values.reduce(0) { $0 + $1.count }
     }
 }
@@ -46,9 +60,9 @@ enum LockfileError: Error, CustomStringConvertible {
     }
 }
 
-struct LockfileScanner {
+package struct LockfileScanner {
 
-    static func scan(projectRoot: String) throws -> Lockfile {
+    package static func scan(projectRoot: String) throws -> Lockfile {
         let (version, unityPath) = try resolveUnityPath(projectRoot: projectRoot)
         let appContents = joinPath(unityPath, "Unity.app/Contents")
 

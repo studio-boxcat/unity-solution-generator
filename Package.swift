@@ -9,15 +9,22 @@ let package = Package(
     ],
     products: [
         .executable(name: "unity-solution-generator", targets: ["unity-solution-generator"]),
+        .library(name: "UnitySolutionGenerator", type: .dynamic, targets: ["SolutionGeneratorCore"]),
     ],
     targets: [
+        .target(
+            name: "SolutionGeneratorCore",
+            path: "Sources",
+            exclude: ["CLI"]
+        ),
         .executableTarget(
             name: "unity-solution-generator",
-            path: "Sources"
+            dependencies: ["SolutionGeneratorCore"],
+            path: "Sources/CLI"
         ),
         .testTarget(
             name: "SolutionGeneratorTests",
-            dependencies: ["unity-solution-generator"],
+            dependencies: ["SolutionGeneratorCore"],
             path: "Tests"
         ),
     ]
