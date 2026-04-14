@@ -127,7 +127,7 @@ Per-directory relative glob patterns instead of individual file listings:
 <Compile Include="../../../Assets/Game/Feature/*.cs" />
 ```
 
-Directories ending with `~` or starting with `.` are excluded from scanning. Files starting with `.` (e.g. `.Scratch.cs`) are excluded via `Exclude` attributes on compile glob patterns, since MSBuild `*.cs` globs match dotfiles.
+Directories ending with `~` or starting with `.` are excluded from scanning.
 
 ## Performance
 
@@ -135,10 +135,10 @@ Benchmarked on meow-tower (13 assemblies, ~5k .cs files, ~43k total files across
 
 | Command | Mean ± σ |
 |---------|----------|
-| `generate` (warm cache) | 11.8 ± 1.2 ms |
-| `generate` (cold cache) | 30.8 ± 0.7 ms |
-| `lock` | 49.2 ± 6.2 ms |
-| Process startup (`--help`) | 2.2 ± 1.2 ms |
+| `generate` (warm cache) | 11.4 ± 1.0 ms |
+| `generate` (cold cache) | 32.4 ± 2.1 ms |
+| `lock` | 47.8 ± 3.5 ms |
+| Process startup (`--help`) | 3.0 ± 0.3 ms |
 
 Generate caches filesystem scan results (`scan-cache`) with nanosecond-precision directory mtimes. On subsequent runs, validates cached mtimes with `stat()` (~1ms) instead of a full readdir walk (~21ms). Any file add/remove/change automatically invalidates the cache and triggers a full re-scan.
 

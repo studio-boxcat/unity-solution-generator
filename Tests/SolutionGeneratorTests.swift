@@ -229,7 +229,7 @@ final class SolutionGeneratorTests: XCTestCase {
 
     private func readCompileSet(root: String, csprojPath: String) throws -> Set<String> {
         let content = try readFile(root, csprojPath)
-        let pattern = #"<Compile Include=\"([^\"]+)\"[^>]*/>"#
+        let pattern = #"<Compile Include=\"([^\"]+)\"\s*/>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let range = NSRange(content.startIndex..<content.endIndex, in: content)
 
