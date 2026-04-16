@@ -25,6 +25,26 @@ package func resolveRealPath(_ path: String) -> String {
     return String(cString: resolved)
 }
 
+/// Resolve symlinks then climb up to the nearest ancestor containing
+/// `ProjectSettings/ProjectVersion.txt`. Falls back to the resolved input
+/// if no Unity root is found (lockfile scan will emit a clearer error).
+package func resolveProjectRoot(_ path: String) -> String {
+    let resolved = resolveRealPath(path)
+    var current = resolved
+    while !current.isEmpty && current != "/" {
+        if fileExists(joinPath(current, "ProjectSettings/ProjectVersion.txt")) {
+            return current
+        }
+        current = parentDirectory(of: current)
+    }
+    return resolved
+}
+
+/// Standard path to the lockfile for a given project root.
+package func lockfilePath(for projectRoot: String) -> String {
+    joinPath(projectRoot, "\(defaultGeneratorRoot)/csproj.lock")
+}
+
 package func joinPath(_ base: String, _ component: String) -> String {
     if base.hasSuffix("/") { return "\(base)\(component)" }
     return "\(base)/\(component)"

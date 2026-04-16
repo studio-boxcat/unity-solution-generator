@@ -7,6 +7,17 @@ public struct DllRef: Sendable {
         self.name = name
         self.path = path
     }
+
+    /// Parse a comma-separated list of absolute DLL paths, inferring each
+    /// `name` from the filename (with the `.dll` suffix stripped).
+    public static func parseList(_ commaSeparated: String) -> [DllRef] {
+        commaSeparated.split(separator: ",").map { part in
+            let path = String(part)
+            let filename = String(path.split(separator: "/").last ?? Substring(path))
+            let name = filename.hasSuffix(".dll") ? String(filename.dropLast(4)) : filename
+            return DllRef(name: name, path: path)
+        }
+    }
 }
 
 public enum RefCategory: String, CaseIterable, Sendable {

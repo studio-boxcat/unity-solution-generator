@@ -51,40 +51,17 @@ public func usg_generate(
         return 1
     }
 
-    let outDir: String? = outputDir.map { String(cString: $0) }
-
-    var dllRefs: [DllRef] = []
-    if let refs = extraRefs {
-        let refsStr = String(cString: refs)
-        for path in refsStr.split(separator: ",") {
-            let p = String(path)
-            let filename = p.split(separator: "/").last.map(String.init) ?? p
-            let name = filename.hasSuffix(".dll") ? String(filename.dropLast(4)) : filename
-            dllRefs.append(DllRef(name: name, path: p))
-        }
-    }
-
-    let resolvedRoot = resolveRealPath(String(cString: projectRoot))
-    let generatorDir = joinPath(resolvedRoot, defaultGeneratorRoot)
-    let lockfilePath = joinPath(generatorDir, "csproj.lock")
+    let resolvedRoot = resolveProjectRoot(String(cString: projectRoot))
 
     do {
-        let lockfile: Lockfile
-        if fileExists(lockfilePath) {
-            lockfile = try LockfileIO.read(from: lockfilePath)
-        } else {
-            createDirectoryRecursive(generatorDir)
-            lockfile = try LockfileScanner.scan(projectRoot: resolvedRoot)
-            try LockfileIO.write(lockfile, to: lockfilePath)
-        }
-
         let options = GenerateOptions(
             projectRoot: resolvedRoot,
-            outputDir: outDir,
-            extraRefs: dllRefs,
+            outputDir: outputDir.map { String(cString: $0) },
+            extraRefs: extraRefs.map { DllRef.parseList(String(cString: $0)) } ?? [],
             platform: buildPlatform,
             buildConfig: buildConfig
         )
+        let lockfile = try LockfileIO.loadOrScan(projectRoot: resolvedRoot)
         let result = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
 
         let slnPath = result.variantSlnPath
@@ -113,14 +90,8 @@ public func usg_lock(
 ) -> Int32 {
     clearLastError()
 
-    let resolvedRoot = resolveRealPath(String(cString: projectRoot))
-    let generatorDir = joinPath(resolvedRoot, defaultGeneratorRoot)
-    createDirectoryRecursive(generatorDir)
-    let lockfilePath = joinPath(generatorDir, "csproj.lock")
-
     do {
-        let lockfile = try LockfileScanner.scan(projectRoot: resolvedRoot)
-        try LockfileIO.write(lockfile, to: lockfilePath)
+        _ = try LockfileIO.scanAndWrite(projectRoot: resolveProjectRoot(String(cString: projectRoot)))
         return 0
     } catch {
         setLastError("\(error)")

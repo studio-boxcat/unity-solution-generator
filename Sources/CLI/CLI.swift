@@ -28,25 +28,13 @@ struct CLI {
     }
 
     static func runLock(_ args: [String]) {
-        guard !args.isEmpty else {
-            die("lock requires: <unity-root>")
-        }
-
-        let projectRoot = resolveRealPath(args[0])
-        let generatorRoot = defaultGeneratorRoot
-        let generatorDir = joinPath(projectRoot, generatorRoot)
-        createDirectoryRecursive(generatorDir)
-        let lockfilePath = joinPath(generatorDir, "csproj.lock")
+        guard !args.isEmpty else { die("lock requires: <unity-root>") }
 
         do {
-            let lockfile = try LockfileScanner.scan(projectRoot: projectRoot)
-            try LockfileIO.write(lockfile, to: lockfilePath)
-
-            let totalRefs = lockfile.totalRefCount
-
+            let lockfile = try LockfileIO.scanAndWrite(projectRoot: resolveProjectRoot(args[0]))
             print("Locked csproj.lock:")
             print("  Unity \(lockfile.unityVersion) (\(lockfile.unityPath))")
-            print("  \(totalRefs) DLL references, \(lockfile.analyzers.count) analyzers")
+            print("  \(lockfile.totalRefCount) DLL references, \(lockfile.analyzers.count) analyzers")
             print("  \(lockfile.defines.count) defines, \(lockfile.definesScripting.count) scripting defines")
         } catch {
             die("\(error)")
@@ -70,7 +58,7 @@ struct CLI {
 
         var verbose = false
         var outputDir: String? = nil
-        var extraRefPaths: [String] = []
+        var extraRefsRaw: String? = nil
         var i = 3
         while i < args.count {
             switch args[i] {
@@ -85,58 +73,40 @@ struct CLI {
             case "--extra-refs":
                 i += 1
                 guard i < args.count else { die("--extra-refs requires a comma-separated list of DLL paths") }
-                extraRefPaths = args[i].split(separator: ",").map(String.init)
+                extraRefsRaw = args[i]
             default: die("Unknown option: \(args[i])")
             }
             i += 1
         }
 
-        let extraRefs = extraRefPaths.map { path in
-            let filename = path.split(separator: "/").last.map(String.init) ?? path
-            let name = filename.hasSuffix(".dll") ? String(filename.dropLast(4)) : filename
-            return DllRef(name: name, path: path)
-        }
-
-        let resolvedRoot = resolveRealPath(projectRoot)
-        let generatorRoot = defaultGeneratorRoot
-        let lockfilePath = joinPath(resolvedRoot, joinPath(generatorRoot, "csproj.lock"))
+        let resolvedRoot = resolveProjectRoot(projectRoot)
+        let templatesDir = joinPath(resolvedRoot, "\(defaultGeneratorRoot)/templates")
 
         do {
             let options = GenerateOptions(
                 projectRoot: resolvedRoot,
                 verbose: verbose,
                 outputDir: outputDir,
-                extraRefs: extraRefs,
+                extraRefs: extraRefsRaw.map(DllRef.parseList) ?? [],
                 platform: platform,
                 buildConfig: buildConfig
             )
 
             let result: GenerateResult
-
-            if fileExists(lockfilePath) {
-                // Lockfile-based generation
-                let lockfile = try LockfileIO.read(from: lockfilePath)
+            if fileExists(lockfilePath(for: resolvedRoot)) {
+                let lockfile = try LockfileIO.read(from: lockfilePath(for: resolvedRoot))
                 result = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
+            } else if fileExists(templatesDir) && !listDirectory(templatesDir).isEmpty {
+                fputs("warning: Using legacy templates. Run 'unity-solution-generator lock' to migrate.\n", stderr)
+                result = try SolutionGenerator().generate(options: options)
             } else {
-                // Check for templates (legacy fallback)
-                let templatesDir = joinPath(resolvedRoot, joinPath(generatorRoot, "templates"))
-                if fileExists(templatesDir) && !listDirectory(templatesDir).isEmpty {
-                    fputs("warning: Using legacy templates. Run 'unity-solution-generator lock' to migrate.\n", stderr)
-                    result = try SolutionGenerator().generate(options: options)
-                } else {
-                    // Auto-run lock
-                    fputs("No lockfile found, running lock...\n", stderr)
-                    let generatorDir = joinPath(resolvedRoot, generatorRoot)
-                    createDirectoryRecursive(generatorDir)
-                    let lockfile = try LockfileScanner.scan(projectRoot: resolvedRoot)
-                    try LockfileIO.write(lockfile, to: lockfilePath)
-                    fputs("Locked: \(lockfile.unityVersion)\n", stderr)
-                    result = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
-                }
+                fputs("No lockfile found, running lock...\n", stderr)
+                let lockfile = try LockfileIO.scanAndWrite(projectRoot: resolvedRoot)
+                fputs("Locked: \(lockfile.unityVersion)\n", stderr)
+                result = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
             }
 
             print(result.variantSlnPath)
-
             for warning in result.warnings {
                 fputs("warning: \(warning)\n", stderr)
             }
