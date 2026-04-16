@@ -24,8 +24,8 @@ private func clearLastError() {
 ///   - config: "editor", "prod", or "dev"
 ///   - outputDir: Output directory relative to project root, "." for root, NULL for default variant dir
 ///   - extraRefs: Comma-separated absolute DLL paths, or NULL for none
-///   - slnPathOut: Buffer to receive the output .sln path (relative to project root)
-///   - slnPathOutLen: Size of slnPathOut buffer in bytes
+///   - slnPathOut: Buffer to receive the output .sln path (relative to project root), or NULL to skip
+///   - slnPathOutLen: Size of slnPathOut buffer in bytes (ignored when slnPathOut is NULL)
 /// - Returns: 0 on success, nonzero on error (call usg_last_error for message)
 @_cdecl("usg_generate")
 public func usg_generate(
@@ -34,11 +34,10 @@ public func usg_generate(
     _ config: UnsafePointer<CChar>,
     _ outputDir: UnsafePointer<CChar>?,
     _ extraRefs: UnsafePointer<CChar>?,
-    _ slnPathOut: UnsafeMutablePointer<CChar>,
+    _ slnPathOut: UnsafeMutablePointer<CChar>?,
     _ slnPathOutLen: Int32
 ) -> Int32 {
     clearLastError()
-    guard slnPathOutLen > 0 else { setLastError("slnPathOutLen must be > 0"); return 1 }
 
     let platformStr = String(cString: platform)
     let configStr = String(cString: config)
@@ -89,11 +88,13 @@ public func usg_generate(
         let result = try SolutionGenerator().generateFromLockfile(options: options, lockfile: lockfile)
 
         let slnPath = result.variantSlnPath
-        guard slnPath.utf8.count < Int(slnPathOutLen) else {
-            setLastError("Buffer too small (\(slnPathOutLen) bytes) for path (\(slnPath.utf8.count + 1) needed)")
-            return 1
+        if let slnPathOut {
+            guard slnPath.utf8.count < Int(slnPathOutLen) else {
+                setLastError("Buffer too small (\(slnPathOutLen) bytes) for path (\(slnPath.utf8.count + 1) needed)")
+                return 1
+            }
+            _ = strlcpy(slnPathOut, slnPath, Int(slnPathOutLen))
         }
-        _ = strlcpy(slnPathOut, slnPath, Int(slnPathOutLen))
         return 0
     } catch {
         setLastError("\(error)")

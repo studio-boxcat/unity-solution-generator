@@ -13,14 +13,14 @@
 // config:      "editor", "prod", or "dev"
 // outputDir:   relative dir (e.g. "Library/hotreload/Solution"), "." for root, NULL for default
 // extraRefs:   comma-separated absolute DLL paths, or NULL
-// slnPathOut:  buffer receives the output .sln path (relative to project root)
+// slnPathOut:  buffer receives the output .sln path (relative to project root), or NULL to skip
 int32_t usg_generate(
     const char *projectRoot,
     const char *platform,
     const char *config,
     const char *outputDir,       // nullable
     const char *extraRefs,       // nullable
-    char *slnPathOut,
+    char *slnPathOut,            // nullable
     int32_t slnPathOutLen
 );
 
