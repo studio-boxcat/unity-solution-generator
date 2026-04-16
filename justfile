@@ -13,6 +13,7 @@ build:
     swift build --package-path "{{pkg}}" -c release
     strip -o "{{bin}}" "{{pkg}}/.build/release/unity-solution-generator"
     cp "{{pkg}}/.build/release/libUnitySolutionGenerator.dylib" "{{dylib}}"
+    codesign -s - -f "{{bin}}" "{{dylib}}"  # strip + linker-signed adhoc → rejected by hardened runtime (Unity)
 
 # Install to ~/.local/bin
 install: build
