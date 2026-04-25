@@ -37,11 +37,13 @@ public struct GenerateOptions: Sendable {
 public enum BuildPlatform: String, Sendable {
     case ios
     case android
+    case osx
 
     var unityPlatformName: String {
         switch self {
         case .ios: return "iOS"
         case .android: return "Android"
+        case .osx: return "macOSStandalone"
         }
     }
 }
@@ -57,6 +59,7 @@ enum DynamicDefines {
     static let platform: [BuildPlatform: [String]] = [
         .ios: ["UNITY_IOS", "UNITY_IPHONE"],
         .android: ["UNITY_ANDROID"],
+        .osx: ["UNITY_STANDALONE", "UNITY_STANDALONE_OSX"],
     ]
     static let editor = ["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_OSX"]
     static let debug = ["DEBUG", "TRACE", "UNITY_ASSERTIONS"]
@@ -511,6 +514,7 @@ public struct SolutionGenerator {
         switch platform {
         case .ios: addAll(.playbackIos)
         case .android: addAll(.playbackAndroid)
+        case .osx: break  // playbackStandalone covers macOS
         }
         addAll(.project)
         addAll(.netstandard)

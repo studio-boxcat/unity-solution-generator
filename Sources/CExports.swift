@@ -20,7 +20,7 @@ private func clearLastError() {
 ///
 /// - Parameters:
 ///   - projectRoot: Absolute path to Unity project root
-///   - platform: "ios" or "android"
+///   - platform: "ios", "android", or "osx"
 ///   - config: "editor", "prod", or "dev"
 ///   - outputDir: Output directory relative to project root, "." for root, NULL for default variant dir
 ///   - extraRefs: Comma-separated absolute DLL paths, or NULL for none
@@ -43,7 +43,7 @@ public func usg_generate(
     let configStr = String(cString: config)
 
     guard let buildPlatform = BuildPlatform(rawValue: platformStr) else {
-        setLastError("Unknown platform '\(platformStr)'. Use 'ios' or 'android'.")
+        setLastError("Unknown platform '\(platformStr)'. Use 'ios', 'android', or 'osx'.")
         return 1
     }
     guard let buildConfig = BuildConfig(rawValue: configStr) else {

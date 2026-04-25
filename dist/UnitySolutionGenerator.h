@@ -9,7 +9,7 @@
 // Generate .csproj/.sln from lockfile. Auto-runs lock if needed.
 // Returns 0 on success, nonzero on error (call usg_last_error).
 //
-// platform:    "ios" or "android"
+// platform:    "ios", "android", or "osx"
 // config:      "editor", "prod", or "dev"
 // outputDir:   relative dir (e.g. "Library/hotreload/Solution"), "." for root, NULL for default
 // extraRefs:   comma-separated absolute DLL paths, or NULL

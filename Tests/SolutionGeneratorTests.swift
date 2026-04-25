@@ -998,6 +998,7 @@ final class SolutionGeneratorTests: XCTestCase {
     func testBuildPlatformUnityName() throws {
         XCTAssertEqual(BuildPlatform.ios.unityPlatformName, "iOS")
         XCTAssertEqual(BuildPlatform.android.unityPlatformName, "Android")
+        XCTAssertEqual(BuildPlatform.osx.unityPlatformName, "macOSStandalone")
     }
 
     /// Merged renderDirectoryBuildProps must handle both lockfile (with unityPath) and template (without) paths.

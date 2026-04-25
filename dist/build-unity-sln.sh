@@ -37,11 +37,11 @@ Usage: build-unity-sln [platforms] [configs] [options]
        build-unity-sln --clean
 
 Arguments:
-  platforms      ios | android | ios,android (default: ios)
+  platforms      ios | android | osx | ios,android,osx (default: ios)
   configs        prod | dev | editor | dev,editor (default: editor)
 
   Comma-separated values build all combinations in parallel:
-    build-unity-sln ios,android editor,dev   # 4 parallel builds
+    build-unity-sln ios,android,osx editor   # 3 parallel builds
 
 Options:
   --clean        Remove cached build artifacts
@@ -69,7 +69,7 @@ while [[ $# -gt 0 ]]; do
       IFS=',' read -ra tokens <<< "$1"
       all_platform=true all_config=true
       for t in "${tokens[@]}"; do
-        case $t in ios|android) ;; *) all_platform=false ;; esac
+        case $t in ios|android|osx) ;; *) all_platform=false ;; esac
         case $t in prod|dev|editor) ;; *) all_config=false ;; esac
       done
       if $all_platform && [[ ${#PLATFORMS[@]} -eq 0 ]]; then

@@ -49,7 +49,7 @@ struct CLI {
         let projectRoot = args[0]
 
         guard let platform = BuildPlatform(rawValue: args[1]) else {
-            die("Unknown platform '\(args[1])'. Use 'ios' or 'android'.")
+            die("Unknown platform '\(args[1])'. Use 'ios', 'android', or 'osx'.")
         }
 
         guard let buildConfig = BuildConfig(rawValue: args[2]) else {
@@ -133,7 +133,7 @@ struct CLI {
 
         ARGUMENTS:
           unity-root            Unity project root
-          platform              ios | android
+          platform              ios | android | osx
           config                prod | dev | editor
 
         OPTIONS:

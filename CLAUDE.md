@@ -31,7 +31,7 @@ unity-solution-generator generate . ios editor \
 
 `init` is a deprecated alias for `lock`.
 
-Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android`. Config: `prod` | `dev` | `editor`.
+Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx`. Config: `prod` | `dev` | `editor`.
 
 | Option | Description |
 |--------|-------------|
@@ -48,6 +48,14 @@ Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` |
 | `dev` | runtime only | platform + `DEBUG;TRACE;UNITY_ASSERTIONS` |
 | `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE;UNITY_ASSERTIONS` |
 
+Platform defines:
+
+| Platform | Defines |
+|----------|---------|
+| `ios` | `UNITY_IOS;UNITY_IPHONE` |
+| `android` | `UNITY_ANDROID` |
+| `osx` | `UNITY_STANDALONE;UNITY_STANDALONE_OSX` |
+
 ### Build validation
 
 `build-unity-sln` wraps generate + `dotnet build`. Auto-retries with fresh lock on build failure. Defaults: platform=`ios`, config=`editor`.
@@ -55,6 +63,7 @@ Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` |
 ```bash
 build-unity-sln ios prod                  # single variant
 build-unity-sln ios,android editor,dev    # 4 parallel builds (cartesian product)
+build-unity-sln osx editor                # macOS standalone (catches UNITY_STANDALONE_OSX errors)
 build-unity-sln --clean                   # clean cached artifacts
 ```
 
