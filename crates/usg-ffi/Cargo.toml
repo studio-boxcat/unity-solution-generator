@@ -1,0 +1,14 @@
+[package]
+name = "usg-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "UnitySolutionGenerator"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+usg-core.workspace = true
+libc.workspace = true

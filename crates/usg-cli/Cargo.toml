@@ -1,0 +1,14 @@
+[package]
+name = "usg-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "unity-solution-generator"
+path = "src/main.rs"
+
+[dependencies]
+usg-core.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

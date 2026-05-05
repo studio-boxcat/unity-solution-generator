@@ -1,6 +1,11 @@
 # Unity Solution Generator
 
-Swift CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
+Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
+
+Cargo workspace under `crates/`:
+- `usg-core` — library (paths, lockfile, scanners, generator, template extractor)
+- `usg-cli` — binary (`unity-solution-generator`)
+- `usg-ffi` — `cdylib` (`libUnitySolutionGenerator.dylib`) with the C ABI used by Unity `[DllImport]`
 
 ## Build
 
@@ -13,8 +18,8 @@ just profile                  # benchmark against meow-tower
 
 **Output** (`dist/`):
 - `unity-solution-generator` — CLI binary
-- `libUnitySolutionGenerator.dylib` — dynamic library (C ABI via `@_cdecl`)
-- `UnitySolutionGenerator.h` — C header for the dylib
+- `libUnitySolutionGenerator.dylib` — dynamic library (C ABI via `#[unsafe(no_mangle)] extern "C"`)
+- `UnitySolutionGenerator.h` — C header for the dylib (hand-maintained)
 - `build-unity-sln.sh` — build script wrapping generate + dotnet build
 
 ## CLI
@@ -75,7 +80,7 @@ dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -
 
 ## Library
 
-`libUnitySolutionGenerator.dylib` exposes both a C ABI (for Unity `[DllImport]`) and Swift API.
+`libUnitySolutionGenerator.dylib` exposes a C ABI (for Unity `[DllImport]`) plus a Rust API via the `usg-core` crate.
 
 ### C ABI (`dist/UnitySolutionGenerator.h`)
 
@@ -111,35 +116,30 @@ string slnPath = buf.ToString();
 
 `outputDir`: relative path, `"."` for project root, `null` for default variant dir. `extraRefs`: comma-separated absolute DLL paths, `null` for none. Both functions auto-resolve the lockfile from `Library/UnitySolutionGenerator/csproj.lock`; `usg_generate` auto-runs lock if the lockfile is missing.
 
-### Swift API (`import SolutionGeneratorCore`)
+### Rust API (`use usg_core::*`)
 
 | Type | Description |
 |------|-------------|
-| `SolutionGenerator` | `.generateFromLockfile(options:lockfile:)`, `.generate(options:)` |
-| `GenerateOptions` | `projectRoot`, `platform`, `buildConfig`, `outputDir`, `extraRefs` |
-| `GenerateResult` | `variantSlnPath`, `variantCsprojs`, `warnings` |
-| `BuildPlatform` | `.ios`, `.android` |
-| `BuildConfig` | `.prod`, `.dev`, `.editor` |
-| `LockfileIO` | `.read(from:)` — load lockfile |
-| `Lockfile` | Unity version, DLL refs, defines, analyzers (constructible via init or `LockfileIO.read`) |
-| `DllRef` | `name`, `path` |
-| `RefCategory` | `.engine`, `.editor`, `.netstandard`, `.playbackIos`, `.playbackAndroid`, `.playbackStandalone`, `.project` |
+| `SolutionGenerator` | `.generate_from_lockfile(&options, &lockfile)`, `.generate(&options)` |
+| `GenerateOptions` | builder: `new(root, platform).with_build_config(...).with_output_dir(...).with_extra_refs(...)` |
+| `GenerateResult` | `variant_sln_path`, `variant_csprojs`, `warnings` |
+| `BuildPlatform` | `Ios`, `Android`, `Osx` |
+| `BuildConfig` | `Prod`, `Dev`, `Editor` |
+| `LockfileIO` | `::read(path)`, `::write(&lf, path)`, `::scan_and_write(root)`, `::load_or_scan(root)` |
+| `Lockfile` | Unity version, DLL refs, defines, analyzers (struct literal or `LockfileIO::read`) |
+| `DllRef` | `name`, `path` (and `DllRef::parse_list` for the comma-separated CLI form) |
+| `RefCategory` | `Engine`, `Editor`, `Netstandard`, `PlaybackIos`, `PlaybackAndroid`, `PlaybackStandalone`, `Project` |
 
-```swift
-import SolutionGeneratorCore
+```rust
+use usg_core::{BuildConfig, BuildPlatform, DllRef, GenerateOptions, LockfileIO, SolutionGenerator};
 
-let lockfile = try LockfileIO.read(from: "Library/UnitySolutionGenerator/csproj.lock")
-let result = try SolutionGenerator().generateFromLockfile(
-    options: GenerateOptions(
-        projectRoot: projectRoot,
-        outputDir: "Library/com.example/Solution",
-        extraRefs: [DllRef(name: "MyLib", path: "/abs/path/to/MyLib.dll")],
-        platform: .ios,
-        buildConfig: .editor
-    ),
-    lockfile: lockfile
-)
-// result.variantSlnPath → path to generated .sln
+let lockfile = LockfileIO::read("Library/UnitySolutionGenerator/csproj.lock")?;
+let options = GenerateOptions::new(project_root, BuildPlatform::Ios)
+    .with_build_config(BuildConfig::Editor)
+    .with_output_dir(Some("Library/com.example/Solution"))
+    .with_extra_refs(vec![DllRef::new("MyLib", "/abs/path/to/MyLib.dll")]);
+let result = SolutionGenerator::new().generate_from_lockfile(&options, &lockfile)?;
+// result.variant_sln_path → path to generated .sln
 ```
 
 ## How it works
@@ -187,18 +187,77 @@ Library/UnitySolutionGenerator/
 
 ## Performance
 
-Benchmarked on meow-tower (13 assemblies, ~5k .cs files) via `hyperfine`:
+Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical microbenchmarks (`criterion`).
 
-| Command | Mean ± σ |
-|---------|----------|
-| `generate` (warm cache) | 11.5 ± 0.6 ms |
-| `generate --root` | 11.8 ± 0.6 ms |
-| `lock` | 49.3 ± 0.5 ms |
-| startup (`--help`) | 1.8 ± 0.4 ms |
+### End-to-end (meow-tower, 13 assemblies, ~5k .cs files)
 
-Generate caches filesystem scan results (`scan-cache`) with nanosecond-precision directory mtimes. Cache validated via `stat()` (~1ms) instead of full readdir (~21ms). Any file add/remove/change invalidates the cache and triggers a full re-scan.
+`hyperfine --warmup 10 --runs 200 --shell=none`:
 
-No Foundation dependency — binary links only against libSystem, libswiftCore, libswiftDarwin, and libswiftDispatch.
+| Command | Mean ± σ | Range |
+|---------|----------|-------|
+| `generate` (warm scan-cache) | **6.3 ± 1.0 ms** | 5.3–13.2 |
+| `generate --root` | **5.5 ± 0.5 ms** | 4.9–7.9 |
+| `lock` (cold, fingerprint nuked each run) | **29.8 ± 2.4 ms** | 26.1–33.7 |
+| `lock` (warm — fingerprint hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
+| startup (`--help`) | ~2 ms | — |
+
+Run via `just profile` (cold lock + warm lock) or `just profile-spans` (per-section breakdown via tracing).
+
+### Per-section (one run, USG_PROFILE=1)
+
+```
+generate (5.78 ms total)
+├─ project_scanner.scan         4.66 ms
+│  └─ scan_cache.validate       2.82 ms
+└─ generate.write_variant n=9   0.64 ms
+
+lock cold (47.1 ms total)
+├─ lockfile_scanner.unity_install   0.90 ms     ← walkdir, sequential, small
+├─ lockfile_scanner.project_walk   45.1  ms     ← ignore parallel walk of PackageCache
+└─ lockfile_scanner.defines         0.71 ms
+
+lock warm
+└─ (no spans — fingerprint match short-circuits before LockfileScanner runs)
+```
+
+### Microbenchmarks (criterion, synthetic projects)
+
+```
+project_scanner.scan/13asm_x_50cs       33.2 ms     (cold, full walk)
+project_scanner.scan/100asm_x_200cs    946.6 ms     (cold, full walk)
+project_scanner.scan_warm/13asm_x_50cs   0.22 ms    (cache hit, ~150× speedup)
+project_scanner.scan_warm/100asm_x_200cs 1.59 ms
+
+generate.from_lockfile/13asm_x_50cs      0.51 ms
+generate.from_lockfile/100asm_x_200cs    2.81 ms
+
+lockfile_io/write_initial               13.5 µs
+lockfile_io/read                        14.1 µs
+```
+
+Run via `just bench` (all) or `just bench scan` (filter).
+
+### Caching layers
+
+| Cache | Path | Invalidates on | Hot-path skip |
+|---|---|---|---|
+| `scan-cache` | `Library/UnitySolutionGenerator/scan-cache` | mtime of any contributing dir | full asmdef/.cs walk |
+| `lock-fingerprint` | `Library/UnitySolutionGenerator/lock-fingerprint` | mtime of Unity install + any contributing dir + ProjectVersion / ProjectSettings / manifest.json | entire Unity-install + project-side DLL/asmdef walk |
+
+Both caches store nanosecond mtimes via `MetadataExt::mtime_nsec`. Validation cost is `len(entries) × stat()` (~1ms for hundreds of entries).
+
+### Concurrency
+
+- The hot project-side scan uses [`ignore::WalkBuilder::build_parallel`](https://docs.rs/ignore/) with all gitignore behaviour disabled — we want only the parallel walker scaffolding (crossbeam-deque work-stealing + per-thread accumulators flushed on `Drop`).
+- The lockfile-side DLL/asmdef walk over `Assets`/`Packages`/`Library/PackageCache` also uses `ignore::WalkBuilder::build_parallel`. The Unity-install DLL scan stays sequential (`walkdir`) — small enough not to matter.
+- `csproj` writes fan out across threads via `rayon`.
+
+### Profiling instrumentation
+
+Spans use [`tracing`](https://docs.rs/tracing/). Default off — zero runtime cost. Opt in:
+- `USG_PROFILE=1 unity-solution-generator <cmd>` — info-level spans, one stderr line per span close with `time.busy`.
+- `USG_PROFILE=full` — includes lower-level child spans.
+- `USG_LOG=usg_core::project_scanner=debug` — drop-in `EnvFilter` directives override the default.
 
 ## Unity project setup
 
