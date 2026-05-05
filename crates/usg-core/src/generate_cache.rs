@@ -17,11 +17,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::io::{create_dir_all, read_file, write_file_if_changed};
+use crate::io::{create_dir_all, has_matching_version, read_file, write_file_if_changed};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, parent_directory};
 use crate::solution_generator::{GenerateOptions, GenerateResult};
 
 const FINGERPRINTS_DIR: &str = ".fingerprints";
+
+/// Bump on incompatible generate-fingerprint format changes. Old fingerprints
+/// will silently regenerate — never silently parse with stale meaning.
+const GENERATE_FINGERPRINT_VERSION: u32 = 1;
 
 /// Build the canonical options string. Anything that affects the rendered
 /// output goes here; anything cosmetic (e.g. `verbose`, which only affects
@@ -88,6 +92,7 @@ pub(crate) struct Fingerprint {
 impl Fingerprint {
     fn serialize(&self) -> String {
         let mut s = String::from("# generate-fingerprint — auto-generated, do not edit\n");
+        s.push_str(&format!("# version: {}\n", GENERATE_FINGERPRINT_VERSION));
         s.push_str("options: ");
         s.push_str(&self.canonical_options);
         s.push('\n');
@@ -158,6 +163,9 @@ pub(crate) fn try_load_valid(
 ) -> Option<GenerateResult> {
     let (canonical, fp_path) = fingerprint_path(project_root, opts);
     let content = read_file(&fp_path).ok()?;
+    if !has_matching_version(&content, GENERATE_FINGERPRINT_VERSION) {
+        return None;
+    }
     let fp = Fingerprint::deserialize(&content)?;
     if fp.canonical_options != canonical {
         return None;

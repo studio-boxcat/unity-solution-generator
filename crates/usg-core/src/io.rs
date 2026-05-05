@@ -49,6 +49,27 @@ pub fn is_dir(path: &str) -> bool {
     std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
 }
 
+/// Look for a `# version: N` line near the top of a cache file and return
+/// `true` if it parses to exactly `expected`. Older caches without the line,
+/// caches with a newer/older `N`, and malformed lines all return `false` so
+/// the caller can silently regenerate. Stops scanning at the first non-comment
+/// line to keep the cost bounded.
+pub fn has_matching_version(content: &str, expected: u32) -> bool {
+    for line in content.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if !line.starts_with('#') {
+            // Reached cache body without finding a version line.
+            return false;
+        }
+        if let Some(rest) = line.strip_prefix("# version:") {
+            return rest.trim().parse::<u32>().ok() == Some(expected);
+        }
+    }
+    false
+}
+
 /// Plain `readdir` returning names (excluding `.` and `..`). Order undefined.
 pub fn list_directory(path: &str) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(path) else {

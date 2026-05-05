@@ -11,10 +11,14 @@
 
 use std::collections::BTreeSet;
 
-use crate::io::{create_dir_all, read_file, write_file_if_changed};
+use crate::io::{create_dir_all, has_matching_version, read_file, write_file_if_changed};
 use crate::paths::{join_path, parent_directory};
 
 const FINGERPRINT_FILE: &str = "lock-fingerprint";
+
+/// Bump on incompatible lock-fingerprint format changes. Old fingerprints will
+/// silently regenerate — never silently parse with stale meaning.
+const LOCK_FINGERPRINT_VERSION: u32 = 1;
 
 pub fn fingerprint_path(generator_dir: &str) -> String {
     join_path(generator_dir, FINGERPRINT_FILE)
@@ -24,6 +28,9 @@ pub fn fingerprint_path(generator_dir: &str) -> String {
 /// fingerprint file is missing or malformed.
 pub fn load(path: &str) -> Option<Vec<(String, u128)>> {
     let content = read_file(path).ok()?;
+    if !has_matching_version(&content, LOCK_FINGERPRINT_VERSION) {
+        return None;
+    }
     let mut entries = Vec::new();
     for line in content.split('\n') {
         if line.is_empty() || line.starts_with('#') {
@@ -112,6 +119,7 @@ pub fn write(
 ) -> std::io::Result<()> {
     create_dir_all(parent_directory(fingerprint_file));
     let mut s = String::from("# lock-fingerprint — auto-generated, do not edit\n");
+    s.push_str(&format!("# version: {}\n", LOCK_FINGERPRINT_VERSION));
     s.push_str(&format!("# unity-version: {}\n", unity_version));
     for (path, mtime) in entries {
         s.push_str(path);

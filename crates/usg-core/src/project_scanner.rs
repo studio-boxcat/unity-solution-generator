@@ -15,7 +15,7 @@ use ignore::{WalkBuilder, WalkState};
 use rayon::prelude::*;
 
 use crate::error::{GeneratorError, Result};
-use crate::io::{create_dir_all, read_file, write_file_if_changed};
+use crate::io::{create_dir_all, has_matching_version, read_file, write_file_if_changed};
 use crate::json::{extract_json_bool, extract_json_string, extract_json_string_array};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, parent_directory};
 
@@ -364,9 +364,16 @@ fn resolve_legacy_project(directory: &str) -> Option<&'static str> {
 
 // ── scan cache ────────────────────────────────────────────────────────────
 
+/// Bump on incompatible scan-cache format changes. Old caches will silently
+/// regenerate — never silently parse with stale meaning.
+const SCAN_CACHE_VERSION: u32 = 1;
+
 fn load_cached_scan(cache_path: &str, root_path: &str) -> Option<FileScan> {
     let _s = tracing::info_span!("scan_cache.validate").entered();
     let content = read_file(cache_path).ok()?;
+    if !has_matching_version(&content, SCAN_CACHE_VERSION) {
+        return None;
+    }
 
     enum Sec {
         Cs,
@@ -521,6 +528,7 @@ fn scan_and_cache(root_path: &str, cache_path: &str) -> FileScan {
     }
 
     let mut s = String::from("# scan-cache — auto-generated, do not edit\n");
+    s.push_str(&format!("# version: {}\n", SCAN_CACHE_VERSION));
     s.push_str("[cs]\n");
     for d in &walk.cs_dirs {
         s.push_str(d);
