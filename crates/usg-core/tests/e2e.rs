@@ -315,6 +315,35 @@ fn empty_extra_refs_string_parses_empty() {
 }
 
 #[test]
+fn inplace_asmdef_edit_invalidates_scan_cache() {
+    // Editing an asmdef in place changes only that file's mtime, not its
+    // parent dir's. Pre-asmdef-cache, the scan-cache only stat'd parent dirs,
+    // so in-place edits were silently missed. The cache now stats asmdef
+    // files themselves; an in-place rename of the asmdef must reroute sources.
+    let tmp = make_temp_root();
+    let root = tmp.path();
+    let lf = small_lockfile();
+    write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"OldName"}"#);
+    write_file(root, "Assets/A/Code.cs", "class Code {}\n");
+
+    let g = SolutionGenerator::new();
+    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+        .unwrap();
+    assert!(root.join("tpl/ios-editor/OldName.csproj").exists());
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // In-place edit: same file path, different name. Parent dir mtime won't bump.
+    write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"NewName"}"#);
+
+    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+        .unwrap();
+    assert!(
+        root.join("tpl/ios-editor/NewName.csproj").exists(),
+        "rename should be picked up via per-file mtime tracking"
+    );
+}
+
+#[test]
 fn no_lockfile_no_templates_falls_back_via_cli_path() {
     // CLI-side: when no lockfile and no templates exist, the FFI `usg_generate`
     // and the CLI `generate` both auto-run lock. We can't exercise the Unity-install

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use ignore::{WalkBuilder, WalkState};
+use rayon::prelude::*;
 
 use crate::error::{GeneratorError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
@@ -146,10 +147,7 @@ impl ProjectScanner {
         };
 
         let mut asm_def_by_name: HashMap<String, AsmDefRecord> = HashMap::new();
-        for path in &file_scan.asmdef_paths {
-            let Some(record) = AsmDefRecord::load(project_root, path)? else {
-                continue;
-            };
+        for record in file_scan.asmdef_records {
             if asm_def_by_name.contains_key(&record.name) {
                 return Err(GeneratorError::DuplicateAsmDefName(record.name));
             }
@@ -160,10 +158,7 @@ impl ProjectScanner {
         for (name, record) in &asm_def_by_name {
             assembly_roots.insert(record.directory.clone(), name.clone());
         }
-        for path in &file_scan.asmref_paths {
-            let Some((dir, reference)) = load_asm_ref(project_root, path)? else {
-                continue;
-            };
+        for (dir, reference) in file_scan.asmref_records {
             if asm_def_by_name.contains_key(&reference) {
                 assembly_roots.insert(dir, reference);
             }
@@ -202,8 +197,19 @@ struct ScanBucket {
 #[derive(Debug, Clone)]
 struct FileScan {
     cs_dirs: Vec<String>,
+    /// Asmdef paths relative to project root. Kept on cache for invalidation
+    /// (mtime tracking) and by-path debugging; the parsed record set below is
+    /// what the rest of the pipeline consumes.
     asmdef_paths: Vec<String>,
     asmref_paths: Vec<String>,
+    /// Pre-parsed `AsmDefRecord`s, populated either during a cold scan (parsed
+    /// in parallel via rayon) or loaded straight from `[asmdef-records]` on a
+    /// warm cache hit. Skipping the per-asmdef file read + JSON parse on the
+    /// warm path is the whole point of this cache extension.
+    asmdef_records: Vec<AsmDefRecord>,
+    /// Pre-resolved (directory, reference) pairs from each `.asmref`. Same
+    /// reasoning as `asmdef_records`.
+    asmref_records: Vec<(String, String)>,
 }
 
 /// Scan project files using `ignore`'s parallel walker with all gitignore
@@ -297,6 +303,10 @@ fn scan_project_files(project_root: &str, roots: &[&str]) -> FileScan {
         cs_dirs: bucket.cs_dirs.into_iter().collect(),
         asmdef_paths: bucket.asmdef_paths,
         asmref_paths: bucket.asmref_paths,
+        // Records are populated by `scan_and_cache` after parsing the asmdef
+        // / asmref files in parallel; the walker itself only enumerates paths.
+        asmdef_records: Vec::new(),
+        asmref_records: Vec::new(),
     }
 }
 
@@ -363,12 +373,16 @@ fn load_cached_scan(cache_path: &str, root_path: &str) -> Option<FileScan> {
         Asmdef,
         Asmref,
         Mtimes,
+        AsmdefRecords,
+        AsmrefRecords,
     }
     let mut section: Option<Sec> = None;
     let mut cs_dirs = Vec::new();
     let mut asmdef_paths = Vec::new();
     let mut asmref_paths = Vec::new();
-    let mut dir_mtimes: Vec<(String, u128)> = Vec::new();
+    let mut mtimes: Vec<(String, u128)> = Vec::new();
+    let mut asmdef_records: Vec<AsmDefRecord> = Vec::new();
+    let mut asmref_records: Vec<(String, String)> = Vec::new();
 
     for line in content.split('\n') {
         if line.is_empty() || line.starts_with('#') {
@@ -391,6 +405,14 @@ fn load_cached_scan(cache_path: &str, root_path: &str) -> Option<FileScan> {
                 section = Some(Sec::Mtimes);
                 continue;
             }
+            "[asmdef-records]" => {
+                section = Some(Sec::AsmdefRecords);
+                continue;
+            }
+            "[asmref-records]" => {
+                section = Some(Sec::AsmrefRecords);
+                continue;
+            }
             _ => {}
         }
         match section {
@@ -400,23 +422,39 @@ fn load_cached_scan(cache_path: &str, root_path: &str) -> Option<FileScan> {
             Some(Sec::Mtimes) => {
                 if let Some(pipe) = line.find('|') {
                     if let Ok(m) = line[pipe + 1..].parse::<u128>() {
-                        dir_mtimes.push((line[..pipe].to_string(), m));
+                        mtimes.push((line[..pipe].to_string(), m));
                     }
+                }
+            }
+            Some(Sec::AsmdefRecords) => {
+                if let Some(rec) = decode_asmdef_record(line) {
+                    asmdef_records.push(rec);
+                }
+            }
+            Some(Sec::AsmrefRecords) => {
+                if let Some(pair) = decode_asmref_record(line) {
+                    asmref_records.push(pair);
                 }
             }
             None => {}
         }
     }
 
-    if dir_mtimes.is_empty() {
+    if mtimes.is_empty() {
         return None;
     }
 
-    for (rel_dir, cached) in &dir_mtimes {
-        let full = if rel_dir.is_empty() {
+    // Older caches (or caches written by an earlier version of usg) won't have
+    // [asmdef-records]; refusing them forces a fresh scan that re-populates.
+    if !asmdef_paths.is_empty() && asmdef_records.is_empty() {
+        return None;
+    }
+
+    for (rel, cached) in &mtimes {
+        let full = if rel.is_empty() {
             root_path.to_string()
         } else {
-            join_path(root_path, rel_dir)
+            join_path(root_path, rel)
         };
         let m = std::fs::metadata(&full).ok()?;
         let mtime_ns = mtime_nanos(&m)?;
@@ -429,58 +467,97 @@ fn load_cached_scan(cache_path: &str, root_path: &str) -> Option<FileScan> {
         cs_dirs,
         asmdef_paths,
         asmref_paths,
+        asmdef_records,
+        asmref_records,
     })
 }
 
 fn scan_and_cache(root_path: &str, cache_path: &str) -> FileScan {
     let _s = tracing::info_span!("scan_cache.full_walk").entered();
-    let file_scan = scan_project_files(root_path, &["Assets", "Packages"]);
+    let walk = scan_project_files(root_path, &["Assets", "Packages"]);
 
-    let mut all_dirs: BTreeSet<String> = BTreeSet::new();
-    all_dirs.insert("Assets".to_string());
-    all_dirs.insert("Packages".to_string());
+    // Parse asmdefs + asmrefs in parallel. Most projects have <100 of each;
+    // the parse itself is microseconds, but parallelising amortises the
+    // per-file `read` syscall across cores.
+    let asmdef_records: Vec<AsmDefRecord> = walk
+        .asmdef_paths
+        .par_iter()
+        .filter_map(|p| AsmDefRecord::load(root_path, p).ok().flatten())
+        .collect();
+    let asmref_records: Vec<(String, String)> = walk
+        .asmref_paths
+        .par_iter()
+        .filter_map(|p| load_asm_ref(root_path, p).ok().flatten())
+        .collect();
+
+    // Track every directory that contributed work plus the asmdef/asmref files
+    // themselves. Tracking the files (not just their parent dirs) catches
+    // in-place edits — a parent dir's mtime doesn't bump when a file inside it
+    // is rewritten in place, so without these we'd miss e.g. an asmdef name
+    // change. The price is `len(asmdefs + asmrefs) × stat()` on warm validation.
+    let mut all_paths: BTreeSet<String> = BTreeSet::new();
+    all_paths.insert("Assets".to_string());
+    all_paths.insert("Packages".to_string());
     let mut add_with_ancestors = |dir: &str| {
         let mut cur = dir.to_string();
-        while !cur.is_empty() && all_dirs.insert(cur.clone()) {
+        while !cur.is_empty() && all_paths.insert(cur.clone()) {
             cur = parent_directory(&cur).to_string();
         }
     };
-    for d in &file_scan.cs_dirs {
+    for d in &walk.cs_dirs {
         add_with_ancestors(d);
     }
-    for p in &file_scan.asmdef_paths {
+    for p in &walk.asmdef_paths {
         add_with_ancestors(parent_directory(p));
     }
-    for p in &file_scan.asmref_paths {
+    for p in &walk.asmref_paths {
         add_with_ancestors(parent_directory(p));
+    }
+    for p in &walk.asmdef_paths {
+        all_paths.insert(p.clone());
+    }
+    for p in &walk.asmref_paths {
+        all_paths.insert(p.clone());
     }
 
     let mut s = String::from("# scan-cache — auto-generated, do not edit\n");
     s.push_str("[cs]\n");
-    for d in &file_scan.cs_dirs {
+    for d in &walk.cs_dirs {
         s.push_str(d);
         s.push('\n');
     }
     s.push_str("[asmdef]\n");
-    for p in &file_scan.asmdef_paths {
+    for p in &walk.asmdef_paths {
         s.push_str(p);
         s.push('\n');
     }
     s.push_str("[asmref]\n");
-    for p in &file_scan.asmref_paths {
+    for p in &walk.asmref_paths {
         s.push_str(p);
         s.push('\n');
     }
+    s.push_str("[asmdef-records]\n");
+    for r in &asmdef_records {
+        encode_asmdef_record(&mut s, r);
+        s.push('\n');
+    }
+    s.push_str("[asmref-records]\n");
+    for (dir, reference) in &asmref_records {
+        s.push_str(dir);
+        s.push('\t');
+        s.push_str(reference);
+        s.push('\n');
+    }
     s.push_str("[mtimes]\n");
-    for d in &all_dirs {
-        let full = if d.is_empty() {
+    for p in &all_paths {
+        let full = if p.is_empty() {
             root_path.to_string()
         } else {
-            join_path(root_path, d)
+            join_path(root_path, p)
         };
         if let Ok(m) = std::fs::metadata(&full) {
             if let Some(ns) = mtime_nanos(&m) {
-                s.push_str(d);
+                s.push_str(p);
                 s.push('|');
                 s.push_str(&ns.to_string());
                 s.push('\n');
@@ -490,7 +567,111 @@ fn scan_and_cache(root_path: &str, cache_path: &str) -> FileScan {
 
     create_dir_all(parent_directory(cache_path));
     let _ = write_file_if_changed(cache_path, &s);
-    file_scan
+
+    FileScan {
+        cs_dirs: walk.cs_dirs,
+        asmdef_paths: walk.asmdef_paths,
+        asmref_paths: walk.asmref_paths,
+        asmdef_records,
+        asmref_records,
+    }
+}
+
+// ── asmdef record (de)serialization ──────────────────────────────────────
+//
+// Single line per record, tab-delimited. Columns:
+//   0: name              (Unity asmdef names — alphanumeric + dots)
+//   1: directory         (forward-slash relative path)
+//   2: category          ("R" = Runtime, "E" = Editor, "T" = Test)
+//   3: allow_unsafe      ("0" or "1")
+//   4: references        (semicolon-separated assembly names; may be empty)
+//   5: include_platforms (semicolon-separated; may be empty)
+//   6: version_defines   (`pkg|def` pairs, comma-separated; may be empty)
+//
+// Tab and newline can't appear in any of those fields (Unity rejects them in
+// asmdef names; paths are forward-slash; defines are uppercase identifiers),
+// so no escaping is needed.
+
+fn encode_asmdef_record(out: &mut String, r: &AsmDefRecord) {
+    out.push_str(&r.name);
+    out.push('\t');
+    out.push_str(&r.directory);
+    out.push('\t');
+    out.push(match r.category {
+        ProjectCategory::Runtime => 'R',
+        ProjectCategory::Editor => 'E',
+        ProjectCategory::Test => 'T',
+    });
+    out.push('\t');
+    out.push(if r.allow_unsafe_code { '1' } else { '0' });
+    out.push('\t');
+    out.push_str(&r.references.join(";"));
+    out.push('\t');
+    out.push_str(&r.include_platforms.join(";"));
+    out.push('\t');
+    for (i, vd) in r.version_defines.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&vd.package_name);
+        out.push('|');
+        out.push_str(&vd.define);
+    }
+}
+
+fn decode_asmdef_record(line: &str) -> Option<AsmDefRecord> {
+    let mut parts = line.split('\t');
+    let name = parts.next()?.to_string();
+    let directory = parts.next()?.to_string();
+    let category = match parts.next()? {
+        "R" => ProjectCategory::Runtime,
+        "E" => ProjectCategory::Editor,
+        "T" => ProjectCategory::Test,
+        _ => return None,
+    };
+    let allow_unsafe_code = matches!(parts.next()?, "1");
+    let references = split_semi(parts.next()?);
+    let include_platforms = split_semi(parts.next()?);
+    let version_defines = parts
+        .next()
+        .map(|s| {
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split(',')
+                    .filter_map(|pair| {
+                        let (pkg, def) = pair.split_once('|')?;
+                        Some(VersionDefine {
+                            package_name: pkg.to_string(),
+                            define: def.to_string(),
+                        })
+                    })
+                    .collect()
+            }
+        })
+        .unwrap_or_default();
+    Some(AsmDefRecord {
+        name,
+        directory,
+        references,
+        category,
+        include_platforms,
+        allow_unsafe_code,
+        version_defines,
+    })
+}
+
+fn decode_asmref_record(line: &str) -> Option<(String, String)> {
+    let (dir, reference) = line.split_once('\t')?;
+    Some((dir.to_string(), reference.to_string()))
+}
+
+fn split_semi(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        Vec::new()
+    } else {
+        s.split(';').map(str::to_string).collect()
+    }
 }
 
 #[cfg(unix)]
