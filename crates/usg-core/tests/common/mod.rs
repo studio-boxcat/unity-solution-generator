@@ -22,23 +22,6 @@ pub fn read_file(root: &Path, rel: &str) -> String {
     fs::read_to_string(root.join(rel)).unwrap()
 }
 
-pub fn write_templates(root: &Path, project_names: &[&str], defines: Option<&str>) {
-    for name in project_names {
-        let mut content = String::from("<Project>\n");
-        if let Some(d) = defines {
-            content.push_str(&format!(
-                "  <PropertyGroup>\n    <DefineConstants>$(DefineConstants);{}</DefineConstants>\n  </PropertyGroup>\n",
-                d
-            ));
-        }
-        write_file(
-            root,
-            &format!("tpl/templates/{}.csproj.template", name),
-            &content,
-        );
-    }
-}
-
 fn xml_unescape(value: &str) -> String {
     value
         .replace("&quot;", "\"")

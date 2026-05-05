@@ -5,9 +5,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use common::{
-    assert_compile_set, make_temp_root, read_compile_set, read_file, write_file, write_templates,
-};
+use common::{assert_compile_set, make_temp_root, read_compile_set, read_file, write_file};
 use usg_core::{
     BuildConfig, BuildPlatform, DllRef, GenerateOptions, Lockfile, LockfileIO, ProjectScanner,
     RefCategory, SolutionGenerator,
@@ -24,16 +22,17 @@ fn opts(root: &Path, platform: BuildPlatform, cfg: BuildConfig) -> GenerateOptio
         .with_build_config(cfg)
 }
 
+/// Bare lockfile shell used by tests that previously exercised the (now-deleted)
+/// template path. They only care about scanner/owner/render behaviour, not lockfile
+/// content — `Lockfile::empty` gives them a valid input with no refs and no defines.
+fn bare_lockfile() -> Lockfile {
+    Lockfile::empty("test", "/test")
+}
+
 #[test]
 fn nested_assembly_root_mapping_and_legacy_fallback() {
     let tmp = make_temp_root();
     let root = tmp.path();
-    write_templates(
-        root,
-        &["Main", "Core", "Tests", "Assembly-CSharp-firstpass"],
-        None,
-    );
-
     write_file(
         root,
         "Assets/SystemAssets/Assemblies/Main/Main.asmdef",
@@ -73,7 +72,7 @@ fn nested_assembly_root_mapping_and_legacy_fallback() {
     write_file(root, "Assets/Plugins/Legacy.cs", "class Legacy {}\n");
 
     SolutionGenerator::new()
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Editor))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
 
     let v = "tpl/ios-editor";
@@ -100,8 +99,6 @@ fn nested_assembly_root_mapping_and_legacy_fallback() {
 fn asm_ref_name_resolution_and_tilde_skip() {
     let tmp = make_temp_root();
     let root = tmp.path();
-    write_templates(root, &["Core"], None);
-
     write_file(
         root,
         "Assets/SystemAssets/Assemblies/Core/Core.asmdef",
@@ -116,7 +113,7 @@ fn asm_ref_name_resolution_and_tilde_skip() {
     );
 
     SolutionGenerator::new()
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Editor))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_compile_set(
         root,
@@ -129,7 +126,6 @@ fn asm_ref_name_resolution_and_tilde_skip() {
 fn tilde_directory_excluded_from_scan() {
     let tmp = make_temp_root();
     let root = tmp.path();
-    write_templates(root, &["Main"], None);
     write_file(
         root,
         "Assets/SystemAssets/Assemblies/Main/Main.asmdef",
@@ -141,7 +137,7 @@ fn tilde_directory_excluded_from_scan() {
     write_file(root, "Assets/Game/backup~/Old.cs", "class Old {}\n");
 
     SolutionGenerator::new()
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Editor))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_compile_set(
         root,
@@ -154,7 +150,6 @@ fn tilde_directory_excluded_from_scan() {
 fn dot_directory_excluded_from_scan() {
     let tmp = make_temp_root();
     let root = tmp.path();
-    write_templates(root, &["Main"], None);
     write_file(
         root,
         "Assets/SystemAssets/Assemblies/Main/Main.asmdef",
@@ -165,7 +160,7 @@ fn dot_directory_excluded_from_scan() {
     write_file(root, "Assets/Game/.hidden/Secret.cs", "class Secret {}\n");
 
     SolutionGenerator::new()
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Editor))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_compile_set(
         root,
@@ -178,12 +173,6 @@ fn dot_directory_excluded_from_scan() {
 fn prod_variant_category_filtering() {
     let tmp = make_temp_root();
     let root = tmp.path();
-    write_templates(
-        root,
-        &["Runtime", "MyEditor", "MyTests"],
-        Some("UNITY_5"),
-    );
-
     write_file(
         root,
         "Assets/Assemblies/Runtime/Runtime.asmdef",
@@ -206,7 +195,7 @@ fn prod_variant_category_filtering() {
 
     let g = SolutionGenerator::new();
     let prod = g
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Prod))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &bare_lockfile())
         .unwrap();
     assert_eq!(prod.variant_csprojs, vec!["tpl/ios-prod/Runtime.csproj"]);
     let prod_props = read_file(root, "tpl/ios-prod/Directory.Build.props");
@@ -219,7 +208,7 @@ fn prod_variant_category_filtering() {
     assert!(!prod_sln.contains("\"MyEditor\""));
 
     let editor = g
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Editor))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_eq!(editor.variant_csprojs.len(), 3);
     let editor_props = read_file(root, "tpl/ios-editor/Directory.Build.props");
@@ -612,95 +601,6 @@ fn lockfile_generate_csproj_xml_well_formed() {
 }
 
 #[test]
-fn lockfile_and_template_produce_same_projects() {
-    let tmp = make_temp_root();
-    let root = tmp.path();
-    let lf = make_minimal_lockfile();
-    let template_root = "tpl-template";
-    let lockfile_root = "tpl-lockfile";
-    for n in ["Runtime", "EditorLib", "Tests"] {
-        write_file(
-            root,
-            &format!("{}/templates/{}.csproj.template", template_root, n),
-            "<Project>\n",
-        );
-    }
-    write_file(
-        root,
-        "Assets/A/Runtime.asmdef",
-        r#"{"name":"Runtime","references":["EditorLib"]}"#,
-    );
-    write_file(
-        root,
-        "Assets/B/EditorLib.asmdef",
-        r#"{"name":"EditorLib","includePlatforms":["Editor"]}"#,
-    );
-    write_file(
-        root,
-        "Assets/C/Tests.asmdef",
-        r#"{"name":"Tests","defineConstraints":["UNITY_INCLUDE_TESTS"]}"#,
-    );
-    write_file(root, "Assets/A/Code.cs", "class A {}\n");
-    write_file(root, "Assets/B/Code.cs", "class B {}\n");
-    write_file(root, "Assets/C/Code.cs", "class C {}\n");
-
-    let g = SolutionGenerator::new();
-    let template = g
-        .generate(
-            &GenerateOptions::new(root.to_string_lossy().into_owned(), BuildPlatform::Ios)
-                .with_generator_root(template_root)
-                .with_build_config(BuildConfig::Prod),
-        )
-        .unwrap();
-    let lockfile = g
-        .generate_from_lockfile(
-            &GenerateOptions::new(root.to_string_lossy().into_owned(), BuildPlatform::Ios)
-                .with_generator_root(lockfile_root)
-                .with_build_config(BuildConfig::Prod),
-            &lf,
-        )
-        .unwrap();
-    let template_names: std::collections::HashSet<String> = template
-        .variant_csprojs
-        .iter()
-        .map(|p| p.rsplit('/').next().unwrap().to_string())
-        .collect();
-    let lockfile_names: std::collections::HashSet<String> = lockfile
-        .variant_csprojs
-        .iter()
-        .map(|p| p.rsplit('/').next().unwrap().to_string())
-        .collect();
-    assert_eq!(template_names, lockfile_names);
-    for n in &template_names {
-        let t = read_compile_set(root, &format!("{}/ios-prod/{}", template_root, n));
-        let l = read_compile_set(root, &format!("{}/ios-prod/{}", lockfile_root, n));
-        assert_eq!(t, l, "compile-set mismatch for {}", n);
-    }
-}
-
-#[test]
-fn template_legacy_path_still_works() {
-    let tmp = make_temp_root();
-    let root = tmp.path();
-    write_templates(root, &["Main"], Some("MY_DEFINE"));
-    write_file(root, "Assets/Assemblies/Main/Main.asmdef", r#"{"name":"Main"}"#);
-    write_file(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n");
-
-    let r = SolutionGenerator::new()
-        .generate(&opts(root, BuildPlatform::Android, BuildConfig::Dev))
-        .unwrap();
-    assert_eq!(r.variant_csprojs.len(), 1);
-    let csproj = read_file(root, "tpl/android-dev/Main.csproj");
-    assert!(csproj.contains("<Compile Include="));
-    assert!(csproj.contains("</Project>"));
-    let props = read_file(root, "tpl/android-dev/Directory.Build.props");
-    assert!(props.contains("UNITY_ANDROID"));
-    assert!(props.contains("DEBUG"));
-    assert!(!props.contains("UNITY_EDITOR"));
-    assert!(!props.contains("<UnityPath>"));
-}
-
-#[test]
 fn extract_json_object_keys_test() {
     let json = r#"{
       "dependencies": {
@@ -972,17 +872,6 @@ fn extra_refs_with_output_dir() {
 fn category_inference_from_asmdef_fields() {
     let tmp = make_temp_root();
     let root = tmp.path();
-    write_templates(
-        root,
-        &[
-            "Runtime",
-            "PlatformLib",
-            "EditorOnly",
-            "EditorConstrained",
-            "PlayTests",
-        ],
-        Some("UNITY_5"),
-    );
     write_file(root, "Assets/A/Runtime.asmdef", r#"{"name":"Runtime"}"#);
     write_file(
         root,
@@ -1010,7 +899,7 @@ fn category_inference_from_asmdef_fields() {
 
     let g = SolutionGenerator::new();
     let prod = g
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Prod))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &bare_lockfile())
         .unwrap();
     let prod_names: std::collections::HashSet<String> = prod
         .variant_csprojs
@@ -1033,7 +922,7 @@ fn category_inference_from_asmdef_fields() {
     );
 
     let editor = g
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Editor))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     let editor_names: std::collections::HashSet<String> = editor
         .variant_csprojs
@@ -1066,7 +955,6 @@ fn category_inference_from_asmdef_fields() {
 fn e2e_generated_compile_set_matches_original_csproj() {
     let tmp = make_temp_root();
     let root = tmp.path();
-    write_templates(root, &["Main", "Sandbox"], None);
     write_file(
         root,
         "Assets/SystemAssets/Assemblies/Main/Main.asmdef",
@@ -1101,7 +989,7 @@ fn e2e_generated_compile_set_matches_original_csproj() {
     );
 
     SolutionGenerator::new()
-        .generate(&opts(root, BuildPlatform::Ios, BuildConfig::Editor))
+        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     let v = "tpl/ios-editor";
     let orig_main = read_compile_set(root, "Main.original.csproj");

@@ -1,20 +1,15 @@
 //! Renders `.csproj` / `.sln` / `Directory.Build.props` for a platform+config variant.
-//!
-//! Two entry points mirror the Swift API:
-//! - [`SolutionGenerator::generate_from_lockfile`] — primary path, driven by `csproj.lock`.
-//! - [`SolutionGenerator::generate`] — legacy template-based path used when only
-//!   `tpl/templates/*.csproj.template` exist (auto-extracts on first run).
+//! Single entry point driven by `csproj.lock`.
 
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 
-use crate::error::{GeneratorError, Result};
-use crate::io::{create_dir_all, file_exists, list_directory, read_file, write_file_if_changed};
+use crate::error::Result;
+use crate::io::{create_dir_all, write_file_if_changed};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, resolve_real_path};
 use crate::project_scanner::{AsmDefRecord, ProjectCategory, ProjectScanner, ScanResult};
-use crate::template_extractor::{ExtractTemplatesOptions, TemplateExtractor};
 use crate::xml::{deterministic_guid, xml_escape};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,24 +83,6 @@ impl BuildConfig {
 
 const EDITOR_DEFINES: &[&str] = &["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_OSX"];
 const DEBUG_DEFINES: &[&str] = &["DEBUG", "TRACE", "UNITY_ASSERTIONS"];
-
-/// Set of all dynamic defines stripped from legacy templates and re-injected
-/// per-variant via Directory.Build.props.
-pub(crate) fn all_dynamic_defines() -> HashSet<String> {
-    let mut set = HashSet::new();
-    for p in [BuildPlatform::Ios, BuildPlatform::Android, BuildPlatform::Osx] {
-        for d in p.platform_defines() {
-            set.insert((*d).to_string());
-        }
-    }
-    for d in EDITOR_DEFINES {
-        set.insert((*d).to_string());
-    }
-    for d in DEBUG_DEFINES {
-        set.insert((*d).to_string());
-    }
-    set
-}
 
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
@@ -487,96 +464,12 @@ impl SolutionGenerator {
         Ok(result)
     }
 
-    /// Legacy template-based generation. Used when no lockfile exists but
-    /// `tpl/templates/*.csproj.template` files do.
-    pub fn generate(&self, options: &GenerateOptions) -> Result<GenerateResult> {
-        let project_root = resolve_real_path(&options.project_root);
-        let generator_dir = join_path(&project_root, &options.generator_root);
-        let templates_dir = join_path(&generator_dir, "templates");
-
-        let mut projects = discover_template_projects(&templates_dir);
-        if projects.is_empty() {
-            eprintln!("No templates found, running init...");
-            let updated = TemplateExtractor::extract(&ExtractTemplatesOptions {
-                project_root: project_root.clone(),
-                generator_root: options.generator_root.clone(),
-            })?;
-            for f in updated {
-                eprintln!("  {}", f);
-            }
-            projects = discover_template_projects(&templates_dir);
-            if projects.is_empty() {
-                return Err(GeneratorError::NoTemplatesFound(templates_dir));
-            }
-        }
-
-        let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
-        let ctx = build_context(options, project_root.clone(), projects, scan);
-
-        write_file_if_changed(
-            &join_path(&ctx.variant_dir, "Directory.Build.props"),
-            &render_directory_build_props(
-                &ctx.project_root,
-                None,
-                options.platform,
-                options.build_config,
-                &[],
-            ),
-        )?;
-
-        let mut templates_by_name: HashMap<String, String> = HashMap::new();
-        for project in &ctx.included_projects {
-            let path = join_path(&templates_dir, &format!("{}.csproj.template", project.name));
-            if !file_exists(&path) {
-                return Err(GeneratorError::MissingTemplate(path));
-            }
-            templates_by_name.insert(project.name.clone(), read_file(&path)?);
-        }
-
-        write_variant(&ctx, |project, source_block, reference_block| {
-            let mut out = templates_by_name
-                .get(&project.name)
-                .cloned()
-                .unwrap_or_default();
-            out.push_str("  <ItemGroup>\n");
-            if !source_block.is_empty() {
-                out.push_str(source_block);
-                out.push('\n');
-            }
-            if !reference_block.is_empty() {
-                out.push_str(reference_block);
-                out.push('\n');
-            }
-            out.push_str("  </ItemGroup>\n</Project>\n");
-            out
-        })
-    }
 }
 
 impl Default for SolutionGenerator {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn discover_template_projects(templates_dir: &str) -> Vec<ProjectInfo> {
-    if !file_exists(templates_dir) {
-        return Vec::new();
-    }
-    let mut projects: Vec<ProjectInfo> = list_directory(templates_dir)
-        .into_iter()
-        .filter(|n| n.ends_with(".csproj.template"))
-        .map(|filename| {
-            let name = filename
-                .strip_suffix(".csproj.template")
-                .unwrap_or(&filename)
-                .to_string();
-            let guid = deterministic_guid(&name);
-            ProjectInfo { name, guid }
-        })
-        .collect();
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
-    projects
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────

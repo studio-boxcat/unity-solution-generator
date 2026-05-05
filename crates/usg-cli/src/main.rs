@@ -114,11 +114,6 @@ fn run_generate(args: &[String]) -> ExitCode {
     }
 
     let resolved = resolve_project_root(project_root);
-    let templates_dir = format!(
-        "{}/{}/templates",
-        resolved,
-        usg_core::DEFAULT_GENERATOR_ROOT
-    );
     let extra_refs = extra_refs_raw
         .as_deref()
         .map(DllRef::parse_list)
@@ -129,30 +124,30 @@ fn run_generate(args: &[String]) -> ExitCode {
         .with_output_dir(output_dir.as_deref())
         .with_extra_refs(extra_refs);
 
+    // Lockfile is the only supported input now. If absent, scan-and-write it
+    // before generating; the lock-fingerprint cache makes a redundant `lock`
+    // call cheap.
     let lockfile_p = lockfile_path(&resolved, DEFAULT_GENERATOR_ROOT);
-    let result = if std::path::Path::new(&lockfile_p).exists() {
-        match LockfileIO::read(&lockfile_p) {
-            Ok(l) => SolutionGenerator::new().generate_from_lockfile(&options, &l),
-            Err(e) => {
-                eprintln!("error: {}", e);
-                return ExitCode::from(1);
+    let result = {
+        let lockfile = if std::path::Path::new(&lockfile_p).exists() {
+            match LockfileIO::read(&lockfile_p) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    return ExitCode::from(1);
+                }
             }
-        }
-    } else if std::path::Path::new(&templates_dir).exists()
-        && !usg_core::io::list_directory(&templates_dir).is_empty()
-    {
-        eprintln!("warning: Using legacy templates. Run 'unity-solution-generator lock' to migrate.");
-        SolutionGenerator::new().generate(&options)
-    } else {
-        eprintln!("No lockfile found, running lock...");
-        let lockfile = match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
-            Ok(l) => {
-                eprintln!("Locked: {}", l.unity_version);
-                l
-            }
-            Err(e) => {
-                eprintln!("error: {}", e);
-                return ExitCode::from(1);
+        } else {
+            eprintln!("No lockfile found, running lock...");
+            match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
+                Ok(l) => {
+                    eprintln!("Locked: {}", l.unity_version);
+                    l
+                }
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    return ExitCode::from(1);
+                }
             }
         };
         SolutionGenerator::new().generate_from_lockfile(&options, &lockfile)

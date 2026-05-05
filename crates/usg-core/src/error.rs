@@ -7,11 +7,7 @@ pub type Result<T> = std::result::Result<T, GeneratorError>;
 pub enum GeneratorError {
     Io { path: String, source: io::Error },
     Lockfile(LockfileError),
-    MissingTemplate(String),
-    NoSolutionFound(String),
-    NoProjectsInSolution(String),
     DuplicateAsmDefName(String),
-    NoTemplatesFound(String),
 }
 
 #[derive(Debug)]
@@ -26,17 +22,7 @@ impl fmt::Display for GeneratorError {
         match self {
             GeneratorError::Io { path, source } => write!(f, "{}: {}", source, path),
             GeneratorError::Lockfile(e) => write!(f, "{}", e),
-            GeneratorError::MissingTemplate(p) => write!(f, "Missing template file: {}", p),
-            GeneratorError::NoSolutionFound(p) => write!(f, "No .sln file found in: {}", p),
-            GeneratorError::NoProjectsInSolution(p) => {
-                write!(f, "No C# projects found in solution: {}", p)
-            }
             GeneratorError::DuplicateAsmDefName(n) => write!(f, "Duplicate asmdef name: '{}'", n),
-            GeneratorError::NoTemplatesFound(p) => write!(
-                f,
-                "No templates found in: {}\nRun 'unity-solution-generator lock <unity-root>' to generate a lockfile instead.",
-                p
-            ),
         }
     }
 }
