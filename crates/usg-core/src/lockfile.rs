@@ -54,30 +54,40 @@ pub enum RefCategory {
 
 impl RefCategory {
     /// All variants in the canonical iteration order used by `LockfileIO::write`.
-    /// Adding a new variant fails to compile here (the exhaustive match below
-    /// forces the addition) — that's the whole point of computing this from the
-    /// match rather than maintaining a parallel array.
-    pub const ALL: [RefCategory; 7] = {
-        // Touching the match exhaustiveness is what protects us; the array is
-        // just `[Engine, Editor, ..., Project]` literally.
-        use RefCategory::*;
-        let all = [
-            Engine,
-            Editor,
-            Netstandard,
-            PlaybackIos,
-            PlaybackAndroid,
-            PlaybackStandalone,
-            Project,
-        ];
-        // `match` ensures any new variant added to the enum forces a compile
-        // error here — preventing `ALL` from silently dropping it.
-        let _exhaustive = |v: RefCategory| match v {
-            Engine | Editor | Netstandard | PlaybackIos | PlaybackAndroid
-            | PlaybackStandalone | Project => (),
+    ///
+    /// Adding a new variant has to update **both** the array literal AND the
+    /// length below; the const assertion ties them together so a forgotten array
+    /// entry fails compilation. The exhaustive match in `as_section`/`from_section`
+    /// catches the variant on the first build attempt; this assertion catches it
+    /// on the second (when the developer updates the match but forgets the array).
+    pub const ALL: [RefCategory; Self::COUNT] = [
+        RefCategory::Engine,
+        RefCategory::Editor,
+        RefCategory::Netstandard,
+        RefCategory::PlaybackIos,
+        RefCategory::PlaybackAndroid,
+        RefCategory::PlaybackStandalone,
+        RefCategory::Project,
+    ];
+
+    /// Number of variants. Bumping this is enforced by the array literal above —
+    /// the array length must match this constant or compilation fails.
+    pub const COUNT: usize = {
+        // One arm per variant. Adding a new enum variant fails the exhaustive
+        // match here, forcing the developer to also bump COUNT and add to ALL.
+        let count_per_variant = |v: RefCategory| -> usize {
+            match v {
+                RefCategory::Engine => 1,
+                RefCategory::Editor => 1,
+                RefCategory::Netstandard => 1,
+                RefCategory::PlaybackIos => 1,
+                RefCategory::PlaybackAndroid => 1,
+                RefCategory::PlaybackStandalone => 1,
+                RefCategory::Project => 1,
+            }
         };
-        let _ = _exhaustive;
-        all
+        let _ = count_per_variant;
+        7
     };
 
     pub fn as_section(self) -> &'static str {
@@ -118,6 +128,25 @@ pub struct Lockfile {
 }
 
 impl Lockfile {
+    /// Build an empty lockfile shell with all `RefCategory` keys populated to
+    /// empty Vecs. Useful for tests and for downstream crates that want to
+    /// programmatically construct a Lockfile without spelling out every category.
+    pub fn empty(unity_version: impl Into<String>, unity_path: impl Into<String>) -> Self {
+        let mut refs: BTreeMap<RefCategory, Vec<DllRef>> = BTreeMap::new();
+        for cat in RefCategory::ALL {
+            refs.insert(cat, Vec::new());
+        }
+        Lockfile {
+            unity_version: unity_version.into(),
+            unity_path: unity_path.into(),
+            lang_version: "9.0".to_string(),
+            analyzers: Vec::new(),
+            refs,
+            defines: Vec::new(),
+            defines_scripting: Vec::new(),
+        }
+    }
+
     pub fn total_ref_count(&self) -> usize {
         self.refs.values().map(|v| v.len()).sum()
     }
@@ -261,14 +290,18 @@ impl LockfileIO {
                         refs.entry(*cat).or_default().push(r);
                     }
                 }
+                // The writer always emits a single semicolon-delimited line per
+                // section, but a hand-edited or future writer could spill across
+                // multiple lines. Use `extend` so we don't silently drop everything
+                // but the last line.
                 Some(Section::Defines) => {
                     if !line.is_empty() {
-                        defines = line.split(';').map(str::to_string).collect();
+                        defines.extend(line.split(';').map(str::to_string));
                     }
                 }
                 Some(Section::DefinesScripting) => {
                     if !line.is_empty() {
-                        defines_scripting = line.split(';').map(str::to_string).collect();
+                        defines_scripting.extend(line.split(';').map(str::to_string));
                     }
                 }
             }

@@ -7,8 +7,13 @@ rust-version.workspace = true
 [lib]
 name = "UnitySolutionGenerator"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+# `rlib` lets integration tests in `tests/` link against the FFI symbols as a
+# library. `cdylib` is what Unity loads via [DllImport]. Both are produced.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 usg-core.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -399,20 +399,23 @@ fn generate_fingerprint_short_circuits_render() {
     // Cached result still includes correct paths.
     assert!(r2.variant_csprojs.iter().any(|s| s.ends_with("Lib.csproj")));
 
-    // Touching lockfile mtime forces regeneration. write_file_if_changed
-    // skips byte-identical content, so we delete + rewrite to force a real
-    // mtime bump.
+    // Stronger invalidation check: change the lockfile *content* (a new
+    // static define) and confirm the new define ends up in the rendered
+    // Directory.Build.props after regenerate. This proves the fingerprint
+    // really did invalidate and the second run actually re-rendered, not
+    // just that we didn't crash.
     std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut lf2 = lf.clone();
+    lf2.defines.push("MY_NEW_DEFINE".to_string());
     std::fs::remove_file(&lockfile_path).unwrap();
-    LockfileIO::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    LockfileIO::write(&lf2, lockfile_path.to_str().unwrap()).unwrap();
+    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf2)
         .unwrap();
-    let mtime_third = std::fs::metadata(&csproj_path).unwrap().modified().unwrap();
-    // The csproj content is deterministic so write_file_if_changed will skip,
-    // meaning the csproj mtime stays identical even after a forced rerun.
-    // The point of this third call is to exercise the invalidation path
-    // without panicking — that's enough.
-    let _ = mtime_third;
+    let props = read_file(root, "tpl/ios-editor/Directory.Build.props");
+    assert!(
+        props.contains("MY_NEW_DEFINE"),
+        "lockfile change must invalidate fingerprint and re-render props"
+    );
 }
 
 #[test]

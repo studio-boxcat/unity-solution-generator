@@ -219,13 +219,25 @@ pub(crate) fn write_after_generate(
         return;
     };
 
+    // Don't cache `verbose`-only warnings (the per-dir "Unresolved: X/" lines).
+    // They're a function of the scan, not the lockfile, but caching them would
+    // cause a flag-flip bug: a verbose-true first run caches the listing, then
+    // a verbose-false second run (cache hit) replays it. Keep only the non-verbose
+    // count-style warnings (they're stable per-scan and short).
+    let stable_warnings: Vec<String> = result
+        .warnings
+        .iter()
+        .filter(|w| !w.starts_with("Unresolved: "))
+        .cloned()
+        .collect();
+
     let fp = Fingerprint {
         canonical_options: canonical,
         scan_cache_mtime: scan_mtime,
         lockfile_mtime: lock_mtime,
         sln: result.variant_sln_path.clone(),
         csprojs: result.variant_csprojs.clone(),
-        warnings: result.warnings.clone(),
+        warnings: stable_warnings,
     };
     create_dir_all(parent_directory(&fp_path));
     let _ = write_file_if_changed(&fp_path, &fp.serialize());

@@ -731,6 +731,7 @@ name = "usg-ffi"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "tempfile",
  "usg-core",
 ]
 

@@ -208,6 +208,7 @@ Run via `just profile` (cold lock + warm lock) or `just profile-spans` (per-sect
 
 ### Per-section (one run, USG_PROFILE=1)
 
+`generate` (warm scan-cache, **fingerprint cleared** so we hit the full pipeline):
 ```
 generate (5.78 ms total)
 ├─ project_scanner.scan         4.66 ms
@@ -222,6 +223,13 @@ lock cold (47.1 ms total)
 lock warm
 └─ (no spans — fingerprint match short-circuits before LockfileScanner runs)
 ```
+
+`generate` (warm scan-cache + warm fingerprint):
+```
+generate.from_lockfile  83 µs
+└─ generate.fingerprint_check   57 µs   ← stat scan-cache + lockfile + read fp
+```
+The remaining ~2 ms of wall-clock is process startup + dynamic linker.
 
 ### Microbenchmarks (criterion, synthetic projects)
 

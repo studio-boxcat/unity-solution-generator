@@ -7,7 +7,7 @@ pub mod error;
 pub(crate) mod generate_cache;
 pub mod io;
 pub mod json;
-pub mod lock_cache;
+pub(crate) mod lock_cache;
 pub mod lockfile;
 pub mod lockfile_scanner;
 pub mod paths;

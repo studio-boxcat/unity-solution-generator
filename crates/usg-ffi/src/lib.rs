@@ -28,13 +28,17 @@ fn clear_last_error() {
     *guard = None;
 }
 
-/// Safely borrow a NUL-terminated C string as a `&str` whose lifetime is bound
-/// to the input pointer. Binding `'a` to `p`'s reference prevents the returned
-/// slice from outliving the buffer the caller owns.
+/// Borrow a NUL-terminated C string as `&str`. The signature ties `'a` to the
+/// reference of the pointer *slot* — that prevents one specific footgun (the
+/// returned `&str` outliving the local that holds the pointer) but does NOT
+/// prove the slice outlives the C buffer the pointer addresses; that is the
+/// caller's responsibility under the safety contract below.
 ///
 /// # Safety
-/// `p` must either be null or a valid NUL-terminated UTF-8 string for the duration
-/// implied by `'a`. The C# `[DllImport]` marshaller satisfies both during the call.
+/// `*p` must be null or a valid NUL-terminated UTF-8 string that remains live
+/// for the duration of `'a`. C# `[DllImport]` marshalling satisfies this for
+/// the call duration; if you stash the returned `&str` past the call return,
+/// you're on your own.
 unsafe fn cstr_to_str<'a>(p: &'a *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
