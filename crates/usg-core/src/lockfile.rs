@@ -6,7 +6,7 @@ use crate::io::{create_dir_all, read_file, write_file_if_changed};
 use crate::json::trim_ws;
 use crate::lock_cache;
 use crate::lockfile_scanner::LockfileScanner;
-use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, lockfile_path, parent_directory};
+use crate::paths::{join_path, lockfile_path, parent_directory};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DllRef {
@@ -53,15 +53,32 @@ pub enum RefCategory {
 }
 
 impl RefCategory {
-    pub const ALL: [RefCategory; 7] = [
-        RefCategory::Engine,
-        RefCategory::Editor,
-        RefCategory::Netstandard,
-        RefCategory::PlaybackIos,
-        RefCategory::PlaybackAndroid,
-        RefCategory::PlaybackStandalone,
-        RefCategory::Project,
-    ];
+    /// All variants in the canonical iteration order used by `LockfileIO::write`.
+    /// Adding a new variant fails to compile here (the exhaustive match below
+    /// forces the addition) — that's the whole point of computing this from the
+    /// match rather than maintaining a parallel array.
+    pub const ALL: [RefCategory; 7] = {
+        // Touching the match exhaustiveness is what protects us; the array is
+        // just `[Engine, Editor, ..., Project]` literally.
+        use RefCategory::*;
+        let all = [
+            Engine,
+            Editor,
+            Netstandard,
+            PlaybackIos,
+            PlaybackAndroid,
+            PlaybackStandalone,
+            Project,
+        ];
+        // `match` ensures any new variant added to the enum forces a compile
+        // error here — preventing `ALL` from silently dropping it.
+        let _exhaustive = |v: RefCategory| match v {
+            Engine | Editor | Netstandard | PlaybackIos | PlaybackAndroid
+            | PlaybackStandalone | Project => (),
+        };
+        let _ = _exhaustive;
+        all
+    };
 
     pub fn as_section(self) -> &'static str {
         match self {
@@ -113,15 +130,17 @@ impl Lockfile {
 pub struct LockfileIO;
 
 impl LockfileIO {
-    /// Scan + write the lockfile for `project_root` (creating the generator dir if needed).
+    /// Scan + write the lockfile (creating the generator dir if needed).
+    /// `generator_root` controls where `csproj.lock` and `lock-fingerprint` live;
+    /// pass [`DEFAULT_GENERATOR_ROOT`] for the standard layout.
     ///
     /// Short-circuits when the recorded fingerprint (see [`lock_cache`]) shows nothing
     /// has changed since the last `lock`. In the cache-hit path no Unity-install scan
     /// or project-side walk runs; we just refresh the fingerprint timestamps and return
     /// the existing lockfile.
-    pub fn scan_and_write(project_root: &str) -> Result<Lockfile> {
-        let path = lockfile_path(project_root);
-        let generator_dir = join_path(project_root, DEFAULT_GENERATOR_ROOT);
+    pub fn scan_and_write(project_root: &str, generator_root: &str) -> Result<Lockfile> {
+        let path = lockfile_path(project_root, generator_root);
+        let generator_dir = join_path(project_root, generator_root);
         let fp_path = lock_cache::fingerprint_path(&generator_dir);
         create_dir_all(parent_directory(&path));
 
@@ -151,12 +170,13 @@ impl LockfileIO {
     }
 
     /// Read the lockfile if present, else scan + write a fresh one.
-    pub fn load_or_scan(project_root: &str) -> Result<Lockfile> {
-        let path = lockfile_path(project_root);
+    /// See [`scan_and_write`](Self::scan_and_write) for the `generator_root` argument.
+    pub fn load_or_scan(project_root: &str, generator_root: &str) -> Result<Lockfile> {
+        let path = lockfile_path(project_root, generator_root);
         if Path::new(&path).exists() {
             Self::read(&path)
         } else {
-            Self::scan_and_write(project_root)
+            Self::scan_and_write(project_root, generator_root)
         }
     }
 

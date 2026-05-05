@@ -178,8 +178,10 @@ All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored
 
 ```
 Library/UnitySolutionGenerator/
-  csproj.lock                     ← lockfile
-  scan-cache                      ← cached filesystem scan (auto-invalidated by mtime)
+  csproj.lock                     ← lockfile (user-visible, may be checked in)
+  scan-cache                      ← cached filesystem scan (mtime-validated)
+  lock-fingerprint                ← short-circuits `lock` when nothing changed
+  .fingerprints/<options-hash>    ← short-circuits `generate` when nothing changed
   ios-editor/                     ← variant: .csproj + .sln + Directory.Build.props
   android-prod/
   ...

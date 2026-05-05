@@ -12,8 +12,8 @@ use std::os::raw::{c_char, c_int};
 use std::sync::Mutex;
 
 use usg_core::{
-    BuildConfig, BuildPlatform, DllRef, GenerateOptions, LockfileIO, SolutionGenerator,
-    resolve_project_root,
+    BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
+    SolutionGenerator, resolve_project_root,
 };
 
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
@@ -28,11 +28,18 @@ fn clear_last_error() {
     *guard = None;
 }
 
-unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
+/// Safely borrow a NUL-terminated C string as a `&str` whose lifetime is bound
+/// to the input pointer. Binding `'a` to `p`'s reference prevents the returned
+/// slice from outliving the buffer the caller owns.
+///
+/// # Safety
+/// `p` must either be null or a valid NUL-terminated UTF-8 string for the duration
+/// implied by `'a`. The C# `[DllImport]` marshaller satisfies both during the call.
+unsafe fn cstr_to_str<'a>(p: &'a *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
     }
-    unsafe { CStr::from_ptr(p) }.to_str().ok()
+    unsafe { CStr::from_ptr(*p) }.to_str().ok()
 }
 
 /// Generate `.csproj`/`.sln` files from an existing lockfile.
@@ -53,15 +60,15 @@ pub unsafe extern "C" fn usg_generate(
 ) -> c_int {
     clear_last_error();
 
-    let Some(platform_s) = (unsafe { cstr_to_str(platform) }) else {
+    let Some(platform_s) = (unsafe { cstr_to_str(&platform) }) else {
         set_last_error("Invalid UTF-8 in platform");
         return 1;
     };
-    let Some(config_s) = (unsafe { cstr_to_str(config) }) else {
+    let Some(config_s) = (unsafe { cstr_to_str(&config) }) else {
         set_last_error("Invalid UTF-8 in config");
         return 1;
     };
-    let Some(project_root_s) = (unsafe { cstr_to_str(project_root) }) else {
+    let Some(project_root_s) = (unsafe { cstr_to_str(&project_root) }) else {
         set_last_error("Invalid UTF-8 in projectRoot");
         return 1;
     };
@@ -83,8 +90,8 @@ pub unsafe extern "C" fn usg_generate(
 
     let resolved = resolve_project_root(project_root_s);
 
-    let output_dir_s = unsafe { cstr_to_str(output_dir) };
-    let extra_refs_s = unsafe { cstr_to_str(extra_refs) };
+    let output_dir_s = unsafe { cstr_to_str(&output_dir) };
+    let extra_refs_s = unsafe { cstr_to_str(&extra_refs) };
     let extra_refs_vec: Vec<DllRef> = extra_refs_s.map(DllRef::parse_list).unwrap_or_default();
 
     let options = GenerateOptions::new(resolved.clone(), build_platform)
@@ -92,7 +99,7 @@ pub unsafe extern "C" fn usg_generate(
         .with_output_dir(output_dir_s)
         .with_extra_refs(extra_refs_vec);
 
-    let lockfile = match LockfileIO::load_or_scan(&resolved) {
+    let lockfile = match LockfileIO::load_or_scan(&resolved, DEFAULT_GENERATOR_ROOT) {
         Ok(l) => l,
         Err(e) => {
             set_last_error(format!("{}", e));
@@ -108,6 +115,16 @@ pub unsafe extern "C" fn usg_generate(
     };
 
     if !sln_path_out.is_null() {
+        // C# `int` is signed; a negative value here would sign-extend to a huge
+        // `usize` and bypass the bounds check, allowing an OOB write into the
+        // caller's buffer. Reject up front.
+        if sln_path_out_len <= 0 {
+            set_last_error(format!(
+                "Invalid slnPathOutLen ({}); must be > 0",
+                sln_path_out_len
+            ));
+            return 1;
+        }
         let path = result.variant_sln_path.as_bytes();
         let cap = sln_path_out_len as usize;
         if path.len() + 1 > cap {
@@ -133,12 +150,12 @@ pub unsafe extern "C" fn usg_generate(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn usg_lock(project_root: *const c_char) -> c_int {
     clear_last_error();
-    let Some(s) = (unsafe { cstr_to_str(project_root) }) else {
+    let Some(s) = (unsafe { cstr_to_str(&project_root) }) else {
         set_last_error("Invalid UTF-8 in projectRoot");
         return 1;
     };
     let resolved = resolve_project_root(s);
-    match LockfileIO::scan_and_write(&resolved) {
+    match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
         Ok(_) => 0,
         Err(e) => {
             set_last_error(format!("{}", e));

@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use crate::error::{GeneratorError, Result};
 use crate::io::{create_dir_all, has_matching_version, read_file, write_file_if_changed};
 use crate::json::{extract_json_bool, extract_json_string, extract_json_string_array};
-use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, parent_directory};
+use crate::paths::{join_path, parent_directory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectCategory {
@@ -136,9 +136,12 @@ pub struct ScanResult {
 pub struct ProjectScanner;
 
 impl ProjectScanner {
-    pub fn scan(project_root: &str) -> Result<ScanResult> {
+    /// `generator_root` controls where the `scan-cache` file lives — pass
+    /// [`crate::paths::DEFAULT_GENERATOR_ROOT`] for the standard layout, or
+    /// a custom directory to keep multiple variant trees isolated (tests).
+    pub fn scan(project_root: &str, generator_root: &str) -> Result<ScanResult> {
         let _span = tracing::info_span!("project_scanner.scan").entered();
-        let generator_dir = join_path(project_root, DEFAULT_GENERATOR_ROOT);
+        let generator_dir = join_path(project_root, generator_root);
         let cache_path = join_path(&generator_dir, "scan-cache");
         let file_scan = {
             let _s = tracing::info_span!("project_scanner.file_scan").entered();
@@ -216,7 +219,13 @@ struct FileScan {
 /// behaviour disabled. We emulate the Swift `processDirent` filter (skip
 /// `.foo` and `bar~` entries) via `filter_entry`.
 fn scan_project_files(project_root: &str, roots: &[&str]) -> FileScan {
-    let prefix_len = project_root.len() + 1;
+    // Use `Path::strip_prefix` (component-aware) rather than byte-slicing on
+    // `path_str.len() + 1`. Byte-slicing would panic if the kernel ever handed
+    // back a path whose prefix differed from `project_root` by even one byte
+    // (trailing slash, canonicalised symlink component) AND that byte landed
+    // inside a multibyte UTF-8 char. With `panic = "abort"` such a panic would
+    // SIGKILL the process, including via FFI from Unity's Mono. Defense-in-depth.
+    let project_root_path = std::path::Path::new(project_root);
     let aggregate: Mutex<ScanBucket> = Mutex::new(ScanBucket::default());
 
     for root in roots {
@@ -277,11 +286,15 @@ fn scan_project_files(project_root: &str, roots: &[&str]) -> FileScan {
                     return WalkState::Continue;
                 }
 
-                let path_str = entry.path().to_string_lossy();
-                if path_str.len() <= prefix_len {
+                let Ok(rel) = entry.path().strip_prefix(project_root_path) else {
                     return WalkState::Continue;
-                }
-                let rel_path: &str = &path_str[prefix_len..];
+                };
+                let Some(rel_path) = rel.to_str() else {
+                    // Non-UTF-8 path component — Unity asset paths are always
+                    // UTF-8 on macOS APFS, so this only fires on a corrupt
+                    // filesystem entry. Skip rather than panic.
+                    return WalkState::Continue;
+                };
                 let n: &str = name.as_ref();
                 if n.ends_with(".cs") {
                     flusher

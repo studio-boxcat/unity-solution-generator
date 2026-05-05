@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use crate::io::{create_dir_all, has_matching_version, read_file, write_file_if_changed};
-use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, parent_directory};
+use crate::paths::{join_path, lockfile_path, parent_directory};
 use crate::solution_generator::{GenerateOptions, GenerateResult};
 
 const FINGERPRINTS_DIR: &str = ".fingerprints";
@@ -175,10 +175,7 @@ pub(crate) fn try_load_valid(
         &join_path(project_root, &opts.generator_root),
         "scan-cache",
     );
-    let lockfile = join_path(
-        &join_path(project_root, DEFAULT_GENERATOR_ROOT),
-        "csproj.lock",
-    );
+    let lockfile = lockfile_path(project_root, &opts.generator_root);
     let scan_mtime = mtime_nanos(&scan_cache)?;
     let lock_mtime = mtime_nanos(&lockfile)?;
     if scan_mtime != fp.scan_cache_mtime || lock_mtime != fp.lockfile_mtime {
@@ -214,10 +211,7 @@ pub(crate) fn write_after_generate(
         &join_path(project_root, &opts.generator_root),
         "scan-cache",
     );
-    let lockfile = join_path(
-        &join_path(project_root, DEFAULT_GENERATOR_ROOT),
-        "csproj.lock",
-    );
+    let lockfile = lockfile_path(project_root, &opts.generator_root);
     let Some(scan_mtime) = mtime_nanos(&scan_cache) else {
         return;
     };

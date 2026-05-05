@@ -225,7 +225,7 @@ fn walk_files(
     if !Path::new(directory).exists() {
         return;
     }
-    let prefix_len = base_path.len() + 1;
+    let base = Path::new(base_path);
     let mut iter = WalkDir::new(directory)
         .follow_links(false)
         .into_iter()
@@ -250,11 +250,12 @@ fn walk_files(
         if !extensions.iter().any(|ext| name_owned.ends_with(ext)) {
             continue;
         }
-        let path_str = entry.path().to_string_lossy();
-        if path_str.len() <= prefix_len {
+        let Ok(rel_path) = entry.path().strip_prefix(base) else {
             continue;
-        }
-        let rel = &path_str[prefix_len..];
+        };
+        let Some(rel) = rel_path.to_str() else {
+            continue;
+        };
         handler(rel, &name_owned);
     }
 }
@@ -266,7 +267,8 @@ fn parallel_walk_dlls_and_asmdefs(directory: &str, project_root: &str) -> Vec<(S
     if !Path::new(directory).exists() {
         return Vec::new();
     }
-    let prefix_len = project_root.len() + 1;
+    // Component-aware prefix strip — see project_scanner.rs for rationale.
+    let project_root_path = Path::new(project_root);
     let aggregate: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
     struct Flusher<'a> {
@@ -324,13 +326,13 @@ fn parallel_walk_dlls_and_asmdefs(directory: &str, project_root: &str) -> Vec<(S
                 if !(n.ends_with(".dll") || n.ends_with(".asmdef")) {
                     return WalkState::Continue;
                 }
-                let path_str = entry.path().to_string_lossy();
-                if path_str.len() <= prefix_len {
+                let Ok(rel) = entry.path().strip_prefix(project_root_path) else {
                     return WalkState::Continue;
-                }
-                flusher
-                    .local
-                    .push((path_str[prefix_len..].to_string(), n.to_string()));
+                };
+                let Some(rel_str) = rel.to_str() else {
+                    return WalkState::Continue;
+                };
+                flusher.local.push((rel_str.to_string(), n.to_string()));
                 WalkState::Continue
             })
         });

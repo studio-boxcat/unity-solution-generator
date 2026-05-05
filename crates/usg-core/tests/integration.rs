@@ -579,7 +579,7 @@ fn lockfile_generate_asmdef_version_defines() {
         r#"{"name":"Lib","versionDefines":[{"name":"com.unity.modules.physics2d","expression":"","define":"PACKAGE_PHYSICS2D"},{"name":"Unity","expression":"","define":"MY_FEATURE"}]}"#,
     );
     write_file(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n");
-    let scan = ProjectScanner::scan(root.to_str().unwrap()).unwrap();
+    let scan = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap();
     let asm = scan.asm_def_by_name.get("Lib").unwrap();
     assert_eq!(asm.version_defines.len(), 2);
     assert_eq!(asm.version_defines[0].package_name, "com.unity.modules.physics2d");

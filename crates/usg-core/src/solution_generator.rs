@@ -406,7 +406,7 @@ impl SolutionGenerator {
             return Ok(cached);
         }
 
-        let scan = ProjectScanner::scan(&project_root)?;
+        let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
 
         let mut projects: Vec<ProjectInfo> = Vec::new();
         let mut all_names: HashSet<String> = HashSet::new();
@@ -510,7 +510,7 @@ impl SolutionGenerator {
             }
         }
 
-        let scan = ProjectScanner::scan(&project_root)?;
+        let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
         let ctx = build_context(options, project_root.clone(), projects, scan);
 
         write_file_if_changed(

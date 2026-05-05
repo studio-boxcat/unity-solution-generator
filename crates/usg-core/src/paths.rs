@@ -50,6 +50,6 @@ pub fn resolve_project_root(path: &str) -> String {
     resolved
 }
 
-pub fn lockfile_path(project_root: &str) -> String {
-    join_path(project_root, &format!("{}/csproj.lock", DEFAULT_GENERATOR_ROOT))
+pub fn lockfile_path(project_root: &str, generator_root: &str) -> String {
+    join_path(project_root, &format!("{}/csproj.lock", generator_root))
 }

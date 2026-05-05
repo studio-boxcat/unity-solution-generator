@@ -11,7 +11,6 @@ use common::{make_temp_root, read_compile_set, read_file, write_file};
 use usg_core::{
     BuildConfig, BuildPlatform, DllRef, GenerateOptions, GeneratorError, Lockfile, LockfileIO,
     ProjectScanner, RefCategory, SolutionGenerator,
-    lockfile_path,
 };
 
 const GR: &str = "tpl";
@@ -129,7 +128,7 @@ fn native_plugin_dirs_skipped() {
     write_file(root, "Assets/Plugin/x86_64/Code.cs", "class Native {}\n");
     write_file(root, "Assets/Plugin/Code.cs", "class Plain {}\n");
     // ProjectScanner does NOT apply native-plugin filtering — both files should be picked up.
-    let scan = ProjectScanner::scan(root.to_str().unwrap()).unwrap();
+    let scan = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap();
     let total_dirs: usize = scan.dirs_by_project.values().map(|v| v.len()).sum::<usize>()
         + scan.unresolved_dirs.len();
     assert!(
@@ -165,7 +164,7 @@ fn asmdef_version_defines_filtered_by_manifest() {
     // which requires a real Unity install. So we directly verify ProjectScanner ingests
     // versionDefines into the AsmDefRecord, and the manifest-filtering happens in the
     // lockfile path. Here we verify the AsmDefRecord captures all three.
-    let scan = ProjectScanner::scan(root.to_str().unwrap()).unwrap();
+    let scan = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap();
     let asm = scan.asm_def_by_name.get("Lib").unwrap();
     assert_eq!(asm.version_defines.len(), 3);
     let names: std::collections::HashSet<_> =
@@ -184,7 +183,7 @@ fn duplicate_asmdef_name_errors() {
     write_file(root, "Assets/A/X.cs", "class X {}\n");
     write_file(root, "Assets/B/Y.cs", "class Y {}\n");
 
-    let err = ProjectScanner::scan(root.to_str().unwrap()).unwrap_err();
+    let err = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap_err();
     match err {
         GeneratorError::DuplicateAsmDefName(n) => assert_eq!(n, "Foo"),
         other => panic!("expected DuplicateAsmDefName, got {:?}", other),
@@ -447,7 +446,6 @@ fn generate_fingerprint_invalidates_when_csproj_deleted() {
 fn lock_fingerprint_short_circuits_rescan() {
     // We can't test scan_and_write end-to-end without a real Unity install. But we
     // *can* test the cache primitives directly.
-    use usg_core::lockfile_path as _; // referenced for clarity in compile
     let tmp = make_temp_root();
     let root = tmp.path();
     write_file(root, "Assets/A/Code.cs", "x");
@@ -467,8 +465,3 @@ fn lock_fingerprint_short_circuits_rescan() {
     assert!(!usg_core::__test_only::is_valid(&entries));
 }
 
-// Stale; keeps the import warning quiet.
-#[allow(dead_code)]
-fn _unused(p: &Path) {
-    let _ = lockfile_path(&p.to_string_lossy());
-}

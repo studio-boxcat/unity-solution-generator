@@ -1,8 +1,8 @@
 use std::process::ExitCode;
 
 use usg_core::{
-    BuildConfig, BuildPlatform, DllRef, GenerateOptions, LockfileIO, SolutionGenerator,
-    lockfile_path, resolve_project_root,
+    BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
+    SolutionGenerator, lockfile_path, resolve_project_root,
 };
 
 fn main() -> ExitCode {
@@ -42,7 +42,7 @@ fn run_lock(args: &[String]) -> ExitCode {
         die("lock requires: <unity-root>");
     };
     let resolved = resolve_project_root(unity_root);
-    match LockfileIO::scan_and_write(&resolved) {
+    match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
         Ok(lockfile) => {
             println!("Locked csproj.lock:");
             println!(
@@ -129,7 +129,7 @@ fn run_generate(args: &[String]) -> ExitCode {
         .with_output_dir(output_dir.as_deref())
         .with_extra_refs(extra_refs);
 
-    let lockfile_p = lockfile_path(&resolved);
+    let lockfile_p = lockfile_path(&resolved, DEFAULT_GENERATOR_ROOT);
     let result = if std::path::Path::new(&lockfile_p).exists() {
         match LockfileIO::read(&lockfile_p) {
             Ok(l) => SolutionGenerator::new().generate_from_lockfile(&options, &l),
@@ -145,7 +145,7 @@ fn run_generate(args: &[String]) -> ExitCode {
         SolutionGenerator::new().generate(&options)
     } else {
         eprintln!("No lockfile found, running lock...");
-        let lockfile = match LockfileIO::scan_and_write(&resolved) {
+        let lockfile = match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
             Ok(l) => {
                 eprintln!("Locked: {}", l.unity_version);
                 l
