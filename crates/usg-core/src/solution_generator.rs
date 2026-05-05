@@ -394,6 +394,18 @@ impl SolutionGenerator {
     ) -> Result<GenerateResult> {
         let _span = tracing::info_span!("generate.from_lockfile").entered();
         let project_root = resolve_real_path(&options.project_root);
+
+        // Fast path: a previous successful generate with these exact options
+        // already left a fingerprint, the lockfile + scan-cache haven't changed,
+        // and every variant output file is still on disk. Reconstruct the
+        // GenerateResult and skip render+write entirely.
+        if let Some(cached) = {
+            let _s = tracing::info_span!("generate.fingerprint_check").entered();
+            crate::generate_cache::try_load_valid(&project_root, options)
+        } {
+            return Ok(cached);
+        }
+
         let scan = ProjectScanner::scan(&project_root)?;
 
         let mut projects: Vec<ProjectInfo> = Vec::new();
@@ -443,7 +455,7 @@ impl SolutionGenerator {
         let lang_version = lockfile.lang_version.clone();
         let asm_def_by_name = ctx.scan.asm_def_by_name.clone();
 
-        write_variant(&ctx, |project, source_block, reference_block| {
+        let result = write_variant(&ctx, |project, source_block, reference_block| {
             let allow_unsafe = asm_def_by_name
                 .get(&project.name)
                 .map(|a| a.allow_unsafe_code)
@@ -469,7 +481,10 @@ impl SolutionGenerator {
             out.push_str("  <Import Project=\"$(MSBuildToolsPath)\\Microsoft.CSharp.targets\" />\n");
             out.push_str("</Project>\n");
             out
-        })
+        })?;
+
+        crate::generate_cache::write_after_generate(&project_root, options, &result);
+        Ok(result)
     }
 
     /// Legacy template-based generation. Used when no lockfile exists but

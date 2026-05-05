@@ -4,6 +4,7 @@
 
 pub mod defines;
 pub mod error;
+pub(crate) mod generate_cache;
 pub mod io;
 pub mod json;
 pub mod lock_cache;

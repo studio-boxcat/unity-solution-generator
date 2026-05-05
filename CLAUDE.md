@@ -195,7 +195,8 @@ Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical m
 
 | Command | Mean ± σ | Range |
 |---------|----------|-------|
-| `generate` (warm scan-cache) | **5.6 ± 1.0 ms** | 4.2–9.8 |
+| `generate` (warm — fingerprint hit) | **2.1 ± 0.5 ms** | 1.6–5.6 |
+| `generate` (warm scan-cache, fingerprint missing) | ~5.6 ± 1.0 ms | 4.2–9.8 |
 | `generate --root` | **5.5 ± 0.5 ms** | 4.9–7.9 |
 | `lock` (cold, fingerprint nuked each run) | **29.8 ± 2.4 ms** | 26.1–33.7 |
 | `lock` (warm — fingerprint hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
@@ -241,6 +242,7 @@ Run via `just bench` (all) or `just bench scan` (filter).
 
 | Cache | Path | Invalidates on | Hot-path skip |
 |---|---|---|---|
+| `generate-fingerprint` | `Library/UnitySolutionGenerator/.fingerprints/<options-hash>` | mtime of `csproj.lock` or `scan-cache`; or any expected output file missing | entire `generate_from_lockfile` body — render+write skipped, cached `GenerateResult` returned |
 | `scan-cache` | `Library/UnitySolutionGenerator/scan-cache` | mtime of any contributing dir + each asmdef/asmref file (catches in-place edits — parent-dir mtime alone misses these) | full filesystem walk + per-asmdef JSON parse (records are pre-serialized into the cache) |
 | `lock-fingerprint` | `Library/UnitySolutionGenerator/lock-fingerprint` | mtime of Unity install + any contributing dir + ProjectVersion / ProjectSettings / manifest.json | entire Unity-install + project-side DLL/asmdef walk |
 
