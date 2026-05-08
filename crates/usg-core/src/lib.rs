@@ -24,6 +24,7 @@ pub mod paths;
 pub mod profile;
 pub mod project_scanner;
 pub mod solution_generator;
+pub(crate) mod walk;
 pub mod xml;
 
 pub use defines::{generate_version_defines, parse_scripting_defines};

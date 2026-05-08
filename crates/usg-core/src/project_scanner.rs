@@ -9,7 +9,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
 
 use ignore::{WalkBuilder, WalkState};
 use rayon::prelude::*;
@@ -184,6 +183,14 @@ struct ScanBucket {
     asmref_paths: Vec<String>,
 }
 
+impl crate::walk::Bucket for ScanBucket {
+    fn merge_from(&mut self, other: Self) {
+        self.cs_dirs.extend(other.cs_dirs);
+        self.asmdef_paths.extend(other.asmdef_paths);
+        self.asmref_paths.extend(other.asmref_paths);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FileScan {
     cs_dirs: Vec<String>,
@@ -204,8 +211,10 @@ struct FileScan {
 
 /// Scan project files using `ignore`'s parallel walker with all gitignore
 /// behaviour disabled. We emulate the Swift `processDirent` filter (skip
-/// `.foo` and `bar~` entries) via `filter_entry`.
+/// `.foo` and `bar~` entries) via the visit closure.
 fn scan_project_files(project_root: &str, roots: &[&str]) -> FileScan {
+    use crate::walk::{Bucket, parallel_walk};
+
     // Use `Path::strip_prefix` (component-aware) rather than byte-slicing on
     // `path_str.len() + 1`. Byte-slicing would panic if the kernel ever handed
     // back a path whose prefix differed from `project_root` by even one byte
@@ -213,7 +222,7 @@ fn scan_project_files(project_root: &str, roots: &[&str]) -> FileScan {
     // inside a multibyte UTF-8 char. With `panic = "abort"` such a panic would
     // SIGKILL the process, including via FFI from Unity's Mono. Defense-in-depth.
     let project_root_path = std::path::Path::new(project_root);
-    let aggregate: Mutex<ScanBucket> = Mutex::new(ScanBucket::default());
+    let mut bucket = ScanBucket::default();
 
     for root in roots {
         let root_dir = format!("{}/{}", project_root, root);
@@ -232,73 +241,39 @@ fn scan_project_files(project_root: &str, roots: &[&str]) -> FileScan {
             .parents(false)
             .follow_links(false);
 
-        // Per-thread bucket flushed into the shared aggregate on drop —
-        // matches the pattern recommended by `ignore`'s `ParallelVisitorBuilder` docs.
-        struct Flusher<'a> {
-            local: ScanBucket,
-            aggregate: &'a Mutex<ScanBucket>,
-        }
-        impl Drop for Flusher<'_> {
-            fn drop(&mut self) {
-                let mut g = self.aggregate.lock().unwrap();
-                g.cs_dirs.extend(std::mem::take(&mut self.local.cs_dirs));
-                g.asmdef_paths
-                    .extend(std::mem::take(&mut self.local.asmdef_paths));
-                g.asmref_paths
-                    .extend(std::mem::take(&mut self.local.asmref_paths));
+        let from_root = parallel_walk(builder, |local: &mut ScanBucket, entry| {
+            let name = entry.file_name().to_string_lossy();
+            if name.starts_with('.') || name.ends_with('~') {
+                return WalkState::Skip;
             }
-        }
-
-        let agg_ref: &Mutex<ScanBucket> = &aggregate;
-        builder.build_parallel().run(|| {
-            let mut flusher = Flusher {
-                local: ScanBucket::default(),
-                aggregate: agg_ref,
+            let Some(ft) = entry.file_type() else {
+                return WalkState::Continue;
             };
-            Box::new(move |result| {
-                let entry = match result {
-                    Ok(e) => e,
-                    Err(_) => return WalkState::Continue,
-                };
-
-                let name = entry.file_name().to_string_lossy();
-                if name.starts_with('.') || name.ends_with('~') {
-                    return WalkState::Skip;
-                }
-
-                let Some(ft) = entry.file_type() else {
-                    return WalkState::Continue;
-                };
-                if !ft.is_file() {
-                    return WalkState::Continue;
-                }
-
-                let Ok(rel) = entry.path().strip_prefix(project_root_path) else {
-                    return WalkState::Continue;
-                };
-                let Some(rel_path) = rel.to_str() else {
-                    // Non-UTF-8 path component — Unity asset paths are always
-                    // UTF-8 on macOS APFS, so this only fires on a corrupt
-                    // filesystem entry. Skip rather than panic.
-                    return WalkState::Continue;
-                };
-                let n: &str = name.as_ref();
-                if n.ends_with(".cs") {
-                    flusher
-                        .local
-                        .cs_dirs
-                        .insert(parent_directory(rel_path).to_string());
-                } else if n.ends_with(".asmdef") {
-                    flusher.local.asmdef_paths.push(rel_path.to_string());
-                } else if n.ends_with(".asmref") {
-                    flusher.local.asmref_paths.push(rel_path.to_string());
-                }
-                WalkState::Continue
-            })
+            if !ft.is_file() {
+                return WalkState::Continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(project_root_path) else {
+                return WalkState::Continue;
+            };
+            // Non-UTF-8 path component — Unity asset paths are always UTF-8 on
+            // macOS APFS, so this only fires on a corrupt filesystem entry.
+            // Skip rather than panic.
+            let Some(rel_path) = rel.to_str() else {
+                return WalkState::Continue;
+            };
+            let n: &str = name.as_ref();
+            if n.ends_with(".cs") {
+                local.cs_dirs.insert(parent_directory(rel_path).to_string());
+            } else if n.ends_with(".asmdef") {
+                local.asmdef_paths.push(rel_path.to_string());
+            } else if n.ends_with(".asmref") {
+                local.asmref_paths.push(rel_path.to_string());
+            }
+            WalkState::Continue
         });
+        bucket.merge_from(from_root);
     }
 
-    let bucket = aggregate.into_inner().unwrap();
     FileScan {
         cs_dirs: bucket.cs_dirs.into_iter().collect(),
         asmdef_paths: bucket.asmdef_paths,

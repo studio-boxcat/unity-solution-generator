@@ -3,7 +3,6 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Mutex;
 
 use ignore::{WalkBuilder, WalkState};
 use walkdir::WalkDir;
@@ -268,24 +267,8 @@ fn parallel_walk_dlls_and_asmdefs(directory: &str, project_root: &str) -> Vec<(S
     }
     // Component-aware prefix strip — see project_scanner.rs for rationale.
     let project_root_path = Path::new(project_root);
-    let aggregate: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-
-    struct Flusher<'a> {
-        local: Vec<(String, String)>,
-        aggregate: &'a Mutex<Vec<(String, String)>>,
-    }
-    impl Drop for Flusher<'_> {
-        fn drop(&mut self) {
-            if self.local.is_empty() {
-                return;
-            }
-            let mut g = self.aggregate.lock().unwrap();
-            g.append(&mut self.local);
-        }
-    }
-
-    let agg_ref: &Mutex<Vec<(String, String)>> = &aggregate;
-    WalkBuilder::new(directory)
+    let mut builder = WalkBuilder::new(directory);
+    builder
         .standard_filters(false)
         .hidden(false)
         .ignore(false)
@@ -293,50 +276,38 @@ fn parallel_walk_dlls_and_asmdefs(directory: &str, project_root: &str) -> Vec<(S
         .git_global(false)
         .git_exclude(false)
         .parents(false)
-        .follow_links(false)
-        .build_parallel()
-        .run(|| {
-            let mut flusher = Flusher {
-                local: Vec::new(),
-                aggregate: agg_ref,
-            };
-            Box::new(move |result| {
-                let entry = match result {
-                    Ok(e) => e,
-                    Err(_) => return WalkState::Continue,
-                };
-                let name = entry.file_name().to_string_lossy();
-                if name.starts_with('.') || name.ends_with('~') {
-                    return WalkState::Skip;
-                }
-                let Some(ft) = entry.file_type() else {
-                    return WalkState::Continue;
-                };
-                if ft.is_dir() {
-                    if is_native_plugin_dir(&name) {
-                        return WalkState::Skip;
-                    }
-                    return WalkState::Continue;
-                }
-                if !ft.is_file() {
-                    return WalkState::Continue;
-                }
-                let n: &str = name.as_ref();
-                if !(n.ends_with(".dll") || n.ends_with(".asmdef")) {
-                    return WalkState::Continue;
-                }
-                let Ok(rel) = entry.path().strip_prefix(project_root_path) else {
-                    return WalkState::Continue;
-                };
-                let Some(rel_str) = rel.to_str() else {
-                    return WalkState::Continue;
-                };
-                flusher.local.push((rel_str.to_string(), n.to_string()));
-                WalkState::Continue
-            })
-        });
+        .follow_links(false);
 
-    let mut hits = aggregate.into_inner().unwrap();
+    let mut hits = crate::walk::parallel_walk(builder, |local: &mut Vec<(String, String)>, entry| {
+        let name = entry.file_name().to_string_lossy();
+        if name.starts_with('.') || name.ends_with('~') {
+            return WalkState::Skip;
+        }
+        let Some(ft) = entry.file_type() else {
+            return WalkState::Continue;
+        };
+        if ft.is_dir() {
+            if is_native_plugin_dir(&name) {
+                return WalkState::Skip;
+            }
+            return WalkState::Continue;
+        }
+        if !ft.is_file() {
+            return WalkState::Continue;
+        }
+        let n: &str = name.as_ref();
+        if !(n.ends_with(".dll") || n.ends_with(".asmdef")) {
+            return WalkState::Continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(project_root_path) else {
+            return WalkState::Continue;
+        };
+        let Some(rel_str) = rel.to_str() else {
+            return WalkState::Continue;
+        };
+        local.push((rel_str.to_string(), n.to_string()));
+        WalkState::Continue
+    });
     // Stable order across the roots so the "first wins" dedupe pass is deterministic
     // even though the parallel walker fans out non-deterministically per thread.
     hits.sort();
