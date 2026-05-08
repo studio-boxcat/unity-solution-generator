@@ -99,15 +99,50 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
     let common_refs: Vec<DllRef> = common_refs
         .into_iter()
         .map(|r| DllRef::new(r.name, resolve(&r.path)))
+        // Filter out native DLLs (CS0009: PE image doesn't contain managed metadata).
+        // Unity's lockfile references some native plugins (e.g.
+        // `unity_sprite_author.dll`) that MSBuild's RAR silently filters but raw
+        // csc doesn't. Match RAR's behaviour by inspecting the PE header.
+        .filter(|r| {
+            if is_managed_dll(Path::new(&r.path)) {
+                true
+            } else {
+                tracing::debug!(target: "usg_core::typecheck", path = %r.path, "filtered: not a managed DLL");
+                false
+            }
+        })
         .collect();
-    let analyzers: Vec<String> = lockfile.analyzers.iter().map(|a| resolve(a)).collect();
+    let analyzers: Vec<String> = lockfile
+        .analyzers
+        .iter()
+        .map(|a| resolve(a))
+        .filter(|a| is_managed_dll(Path::new(a)))
+        .collect();
 
     let mut recompiled = 0usize;
     let mut skipped = 0usize;
     let mut failures = BTreeMap::new();
+    // Tracks which projects' compiles failed (or were cascade-skipped). When a
+    // downstream project references one of these, we skip rather than invoking
+    // csc on a doomed compile that produces a wall of CS0006 noise.
+    let mut failed_set: BTreeSet<String> = BTreeSet::new();
 
     for name in &order {
         let asm = &scan.asm_def_by_name[name];
+
+        // Cascade skip: if any upstream failed, this one would just spew
+        // CS0006 ("metadata file ... could not be found") for the missing
+        // upstream `.dll`. Surface as a clear "skipped" rather than a real
+        // compile error.
+        if let Some(dep) = asm.references.iter().find(|r| failed_set.contains(*r)) {
+            failures.insert(
+                name.clone(),
+                format!("skipped (cascade): upstream '{}' failed", dep),
+            );
+            failed_set.insert(name.clone());
+            continue;
+        }
+
         let sources = collect_sources(&root, asm, &scan.dirs_by_project);
         if sources.is_empty() {
             // No source files — nothing to compile (matches generate's behaviour
@@ -147,6 +182,7 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
             Ok(()) => recompiled += 1,
             Err(stderr) => {
                 failures.insert(name.clone(), stderr);
+                failed_set.insert(name.clone());
             }
         }
     }
@@ -394,8 +430,9 @@ fn build_rsp(
     out_dll: &str,
     allow_unsafe: bool,
 ) -> String {
+    // `/noconfig` MUST go on the command line (not in the rsp) — otherwise csc
+    // emits CS2023 and reads its default csc.rsp anyway. See `invoke_csc`.
     let mut s = String::new();
-    s.push_str("/noconfig\n");
     s.push_str("/nostdlib+\n");
     s.push_str("/target:library\n");
     s.push_str("/refonly\n"); // metadata-only assembly — same as generate's no-emit mode
@@ -427,6 +464,10 @@ fn invoke_csc(csc_dll: &str, rsp_path: &str) -> std::result::Result<(), String> 
     let out = Command::new("dotnet")
         .arg("exec")
         .arg(csc_dll)
+        // `/noconfig` belongs on the command line, not in the rsp (csc warns
+        // CS2023 if it appears in a response file and silently reads its
+        // default csc.rsp anyway).
+        .arg("/noconfig")
         .arg(format!("@{}", rsp_path))
         .output()
         .map_err(|e| format!("failed to spawn dotnet: {}", e))?;
@@ -437,4 +478,49 @@ fn invoke_csc(csc_dll: &str, rsp_path: &str) -> std::result::Result<(), String> 
         let stderr = String::from_utf8_lossy(&out.stderr);
         Err(format!("{}{}", stdout, stderr))
     }
+}
+
+/// True if `path` is a managed-code (CLI) PE binary. Reads enough of the PE
+/// header to find the CLR Runtime Header data-directory entry (index 14 of 16);
+/// if its RVA is non-zero, the file is a managed assembly.
+///
+/// Native DLLs (e.g. Unity's `unity_sprite_author.dll`) have an empty CLR
+/// header entry; passing them via `/reference:` to csc fires CS0009. MSBuild's
+/// `ResolveAssemblyReferences` task does this filter — we replicate it.
+///
+/// PE format reference:
+/// <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format>
+fn is_managed_dll(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1024];
+    let Ok(n) = f.read(&mut buf) else { return false };
+    if n < 0x40 {
+        return false;
+    }
+    let e_lfanew = u32::from_le_bytes([buf[0x3c], buf[0x3d], buf[0x3e], buf[0x3f]]) as usize;
+    // PE signature + COFF header (20) + Optional Header magic (2)
+    if e_lfanew + 24 + 2 > n {
+        return false;
+    }
+    if &buf[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+        return false;
+    }
+    let opt_off = e_lfanew + 24;
+    let magic = u16::from_le_bytes([buf[opt_off], buf[opt_off + 1]]);
+    let dd_off = match magic {
+        0x10b => opt_off + 96,  // PE32
+        0x20b => opt_off + 112, // PE32+
+        _ => return false,
+    };
+    // Data directory entry 14 = CLR Runtime Header. Each entry is 8 bytes
+    // ({RVA: u32, Size: u32}). Non-zero RVA → managed.
+    let clr_off = dd_off + 14 * 8;
+    if clr_off + 4 > n {
+        return false;
+    }
+    let clr_va = u32::from_le_bytes([buf[clr_off], buf[clr_off + 1], buf[clr_off + 2], buf[clr_off + 3]]);
+    clr_va != 0
 }
