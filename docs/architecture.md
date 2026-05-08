@@ -12,7 +12,7 @@ Audit found exactly **four caller sites** total. The design is sized for these a
 |---|---|---|
 | `meow-tower` Hot Reload pre-flight (`justfile:105`) | CLI | `unity-solution-generator typecheck` exit code |
 | `meow-tower-porting` (same recipe) | CLI | same |
-| Rider in-Editor regen (`ProjectGeneration.cs:91`) | FFI | `usg_generate(root, "ios", "editor", ".", extraRefs, …)` + `usg_last_error()` |
+| Rider in-Editor regen (`ProjectGeneration.cs:90`) | FFI | `usg_generate(root, "ios", "editor", ".", extraRefs)` + `usg_last_error()` |
 | Rider in-Editor regen (porting) | FFI | same |
 
 No CI, no other repos, no other tools.
@@ -83,8 +83,7 @@ graph LR
 ```c
 int32_t usg_generate(const char *projectRoot, const char *platform,
                      const char *config, const char *outputDir,
-                     const char *extraRefs,
-                     char *slnPathOut, int32_t slnPathOutLen);
+                     const char *extraRefs);
 const char *usg_last_error(void);
 ```
 

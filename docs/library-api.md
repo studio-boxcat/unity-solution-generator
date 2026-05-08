@@ -8,8 +8,7 @@
 
 ```c
 int32_t usg_generate(const char *projectRoot, const char *platform, const char *config,
-                     const char *outputDir, const char *extraRefs,
-                     char *slnPathOut, int32_t slnPathOutLen);
+                     const char *outputDir, const char *extraRefs);
 const char *usg_last_error(void);  // valid until next usg_ call
 ```
 
@@ -18,18 +17,16 @@ C# usage:
 ```csharp
 [DllImport("UnitySolutionGenerator")]
 static extern int usg_generate(string projectRoot, string platform, string config,
-                               string outputDir, string extraRefs,
-                               IntPtr slnPathOut, int slnPathOutLen);
+                               string outputDir, string extraRefs);
 
 [DllImport("UnitySolutionGenerator")]
 static extern IntPtr usg_last_error();
 
-// Usage (ignoring the path, like Rider does):
-if (usg_generate(root, "ios", "editor", ".", "/path/to/Extra.dll", IntPtr.Zero, 0) != 0)
+if (usg_generate(root, "ios", "editor", ".", "/path/to/Extra.dll") != 0)
     throw new Exception(Marshal.PtrToStringAnsi(usg_last_error()));
 ```
 
-`outputDir`: relative path, `"."` for project root, `null` for default variant dir. `extraRefs`: comma-separated absolute DLL paths, `null` for none. `slnPathOut` / `slnPathOutLen`: optional output buffer for the generated `.sln` path; pass `IntPtr.Zero, 0` to skip. `usg_generate` auto-runs the equivalent of `lock` if no lockfile exists.
+`outputDir`: relative path, `"."` for project root, `null` for default variant dir. `extraRefs`: comma-separated absolute DLL paths, `null` for none. `usg_generate` auto-runs the equivalent of `lock` if no lockfile exists.
 
 **Single-threaded contract.** Cache files aren't reentrant-safe; callers must serialize. Unity callers naturally serialize via the main asset-import thread.
 
