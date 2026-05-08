@@ -2,30 +2,24 @@
 
 ## Deferred
 
-### Direct `csc /shared` typecheck path
+### Pipeline csc invocations across VBCSCompiler
 
-Closes the cold-rebuild gap (currently 6.6 s; the retired
-`build-unity-sln`'s no-emit mode hit 1.47 s on the same case via
-VBCSCompiler `/shared`).
-
-Each `dotnet exec csc.dll` invocation cold-starts Roslyn (~390 ms
-JIT + load). Speaking VBCSCompiler IPC over the named pipe lets a
-long-lived Roslyn process amortize that cost across N compiles.
+Cold rebuild is now 4.2 s (down from 6.6 s after `/shared` landed) but
+still slower than the retired `build-unity-sln` (1.47 s). The remaining
+gap is sequential dispatch — we walk the asmdef DAG and run one
+`dotnet exec csc.dll /shared` at a time. MSBuild Server pipelines its
+csc calls in parallel through VBCSCompiler.
 
 **Approach:**
-- Implement the [Roslyn compiler server protocol](https://github.com/dotnet/roslyn/blob/main/docs/compilers/Compiler%20Server.md)
-  client in Rust — length-prefixed binary frames over a Unix domain
-  socket on macOS/Linux (named pipe on Windows). Pipe name is a
-  hash of `(compiler path, user, working dir)`.
-- Replace `invoke_csc` body with a `BuildClient`-equivalent: try the
-  IPC path first, fall back to `dotnet exec csc.dll` on failure.
-- `csc.exe` (the native wrapper) supports `/shared` directly but doesn't
-  ship on macOS — `csc` here is `dotnet exec csc.dll` which is just a
-  shell.
+- Walk the DAG into "levels" (independent projects per level).
+- Per level, spawn N `dotnet exec csc.dll /shared` processes concurrently
+  (`rayon::par_iter` or `tokio` task per project).
+- Each connects to VBCSCompiler independently — the server already handles
+  concurrent requests over its named pipe.
 
-**Why not yet:** ~200 LOC of binary-protocol implementation for a 4 s
-cold-rebuild improvement. The warm-path win (10×) already dominates the
-common dev case. Revisit when cold rebuild becomes the felt pain.
+**Why not yet:** the warm + touch+rebuild paths (the dev iteration loop)
+are already faster than the retired driver. Cold rebuild is rare (Unity
+upgrade, fresh checkout). Revisit if it becomes the felt pain.
 
 ### Architecture v1 leftovers
 

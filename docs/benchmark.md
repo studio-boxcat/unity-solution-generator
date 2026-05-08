@@ -69,15 +69,17 @@ Benchmarks on meow-tower (13 asm, ~5k .cs):
 
 | Scenario | `build-unity-sln` (no-emit) | `usg typecheck` | Δ |
 |---|---|---|---|
-| Warm no-op | 460 ms | **42 ms** | **10.7× faster** |
-| Touch + rebuild | 2.22 s | **1.54 s** | **1.44× faster** |
-| Cold rebuild | 1.47 s | 6.6 s | ~4.5× slower |
+| Warm no-op | 460 ms | **40 ms** | **11.5× faster** |
+| Touch + rebuild | 2.22 s | **581 ms** | **3.8× faster** |
+| Cold rebuild | 1.47 s | 4.2 s | ~2.9× slower |
 
 Reproduce: `hyperfine 'unity-solution-generator typecheck'` from anywhere inside a Unity project.
 
-Warm-no-op + touch+rebuild are both faster than the retired driver. The warm-no-op win comes from the mtime-based UTD short-circuit (no csc invocation at all). The touch+rebuild win comes from **content-hash UTD**: csc with `/refonly /deterministic` produces byte-identical output for unchanged inputs, so when a touched `.cs` upstream produces an identical `.dll`, we restore the pre-compile mtime and downstream UTD skips. Only the project whose source actually changed gets recompiled.
+Three layers contribute:
 
-Cold rebuild is still slower: each `dotnet exec csc.dll` cold-starts Roslyn (~390 ms JIT + load × 9 projects). Fix queued in [[TODO.md]] (VBCSCompiler `/shared` IPC).
+- **Warm no-op (11.5× win)**: mtime-based UTD short-circuit skips csc entirely.
+- **Touch+rebuild (3.8× win)**: **content-hash UTD** — csc with `/refonly /deterministic` produces byte-identical output for unchanged inputs, so when a touched `.cs` upstream produces an identical `.dll`, the pre-compile mtime is restored and downstream UTD skips. Only the project whose source actually changed recompiles. Plus **`/shared`** which connects each csc invocation to VBCSCompiler over a long-lived pipe (no Roslyn JIT cold-start per call).
+- **Cold rebuild (still slower)**: csc itself has to compile 5k files. `/shared` cuts JIT-startup waste but the actual compile work is bounded by csc. The retired MSBuild driver paralleled csc invocations through MSBuild Server's task graph; we run them sequentially through one VBCSCompiler. Pipelining them is the next ceiling — see [[TODO.md]].
 
 ### Why MSBuild's warm-no-op floor is 460 ms
 

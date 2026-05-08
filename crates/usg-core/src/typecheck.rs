@@ -497,9 +497,13 @@ fn invoke_csc(csc_dll: &str, rsp_path: &str) -> std::result::Result<(), String> 
     let out = Command::new("dotnet")
         .arg("exec")
         .arg(csc_dll)
-        // `/noconfig` belongs on the command line, not in the rsp (csc warns
-        // CS2023 if it appears in a response file and silently reads its
-        // default csc.rsp anyway).
+        // `/noconfig` and `/shared` are client-only flags and MUST go on the
+        // command line (not in the rsp — csc otherwise rejects them with
+        // CS2007 / CS2023). `/shared` connects to a long-lived VBCSCompiler
+        // over the named-pipe protocol; the server amortizes Roslyn JIT +
+        // metadata-loading across calls (~390 ms saved per call after the
+        // first). VBCSCompiler self-spawns on first connect, idles 10 min.
+        .arg("/shared")
         .arg("/noconfig")
         .arg(format!("@{}", rsp_path))
         .output()
