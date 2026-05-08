@@ -66,81 +66,32 @@ Platform defines:
 `build-unity-sln` wraps generate + `dotnet build`. Auto-retries with fresh lock on build failure. Defaults: platform=`ios`, config=`editor`.
 
 ```bash
-build-unity-sln ios prod                  # single variant
+build-unity-sln ios prod                  # single variant (fast compile-check)
 build-unity-sln ios,android editor,dev    # 4 parallel builds (cartesian product)
 build-unity-sln osx editor                # macOS standalone (catches UNITY_STANDALONE_OSX errors)
 build-unity-sln --clean                   # clean cached artifacts
+build-unity-sln --emit ios editor         # full build with runnable IL (slower; rarely needed)
 ```
+
+The default is a fast compile-check: Roslyn emits metadata-only ref assemblies (no IL, no method bodies), analyzers/pdb/post-compile copies skipped, MSBuild Server persists across calls. ~2× faster than `--emit`. Output is NOT runnable — Unity does the real build.
+
+Pass `--emit` only when you need actual IL output (e.g. running the assemblies outside Unity). Benchmarks: [[docs/benchmark.md]].
+
+**Pitfalls of the default (no-emit) mode:**
+- Output assemblies are ref-only stubs — not runnable.
+- Alternating default and `--emit` invalidates MSBuild's up-to-date check (different artifact at same path) → first run after toggle is a full rebuild. Pin each workflow to one mode.
+
+Less-likely-to-bite pitfalls (rare-Roslyn diagnostic gaps, source generators still running): see [[docs/benchmark.md]].
 
 Or call the generator directly — output is the `.sln` path to stdout:
 
 ```bash
-dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v q
+dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v:q
 ```
 
-## Library
+## Library API
 
-`libUnitySolutionGenerator.dylib` exposes a C ABI (for Unity `[DllImport]`) plus a Rust API via the `usg-core` crate.
-
-### C ABI (`dist/UnitySolutionGenerator.h`)
-
-```c
-int32_t usg_generate(const char *projectRoot, const char *platform, const char *config,
-                     const char *outputDir, const char *extraRefs,
-                     char *slnPathOut, int32_t slnPathOutLen);
-int32_t usg_lock(const char *projectRoot);
-const char *usg_last_error(void);  // valid until next usg_ call
-```
-
-C# usage:
-
-```csharp
-[DllImport("UnitySolutionGenerator")]
-static extern int usg_generate(string projectRoot, string platform, string config,
-                               string outputDir, string extraRefs,
-                               StringBuilder slnPathOut, int slnPathOutLen);
-
-[DllImport("UnitySolutionGenerator")]
-static extern int usg_lock(string projectRoot);
-
-[DllImport("UnitySolutionGenerator")]
-static extern IntPtr usg_last_error();
-
-// Usage:
-var buf = new StringBuilder(512);
-if (usg_generate(root, "ios", "editor", "Library/hotreload/Solution",
-                 "/path/to/Extra.dll", buf, buf.Capacity + 1) != 0)
-    throw new Exception(Marshal.PtrToStringAnsi(usg_last_error()));
-string slnPath = buf.ToString();
-```
-
-`outputDir`: relative path, `"."` for project root, `null` for default variant dir. `extraRefs`: comma-separated absolute DLL paths, `null` for none. Both functions auto-resolve the lockfile from `Library/UnitySolutionGenerator/csproj.lock`; `usg_generate` auto-runs lock if the lockfile is missing.
-
-### Rust API (`use usg_core::*`)
-
-| Type | Description |
-|------|-------------|
-| `SolutionGenerator` | `.generate_from_lockfile(&options, &lockfile)`, `.generate(&options)` |
-| `GenerateOptions` | builder: `new(root, platform).with_build_config(...).with_output_dir(...).with_extra_refs(...)` |
-| `GenerateResult` | `variant_sln_path`, `variant_csprojs`, `warnings` |
-| `BuildPlatform` | `Ios`, `Android`, `Osx` |
-| `BuildConfig` | `Prod`, `Dev`, `Editor` |
-| `LockfileIO` | `::read(path)`, `::write(&lf, path)`, `::scan_and_write(root)`, `::load_or_scan(root)` |
-| `Lockfile` | Unity version, DLL refs, defines, analyzers (struct literal or `LockfileIO::read`) |
-| `DllRef` | `name`, `path` (and `DllRef::parse_list` for the comma-separated CLI form) |
-| `RefCategory` | `Engine`, `Editor`, `Netstandard`, `PlaybackIos`, `PlaybackAndroid`, `PlaybackStandalone`, `Project` |
-
-```rust
-use usg_core::{BuildConfig, BuildPlatform, DllRef, GenerateOptions, LockfileIO, SolutionGenerator};
-
-let lockfile = LockfileIO::read("Library/UnitySolutionGenerator/csproj.lock")?;
-let options = GenerateOptions::new(project_root, BuildPlatform::Ios)
-    .with_build_config(BuildConfig::Editor)
-    .with_output_dir(Some("Library/com.example/Solution"))
-    .with_extra_refs(vec![DllRef::new("MyLib", "/abs/path/to/MyLib.dll")]);
-let result = SolutionGenerator::new().generate_from_lockfile(&options, &lockfile)?;
-// result.variant_sln_path → path to generated .sln
-```
+C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [[docs/library.md]].
 
 ## How it works
 
@@ -188,87 +139,12 @@ Library/UnitySolutionGenerator/
 
 ## Performance
 
-Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical microbenchmarks (`criterion`).
+End-to-end + microbenchmark numbers, per-section profiling output, caching-layer details, concurrency notes, and `USG_PROFILE` instrumentation: see [[docs/benchmark.md]].
 
-### End-to-end (meow-tower, 13 assemblies, ~5k .cs files)
-
-`hyperfine --warmup 10 --runs 200 --shell=none`:
-
-| Command | Mean ± σ | Range |
-|---------|----------|-------|
-| `generate` (warm — fingerprint hit) | **2.1 ± 0.5 ms** | 1.6–5.6 |
-| `generate` (warm scan-cache, fingerprint missing) | ~5.6 ± 1.0 ms | 4.2–9.8 |
-| `generate --root` | **5.5 ± 0.5 ms** | 4.9–7.9 |
-| `lock` (cold, fingerprint nuked each run) | **29.8 ± 2.4 ms** | 26.1–33.7 |
-| `lock` (warm — fingerprint hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
-| startup (`--help`) | ~2 ms | — |
-
-Run via `just profile` (cold lock + warm lock) or `just profile-spans` (per-section breakdown via tracing).
-
-### Per-section (one run, USG_PROFILE=1)
-
-`generate` (warm scan-cache, **fingerprint cleared** so we hit the full pipeline):
-```
-generate (5.78 ms total)
-├─ project_scanner.scan         4.66 ms
-│  └─ scan_cache.validate       2.82 ms
-└─ generate.write_variant n=9   0.64 ms
-
-lock cold (47.1 ms total)
-├─ lockfile_scanner.unity_install   0.90 ms     ← walkdir, sequential, small
-├─ lockfile_scanner.project_walk   45.1  ms     ← ignore parallel walk of PackageCache
-└─ lockfile_scanner.defines         0.71 ms
-
-lock warm
-└─ (no spans — fingerprint match short-circuits before LockfileScanner runs)
-```
-
-`generate` (warm scan-cache + warm fingerprint):
-```
-generate.from_lockfile  83 µs
-└─ generate.fingerprint_check   57 µs   ← stat scan-cache + lockfile + read fp
-```
-The remaining ~2 ms of wall-clock is process startup + dynamic linker.
-
-### Microbenchmarks (criterion, synthetic projects)
-
-```
-project_scanner.scan/13asm_x_50cs       33.2 ms     (cold, full walk)
-project_scanner.scan/100asm_x_200cs    946.6 ms     (cold, full walk)
-project_scanner.scan_warm/13asm_x_50cs   0.22 ms    (cache hit, ~150× speedup)
-project_scanner.scan_warm/100asm_x_200cs 1.59 ms
-
-generate.from_lockfile/13asm_x_50cs      0.51 ms
-generate.from_lockfile/100asm_x_200cs    2.81 ms
-
-lockfile_io/write_initial               13.5 µs
-lockfile_io/read                        14.1 µs
-```
-
-Run via `just bench` (all) or `just bench scan` (filter).
-
-### Caching layers
-
-| Cache | Path | Invalidates on | Hot-path skip |
-|---|---|---|---|
-| `generate-fingerprint` | `Library/UnitySolutionGenerator/.fingerprints/<options-hash>` | mtime of `csproj.lock` or `scan-cache`; or any expected output file missing | entire `generate_from_lockfile` body — render+write skipped, cached `GenerateResult` returned |
-| `scan-cache` | `Library/UnitySolutionGenerator/scan-cache` | mtime of any contributing dir + each asmdef/asmref file (catches in-place edits — parent-dir mtime alone misses these) | full filesystem walk + per-asmdef JSON parse (records are pre-serialized into the cache) |
-| `lock-fingerprint` | `Library/UnitySolutionGenerator/lock-fingerprint` | mtime of Unity install + any contributing dir + ProjectVersion / ProjectSettings / manifest.json | entire Unity-install + project-side DLL/asmdef walk |
-
-Both caches store nanosecond mtimes via `MetadataExt::mtime_nsec`. Validation cost is `len(entries) × stat()` (~1–2 ms for hundreds of entries).
-
-### Concurrency
-
-- The hot project-side scan uses [`ignore::WalkBuilder::build_parallel`](https://docs.rs/ignore/) with all gitignore behaviour disabled — we want only the parallel walker scaffolding (crossbeam-deque work-stealing + per-thread accumulators flushed on `Drop`).
-- The lockfile-side DLL/asmdef walk over `Assets`/`Packages`/`Library/PackageCache` also uses `ignore::WalkBuilder::build_parallel`. The Unity-install DLL scan stays sequential (`walkdir`) — small enough not to matter.
-- `csproj` writes fan out across threads via `rayon`.
-
-### Profiling instrumentation
-
-Spans use [`tracing`](https://docs.rs/tracing/). Default off — zero runtime cost. Opt in:
-- `USG_PROFILE=1 unity-solution-generator <cmd>` — info-level spans, one stderr line per span close with `time.busy`.
-- `USG_PROFILE=full` — includes lower-level child spans.
-- `USG_LOG=usg_core::project_scanner=debug` — drop-in `EnvFilter` directives override the default.
+Quick refs:
+- `just profile` / `just profile-spans` — meow-tower wall-clock + per-section breakdown
+- `just bench` — criterion microbenchmarks
+- `USG_PROFILE=1 unity-solution-generator <cmd>` — opt-in tracing spans
 
 ## Unity project setup
 
