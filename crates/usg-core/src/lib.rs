@@ -20,6 +20,7 @@ pub mod io;
 pub(crate) mod lock_cache;
 pub mod lockfile;
 pub mod lockfile_scanner;
+pub(crate) mod package_cache;
 pub mod paths;
 pub mod profile;
 pub mod project_scanner;

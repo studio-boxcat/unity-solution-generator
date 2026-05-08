@@ -53,3 +53,17 @@ pub fn resolve_project_root(path: &str) -> String {
 pub fn lockfile_path(project_root: &str, generator_root: &str) -> String {
     join_path(project_root, &format!("{}/csproj.lock", generator_root))
 }
+
+/// Per-user cache root for tarball-extracted Unity packages. Subdirectory by
+/// Unity version isolates installs (each ships its own bundled tarballs).
+/// Honours `XDG_CACHE_HOME`; falls back to `$HOME/.cache`. Panics if neither
+/// is set — landing extracted Unity code in a world-writable `/tmp` would let
+/// anyone tamper with our compile inputs.
+pub fn usg_cache_dir(unity_version: &str) -> String {
+    let cache_home = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.cache", h)))
+        .expect("usg_cache_dir: neither XDG_CACHE_HOME nor HOME is set");
+    format!("{}/unity-solution-generator/{}", cache_home, unity_version)
+}

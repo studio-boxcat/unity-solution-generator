@@ -672,11 +672,13 @@ fn render_directory_build_props_unified() {
     let with_unity = render_directory_build_props(
         "/project",
         Some("/unity"),
+        Some("/cache/2024"),
         BuildPlatform::Ios,
         BuildConfig::Editor,
         &["CUSTOM".to_string()],
     );
     assert!(with_unity.contains("<UnityPath>/unity</UnityPath>"));
+    assert!(with_unity.contains("<UsgCache>/cache/2024</UsgCache>"));
     assert!(with_unity.contains("CUSTOM"));
     assert!(with_unity.contains("UNITY_IOS"));
     assert!(with_unity.contains("UNITY_EDITOR"));
@@ -684,11 +686,13 @@ fn render_directory_build_props_unified() {
     let without = render_directory_build_props(
         "/project",
         None,
+        None,
         BuildPlatform::Android,
         BuildConfig::Prod,
         &[],
     );
     assert!(!without.contains("<UnityPath>"));
+    assert!(!without.contains("<UsgCache>"));
     assert!(without.contains("UNITY_ANDROID"));
     assert!(!without.contains("UNITY_EDITOR"));
 }

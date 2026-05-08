@@ -22,6 +22,8 @@ ignore.workspace = true
 rayon.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+flate2 = "1"
+tar = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

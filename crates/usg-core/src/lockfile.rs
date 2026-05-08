@@ -190,6 +190,7 @@ impl LockfileIO {
             project_root,
             &scanned.lockfile.unity_path,
             &scanned.contributing_paths_relative,
+            &scanned.contributing_external_absolute,
         );
         // Best-effort: a fingerprint write failure must not fail the user-facing
         // operation; we'd just rescan next time.

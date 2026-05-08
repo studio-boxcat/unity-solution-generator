@@ -458,6 +458,7 @@ fn lock_fingerprint_short_circuits_rescan() {
         root.to_str().unwrap(),
         root.to_str().unwrap(),
         &["Assets/A/Code.cs".to_string()],
+        &[],
     );
     assert!(!entries.is_empty());
     assert!(usg_core::__test_only::is_valid(&entries));
@@ -468,6 +469,40 @@ fn lock_fingerprint_short_circuits_rescan() {
     assert!(!usg_core::__test_only::is_valid(&entries));
 }
 
+/// Regression: lockfile must invalidate when a missing input later appears.
+///
+/// `wt go orgel-fix` produced a fresh worktree where `Library/PackageCache/`
+/// didn't exist at lock time. The original `build_entries` silently dropped
+/// missing paths, so Unity later populating `PackageCache` never invalidated
+/// the (incomplete) lockfile. The fix records `(p, 0)` for missing entries
+/// and treats appearance as invalidation.
+#[test]
+fn lock_fingerprint_sentinel_invalidates_on_appearance() {
+    let tmp = make_temp_root();
+    let root = tmp.path();
+    let absent = root.join("Library/PackageCache");
+
+    // build_entries should record `Library/PackageCache` as missing — see
+    // `lock_cache::build_entries` (it's seeded unconditionally at the abs root).
+    let entries = usg_core::__test_only::build_entries(
+        root.to_str().unwrap(),
+        root.to_str().unwrap(),
+        &[],
+        &[],
+    );
+    let absent_str = absent.to_string_lossy().to_string();
+    let recorded = entries.iter().find(|(p, _)| p == &absent_str);
+    assert!(
+        recorded.is_some_and(|(_, m)| *m == 0),
+        "missing path must be recorded with mtime=0 sentinel; got {:?}",
+        recorded
+    );
+    assert!(usg_core::__test_only::is_valid(&entries));
+
+    // Path appears → fingerprint invalidates.
+    std::fs::create_dir_all(&absent).unwrap();
+    assert!(!usg_core::__test_only::is_valid(&entries));
+}
 
 /// Regression: typecheck must surface method-body diagnostics (CS1503 etc.).
 ///
@@ -504,3 +539,4 @@ fn rsp_has_no_refonly() {
         rsp
     );
 }
+

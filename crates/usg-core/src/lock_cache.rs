@@ -46,10 +46,20 @@ pub fn load(path: &str) -> Option<Vec<(String, u128)>> {
 }
 
 /// Returns true if every recorded path still has the same mtime as when the
-/// fingerprint was written.
+/// fingerprint was written. A recorded mtime of `0` is the "missing-path"
+/// sentinel — it stays valid only while the path remains absent. This catches
+/// fresh-worktree races where `Library/PackageCache/` doesn't exist at lock
+/// time and Unity later populates it.
 pub fn is_valid(entries: &[(String, u128)]) -> bool {
     for (p, recorded) in entries {
-        let Ok(meta) = std::fs::metadata(p) else {
+        let meta = std::fs::metadata(p);
+        if *recorded == 0 {
+            if meta.is_ok() {
+                return false;
+            }
+            continue;
+        }
+        let Ok(meta) = meta else {
             return false;
         };
         let Some(now) = mtime_nanos(&meta) else {
@@ -63,13 +73,15 @@ pub fn is_valid(entries: &[(String, u128)]) -> bool {
 }
 
 /// Build a fingerprint set from the inputs that influenced a freshly-written lockfile.
-/// Includes: top-level project files, the Unity install root, and every project-side
+/// Includes: top-level project files, the Unity install root, every project-side
 /// directory that contributed a `.dll` or `.asmdef` (plus their ancestors up to the
-/// scan root, so adds/removes are caught at any depth).
+/// scan root, so adds/removes are caught at any depth), and any extra absolute paths
+/// the scanner declares (e.g. `BuiltInPackages/`, the per-user tarball-extract cache).
 pub fn build_entries(
     project_root: &str,
     unity_path: &str,
     contributed_paths_relative: &[String],
+    extra_absolute: &[String],
 ) -> Vec<(String, u128)> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
 
@@ -101,12 +113,20 @@ pub fn build_entries(
         }
     }
 
+    for abs in extra_absolute {
+        paths.insert(abs.clone());
+    }
+
+    // Record `0` for missing paths so `is_valid` invalidates if they later
+    // appear (e.g. `Library/PackageCache/` populated by Unity post-lock).
     paths
         .into_iter()
-        .filter_map(|p| {
-            let m = std::fs::metadata(&p).ok()?;
-            let ns = mtime_nanos(&m)?;
-            Some((p, ns))
+        .map(|p| {
+            let ns = std::fs::metadata(&p)
+                .ok()
+                .and_then(|m| mtime_nanos(&m))
+                .unwrap_or(0);
+            (p, ns)
         })
         .collect()
 }

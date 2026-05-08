@@ -249,6 +249,17 @@ fn scan_project_files(project_root: &str, roots: &[&str]) -> FileScan {
             let Some(ft) = entry.file_type() else {
                 return WalkState::Continue;
             };
+            // Skip whole subtrees of blacklisted packages (HotReload etc.) —
+            // their asmrefs merge sources into other assemblies, but their
+            // internal DLLs come in editor-version-specific variants that
+            // confuse a single-config typecheck.
+            if let Ok(rel_dir) = entry.path().strip_prefix(project_root_path) {
+                if let Some(rel_dir_str) = rel_dir.to_str() {
+                    if crate::lockfile_scanner::is_blacklisted_path(rel_dir_str) {
+                        return WalkState::Skip;
+                    }
+                }
+            }
             if !ft.is_file() {
                 return WalkState::Continue;
             }

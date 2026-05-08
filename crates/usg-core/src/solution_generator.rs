@@ -416,6 +416,7 @@ impl SolutionGenerator {
             &render_directory_build_props(
                 &ctx.project_root,
                 Some(&lockfile.unity_path),
+                Some(&crate::paths::usg_cache_dir(&lockfile.unity_version)),
                 options.platform,
                 options.build_config,
                 &static_defines,
@@ -627,6 +628,7 @@ fn collect_references_block(
 pub fn render_directory_build_props(
     project_root: &str,
     unity_path: Option<&str>,
+    usg_cache: Option<&str>,
     platform: BuildPlatform,
     build_config: BuildConfig,
     static_defines: &[String],
@@ -647,6 +649,9 @@ pub fn render_directory_build_props(
     );
     if let Some(up) = unity_path {
         props.push_str(&format!("<UnityPath>{}</UnityPath>\n", up));
+    }
+    if let Some(uc) = usg_cache {
+        props.push_str(&format!("<UsgCache>{}</UsgCache>\n", uc));
     }
     props.push_str(&format!(
         "<DefineConstants>$(DefineConstants);{}</DefineConstants>\n</PropertyGroup>\n</Project>\n",

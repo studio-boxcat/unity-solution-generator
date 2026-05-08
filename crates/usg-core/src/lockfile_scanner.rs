@@ -16,6 +16,15 @@ use crate::project_scanner::parse_version_defines;
 
 pub struct LockfileScanner;
 
+/// Package names skipped by every project-side walk (lockfile_scanner +
+/// project_scanner). HotReload's asmrefs merge its sources into
+/// `UnityEditor.Purchasing`, but its internal types (`SingularityGroup.HotReload.DTO`,
+/// `EditorDependencies`, `Newtonsoft`) live in DLLs that ship as four parallel
+/// `RuntimeDependencies*.dll` variants. Unity picks one at runtime based on
+/// editor version; csc loading all of them produces duplicate-type noise.
+/// Treating the package as opaque is cheaper than modeling the variant pick.
+pub(crate) const BLACKLISTED_PACKAGE_DIRS: &[&str] = &["com.singularitygroup.hotreload"];
+
 /// Output of [`LockfileScanner::scan_with_artifacts`]: the lockfile plus the
 /// concrete `.dll`/`.asmdef` paths that contributed to it. The caller (lock-cache)
 /// uses the path list to build a fingerprint of contributing directories.
@@ -24,6 +33,10 @@ pub struct ScannedLockfile {
     /// Paths relative to `project_root`, of every project-side `.dll` and `.asmdef`
     /// that the scan ingested.
     pub contributing_paths_relative: Vec<String>,
+    /// Absolute paths outside `project_root` that the scan ingested (Unity
+    /// `BuiltInPackages/`, the per-user tarball-extract cache). Watched by
+    /// `lock-fingerprint` so post-Unity-install changes invalidate the lockfile.
+    pub contributing_external_absolute: Vec<String>,
 }
 
 impl LockfileScanner {
@@ -122,10 +135,14 @@ impl LockfileScanner {
         let mut seen_analyzers: BTreeSet<String> = BTreeSet::new();
         let mut asmdef_paths: Vec<String> = Vec::new();
         let mut contributing: Vec<String> = Vec::new();
+        let mut contributing_external: Vec<String> = Vec::new();
         for root in ["Assets", "Packages", "Library/PackageCache"] {
             let root_dir = join_path(project_root, root);
             let hits = parallel_walk_dlls_and_asmdefs(&root_dir, project_root);
             for (rel, file_name) in hits {
+                if is_blacklisted_path(&rel) {
+                    continue;
+                }
                 contributing.push(rel.clone());
                 if file_name.ends_with(".dll") {
                     let name = &file_name[..file_name.len() - 4];
@@ -141,6 +158,77 @@ impl LockfileScanner {
                     asmdef_paths.push(join_path(project_root, &rel));
                 }
             }
+        }
+
+        // Targeted fallback for packages that `Library/PackageCache/` doesn't
+        // cover — typically a fresh worktree where Unity hasn't run yet, so
+        // registry/builtin packages haven't been resolved into the per-project
+        // cache. We read `packages-lock.json` to find what *should* be there;
+        // for each gap we look up the package in `BuiltInPackages/` (already
+        // extracted, lives in the Unity install) or extract from
+        // `PackageManager/Editor/<name>-<version>.tgz` into a per-user cache.
+        // Walking those sources in bulk would drown the cold-lock path
+        // (~28 s on meow-tower); the missing-package set is usually empty in
+        // practice, so the gated approach reverts to the original ~30 ms.
+        let missing_packages = compute_missing_packages(project_root);
+        if !missing_packages.is_empty() {
+            tracing::info!(
+                "lockfile_scanner: {} package(s) missing from PackageCache; falling back to BuiltInPackages + tgz extract",
+                missing_packages.len()
+            );
+        }
+        // Each fallback source roots its walk at the per-package directory and
+        // emits ref paths using a single placeholder + prefix. Keeping `rel`
+        // relative to the package dir (not the install/cache root) means the
+        // emitted ref looks like `$(VAR)/<package-prefix>/<rel>` regardless of
+        // source — no asymmetry between BuiltInPackages and the tgz cache.
+        let mut ingest = |pkg_dir: &str, ref_prefix: &str| {
+            contributing_external.push(pkg_dir.to_string());
+            for (rel, file_name) in parallel_walk_dlls_and_asmdefs(pkg_dir, pkg_dir) {
+                if file_name.ends_with(".dll") {
+                    let name = &file_name[..file_name.len() - 4];
+                    let path = format!("{}/{}", ref_prefix, rel);
+                    if is_analyzer_dll(name) {
+                        if seen_analyzers.insert(name.to_string()) {
+                            analyzers.push(path);
+                        }
+                    } else if seen_project_dlls.insert(name.to_string()) {
+                        project_refs.push(DllRef::new(name, path));
+                    }
+                } else {
+                    asmdef_paths.push(format!("{}/{}", pkg_dir, rel));
+                }
+            }
+        };
+        for entry in &missing_packages {
+            if BLACKLISTED_PACKAGE_DIRS.contains(&entry.name.as_str()) {
+                continue;
+            }
+            let builtin = format!(
+                "{}/Unity.app/Contents/Resources/PackageManager/BuiltInPackages/{}",
+                unity_path, entry.name
+            );
+            if Path::new(&builtin).exists() {
+                let prefix = format!(
+                    "$(UnityPath)/Unity.app/Contents/Resources/PackageManager/BuiltInPackages/{}",
+                    entry.name
+                );
+                ingest(&builtin, &prefix);
+                continue;
+            }
+            let Some(extract_root) = crate::package_cache::ensure_extracted_for_package(
+                &unity_path,
+                &version,
+                &entry.name,
+            ) else {
+                tracing::warn!(
+                    "lockfile_scanner: package '{}' missing from PackageCache, BuiltInPackages, and Editor/*.tgz",
+                    entry.name
+                );
+                continue;
+            };
+            let prefix = format!("$(UsgCache)/{}", entry.name);
+            ingest(&extract_root, &prefix);
         }
 
         analyzers.sort();
@@ -176,6 +264,7 @@ impl LockfileScanner {
         Ok(ScannedLockfile {
             lockfile,
             contributing_paths_relative: contributing,
+            contributing_external_absolute: contributing_external,
         })
     }
 }
@@ -259,14 +348,14 @@ fn walk_files(
 }
 
 /// Walk `directory` in parallel using `ignore::WalkBuilder::build_parallel` and return
-/// every file ending in `.dll` or `.asmdef`, as `(relative_to_project_root, file_name)`.
+/// every file ending in `.dll` or `.asmdef`, as `(relative_to_strip_base, file_name)`.
 /// Skips dotfiles, tilde-suffixed entries, and native-plugin directories.
-fn parallel_walk_dlls_and_asmdefs(directory: &str, project_root: &str) -> Vec<(String, String)> {
+fn parallel_walk_dlls_and_asmdefs(directory: &str, strip_base: &str) -> Vec<(String, String)> {
     if !Path::new(directory).exists() {
         return Vec::new();
     }
     // Component-aware prefix strip — see project_scanner.rs for rationale.
-    let project_root_path = Path::new(project_root);
+    let project_root_path = Path::new(strip_base);
     let mut builder = WalkBuilder::new(directory);
     builder
         .standard_filters(false)
@@ -312,6 +401,84 @@ fn parallel_walk_dlls_and_asmdefs(directory: &str, project_root: &str) -> Vec<(S
     // even though the parallel walker fans out non-deterministically per thread.
     hits.sort();
     hits
+}
+
+/// True when a relative scan path falls under a blacklisted package directory.
+/// Matches `Packages/<blacklisted>/...` or `Library/PackageCache/<blacklisted>@<hash>/...`.
+pub(crate) fn is_blacklisted_path(rel: &str) -> bool {
+    for &blacklisted in BLACKLISTED_PACKAGE_DIRS {
+        let p_prefix = format!("Packages/{}/", blacklisted);
+        if rel.starts_with(&p_prefix) || rel == p_prefix.trim_end_matches('/') {
+            return true;
+        }
+        let pc_prefix = format!("Library/PackageCache/{}@", blacklisted);
+        if rel.starts_with(&pc_prefix) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Package entry that `Library/PackageCache/` is expected to cover but doesn't.
+/// Driven by `Packages/packages-lock.json`: an entry is "expected" when its
+/// `source` is something other than `embedded`/`local` (those live under
+/// `Packages/` directly and are picked up by the project walk already).
+#[derive(Debug)]
+struct MissingPackage {
+    name: String,
+}
+
+fn compute_missing_packages(project_root: &str) -> Vec<MissingPackage> {
+    // Snapshot of currently-resolved packages by canonical name. Unity uses
+    // `<name>@<hash>` for PackageCache directories; we strip the suffix.
+    let pc_dir = join_path(project_root, "Library/PackageCache");
+    let mut resolved: BTreeSet<String> = BTreeSet::new();
+    for entry in list_directory(&pc_dir) {
+        let name = match entry.find('@') {
+            Some(i) => entry[..i].to_string(),
+            None => entry,
+        };
+        resolved.insert(name);
+    }
+
+    let lock_path = join_path(project_root, "Packages/packages-lock.json");
+    let Ok(content) = read_file(&lock_path) else {
+        return Vec::new();
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "lockfile_scanner: malformed packages-lock.json ({}); skipping missing-package fallback",
+                e
+            );
+            return Vec::new();
+        }
+    };
+    let Some(deps) = v.get("dependencies").and_then(|x| x.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut missing = Vec::new();
+    for (name, meta) in deps {
+        let source = meta
+            .get("source")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        // `embedded` lives in `Packages/<name>/`; `local` is a `file:` path —
+        // both are scanned by the project walk. Everything else (registry,
+        // builtin, git) lands in `Library/PackageCache/` after Unity resolves.
+        if matches!(source, "embedded" | "local") {
+            continue;
+        }
+        if resolved.contains(name) {
+            continue;
+        }
+        missing.push(MissingPackage {
+            name: name.clone(),
+        });
+    }
+    missing
 }
 
 fn is_native_plugin_dir(name: &str) -> bool {
