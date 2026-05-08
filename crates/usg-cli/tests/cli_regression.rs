@@ -146,26 +146,5 @@ fn generate_auto_runs_lock_when_lockfile_missing() {
     }
 }
 
-#[test]
-fn lock_init_alias_still_works() {
-    // Pinned: `init` is a deprecated alias for `lock`. The architecture overhaul
-    // plans to remove it in checkpoint 2 (trim surface). This test will then be
-    // deleted in the same commit. Until then, removing this alias would be a
-    // silent breaking change.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    write(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n");
-
-    let out = Command::new(bin())
-        .args(["init", root.to_str().unwrap()])
-        .output()
-        .expect("spawn");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // Doesn't have to succeed (no Unity install in test env), but must not say
-    // "unknown command" — that would mean the alias is gone.
-    assert!(
-        !stderr.to_lowercase().contains("unknown command"),
-        "'init' alias appears to be removed; if intentional, delete this test: {}",
-        stderr
-    );
-}
+// `init` deprecated alias dropped in this checkpoint along with the test that
+// pinned it. `lock` is the only canonical name now.

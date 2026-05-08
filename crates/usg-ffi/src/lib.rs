@@ -47,11 +47,11 @@ unsafe fn cstr_to_str<'a>(p: &'a *const c_char) -> Option<&'a str> {
 }
 
 /// Generate `.csproj`/`.sln` files from an existing lockfile.
-/// Auto-runs `usg_lock` if no lockfile exists.
+/// Auto-runs the equivalent of `unity-solution-generator lock` if no lockfile exists.
 ///
 /// # Safety
 /// All `*const c_char` arguments must be valid NUL-terminated UTF-8 (or null where allowed).
-/// `slnPathOut`, when non-null, must point to a writable buffer of at least `slnPathOutLen` bytes.
+/// Single-threaded contract — caller must serialize calls (cache files aren't reentrant-safe).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn usg_generate(
     project_root: *const c_char,
@@ -59,8 +59,6 @@ pub unsafe extern "C" fn usg_generate(
     config: *const c_char,
     output_dir: *const c_char,
     extra_refs: *const c_char,
-    sln_path_out: *mut c_char,
-    sln_path_out_len: c_int,
 ) -> c_int {
     clear_last_error();
 
@@ -110,62 +108,11 @@ pub unsafe extern "C" fn usg_generate(
             return 1;
         }
     };
-    let result = match SolutionGenerator::new().generate_from_lockfile(&options, &lockfile) {
-        Ok(r) => r,
-        Err(e) => {
-            set_last_error(format!("{}", e));
-            return 1;
-        }
-    };
-
-    if !sln_path_out.is_null() {
-        // C# `int` is signed; a negative value here would sign-extend to a huge
-        // `usize` and bypass the bounds check, allowing an OOB write into the
-        // caller's buffer. Reject up front.
-        if sln_path_out_len <= 0 {
-            set_last_error(format!(
-                "Invalid slnPathOutLen ({}); must be > 0",
-                sln_path_out_len
-            ));
-            return 1;
-        }
-        let path = result.variant_sln_path.as_bytes();
-        let cap = sln_path_out_len as usize;
-        if path.len() + 1 > cap {
-            set_last_error(format!(
-                "Buffer too small ({} bytes) for path ({} needed)",
-                cap,
-                path.len() + 1
-            ));
-            return 1;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(path.as_ptr(), sln_path_out as *mut u8, path.len());
-            *sln_path_out.add(path.len()) = 0;
-        }
+    if let Err(e) = SolutionGenerator::new().generate_from_lockfile(&options, &lockfile) {
+        set_last_error(format!("{}", e));
+        return 1;
     }
     0
-}
-
-/// Scan Unity installation + project and write `csproj.lock`.
-///
-/// # Safety
-/// `projectRoot` must be a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn usg_lock(project_root: *const c_char) -> c_int {
-    clear_last_error();
-    let Some(s) = (unsafe { cstr_to_str(&project_root) }) else {
-        set_last_error("Invalid UTF-8 in projectRoot");
-        return 1;
-    };
-    let resolved = resolve_project_root(s);
-    match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_last_error(format!("{}", e));
-            1
-        }
-    }
 }
 
 /// Returns the last error message, or NULL if no error.

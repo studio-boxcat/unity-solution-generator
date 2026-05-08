@@ -18,20 +18,12 @@ fn main() -> ExitCode {
             args.remove(0);
             run_lock(&args)
         }
-        Some("init") => {
-            args.remove(0);
-            eprintln!("warning: 'init' is deprecated, use 'lock' instead.");
-            run_lock(&args)
-        }
         Some("generate") => {
             args.remove(0);
             run_generate(&args)
         }
         Some(other) => {
-            die(&format!(
-                "Unknown command '{}'. Use 'lock', 'generate', or 'init'.",
-                other
-            ));
+            die(&format!("Unknown command '{}'. Use 'lock' or 'generate'.", other));
         }
         None => unreachable!(),
     }
@@ -86,21 +78,10 @@ fn run_generate(args: &[String]) -> ExitCode {
         ));
     };
 
-    let mut verbose = false;
-    let mut output_dir: Option<String> = None;
     let mut extra_refs_raw: Option<String> = None;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
-            "-v" | "--verbose" => verbose = true,
-            "--root" => output_dir = Some(".".to_string()),
-            "-o" | "--output" => {
-                i += 1;
-                if i >= args.len() {
-                    die("--output requires a directory argument");
-                }
-                output_dir = Some(args[i].clone());
-            }
             "--extra-refs" => {
                 i += 1;
                 if i >= args.len() {
@@ -120,8 +101,6 @@ fn run_generate(args: &[String]) -> ExitCode {
         .unwrap_or_default();
     let options = GenerateOptions::new(resolved.clone(), platform)
         .with_build_config(build_config)
-        .with_verbose(verbose)
-        .with_output_dir(output_dir.as_deref())
         .with_extra_refs(extra_refs);
 
     // Lockfile is the only supported input now. If absent, scan-and-write it
@@ -204,7 +183,6 @@ fn print_usage() {
 COMMANDS:
   lock                  Scan Unity installation and project to generate csproj.lock
   generate              Regenerate .csproj/.sln for a platform+config variant
-  init                  (deprecated) Alias for lock
 
 ARGUMENTS:
   unity-root            Unity project root
@@ -212,10 +190,7 @@ ARGUMENTS:
   config                prod | dev | editor
 
 OPTIONS:
-  -o, --output <dir>    Output to <dir> (relative to project root) instead of variant dir
-  --root                Alias for --output . (output to project root)
   --extra-refs <paths>  Comma-separated absolute paths to additional DLLs
-  -v, --verbose         Print unresolved directory samples
   -h, --help            Show help"
     );
 }
