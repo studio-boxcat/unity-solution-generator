@@ -19,6 +19,12 @@ Bypass MSBuild entirely on the warm path for an even lower floor (~50–150 ms v
 
 **Why not now:** bigger change (new subcommand + dep-graph walking in Rust); the current default (no-emit) already wins 2× over `--emit` and unblocks the meow-tower Hot-Reload pre-flight workflow.
 
+**Why DIY in Rust over Ninja/Bazel** (researched separately):
+- **Ninja** would save ~100 LOC (topo-sort + parallel scheduler) but adds a binary dep; `usg-core` already has lockfile + scan-cache + nanosecond-mtime infra to do UTD itself. Reasonable plan B if the DAG walker turns out non-trivial.
+- **Bazel `rules_dotnet`** is slower on no-op for our scale (200–500ms startup) and the Roslyn persistent-worker support is only mature in [AFASResearch's fork](https://github.com/AFASResearch/rules_dotnet). Wrong scale.
+- **Strong precedent:** Unity's own [Bee](https://aras-p.info/blog/2019/06/21/Replacing-a-live-system-is-really-hard/) is exactly this pattern (custom DAG scheduler driving csc directly, cache in `Library/Bee/`). They chose not to wrap Ninja.
+- **Risk to avoid up front:** never write anything into the output `.dll`'s directory besides the `.dll` itself, or DIY UTD will misfire the same way MSBuild's `obj/.../CoreCompileInputs.cache` does today.
+
 ### Other rejected/closed during no-emit wiring
 
 - `-t:CoreCompile` (alone) — broke `ResolveProjectReferences`, downstream csprojs lose refs to upstream. Has to be `-t:Build` with property-level skips.
