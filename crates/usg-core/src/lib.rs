@@ -44,4 +44,5 @@ pub use typecheck::{TypecheckOptions, TypecheckResult};
 #[doc(hidden)]
 pub mod __test_only {
     pub use crate::lock_cache::{build_entries, is_valid};
+    pub use crate::typecheck::__test_only_build_rsp as build_rsp;
 }

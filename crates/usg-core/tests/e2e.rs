@@ -468,3 +468,39 @@ fn lock_fingerprint_short_circuits_rescan() {
     assert!(!usg_core::__test_only::is_valid(&entries));
 }
 
+
+/// Regression: typecheck must surface method-body diagnostics (CS1503 etc.).
+///
+/// `csc /refonly` emits a reference assembly and — empirically, in the .NET 8
+/// SDK's Roslyn build (4.10.x) — silently skips body-binding diagnostics when
+/// the bodies don't affect the public API surface. That includes CS1503
+/// "cannot convert" at call sites, which Unity Editor's full compile catches.
+/// Hit on the meow-tower `orgel-fix` branch: USG typecheck reported `ok` while
+/// Unity flagged `Argument 4: cannot convert from 'GameDate?' to 'OrgelDate?'`.
+///
+/// Structural test: `/refonly` must not be passed to csc. `/deterministic`
+/// must remain so the cascade-skip mtime-restore trick still works.
+#[test]
+fn rsp_has_no_refonly() {
+    use std::path::PathBuf;
+    let rsp = usg_core::__test_only::build_rsp(
+        "9.0",
+        &[],
+        &[],
+        &[],
+        &[],
+        &[PathBuf::from("/tmp/A.cs")],
+        "/tmp/out.dll",
+        false,
+    );
+    assert!(
+        !rsp.lines().any(|l| l.trim() == "/refonly"),
+        "rsp must not contain /refonly — it suppresses csc body diagnostics. rsp:\n{}",
+        rsp
+    );
+    assert!(
+        rsp.lines().any(|l| l.trim() == "/deterministic"),
+        "rsp must keep /deterministic for cascade-skip stability. rsp:\n{}",
+        rsp
+    );
+}

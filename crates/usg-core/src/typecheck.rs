@@ -92,12 +92,15 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
 
     let common_defines = collect_defines(&lockfile, opts.platform, opts.build_config);
     let common_refs = collect_refs(&lockfile, opts.platform, opts.build_config, &opts.extra_refs);
-    // Resolve MSBuild-style properties (`$(UnityPath)`, `$(ProjectRoot)`)
-    // in lockfile paths now — MSBuild does this at eval time but `csc.dll`
-    // doesn't recognize MSBuild property syntax. Applies to refs AND analyzers.
+    // Resolve MSBuild-style properties (`$(UnityPath)`, `$(ProjectRoot)`,
+    // `$(UsgCache)`) in lockfile paths now — MSBuild does this at eval time
+    // but `csc.dll` doesn't recognize MSBuild property syntax. Applies to
+    // refs AND analyzers.
+    let usg_cache = crate::paths::usg_cache_dir(&lockfile.unity_version);
     let resolve = |s: &str| -> String {
         s.replace("$(UnityPath)", &lockfile.unity_path)
             .replace("$(ProjectRoot)", &root)
+            .replace("$(UsgCache)", &usg_cache)
     };
     let common_refs: Vec<DllRef> = common_refs
         .into_iter()
@@ -512,23 +515,55 @@ fn is_up_to_date(
 // ── csc invocation ────────────────────────────────────────────────────────
 
 fn find_csc_dll() -> Option<String> {
-    // Reads `dotnet --list-sdks` output: "8.0.303 [/usr/local/share/dotnet/sdk]"
-    // → /usr/local/share/dotnet/sdk/8.0.303/Roslyn/bincore/csc.dll. Picks the
-    // last (newest) line. Skips bracket parsing if format changes.
+    // Parse `dotnet --list-sdks` output: "8.0.303 [/usr/local/share/dotnet/sdk]"
+    // → /usr/local/share/dotnet/sdk/8.0.303/Roslyn/bincore/csc.dll. Pick the
+    // highest semver — `dotnet`'s own sort order isn't contractually
+    // ascending, and a future 9.0/10.0 should win even if listed first.
     let out = Command::new("dotnet").arg("--list-sdks").output().ok()?;
     if !out.status.success() {
         return None;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let last = stdout.lines().filter(|l| !l.trim().is_empty()).next_back()?;
-    let (version, rest) = last.split_once(' ')?;
-    let base = rest.trim().trim_start_matches('[').trim_end_matches(']');
-    let path = format!("{}/{}/Roslyn/bincore/csc.dll", base, version);
+    let parse_semver = |s: &str| -> (u32, u32, u32) {
+        let mut parts = s.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    };
+    let best = stdout
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            if l.is_empty() {
+                return None;
+            }
+            let (version, rest) = l.split_once(' ')?;
+            let base = rest.trim().trim_start_matches('[').trim_end_matches(']');
+            Some((parse_semver(version), version.to_string(), base.to_string()))
+        })
+        .max_by_key(|t| t.0)?;
+    let path = format!("{}/{}/Roslyn/bincore/csc.dll", best.2, best.1);
     if Path::new(&path).exists() {
         Some(path)
     } else {
         None
     }
+}
+
+#[doc(hidden)]
+pub fn __test_only_build_rsp(
+    lang_version: &str,
+    defines: &[String],
+    refs: &[DllRef],
+    proj_refs: &[PathBuf],
+    analyzers: &[String],
+    sources: &[PathBuf],
+    out_dll: &str,
+    allow_unsafe: bool,
+) -> String {
+    build_rsp(lang_version, defines, refs, proj_refs, analyzers, sources, out_dll, allow_unsafe)
 }
 
 fn build_rsp(
@@ -546,7 +581,12 @@ fn build_rsp(
     let mut s = String::new();
     s.push_str("/nostdlib+\n");
     s.push_str("/target:library\n");
-    s.push_str("/refonly\n"); // metadata-only assembly — same as generate's no-emit mode
+    // Intentionally NOT `/refonly` — under .NET 8 SDK csc (4.10.x) it silently
+    // skips body-binding diagnostics that don't affect the reference-assembly
+    // surface, e.g. CS1503 at call sites. Hit on meow-tower `orgel-fix`:
+    // USG reported `ok` while Unity Editor flagged a real type mismatch. We
+    // emit a full library; `/deterministic` keeps output byte-identical for
+    // unchanged inputs so the mtime-restore cascade-skip trick still works.
     s.push_str("/deterministic\n");
     s.push_str(&format!("/langversion:{}\n", lang_version));
     s.push_str(&format!("/out:{}\n", out_dll));
@@ -591,8 +631,33 @@ fn invoke_csc(csc_dll: &str, rsp_path: &str) -> std::result::Result<(), String> 
     } else {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(format!("{}{}", stdout, stderr))
+        Err(filter_diagnostics(&format!("{}{}", stdout, stderr)))
     }
+}
+
+/// Strip `warning CS####` and `info CS####` / `info USG####` lines from csc
+/// output. Typecheck is for errors only; warnings repeat across assemblies
+/// that share sources via asmref (e.g. `com.boxcat.libs` pulled into half a
+/// dozen projects), and they're not actionable from the typecheck path.
+/// Errors and the csc banner pass through untouched.
+fn filter_diagnostics(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        // csc diagnostics: `<path>(L,C): <severity> <CODE>: <text>` or
+        // `<severity> <CODE>: <text>` for tool-level info. Drop everything
+        // except errors. Includes `info SP####` from DiagnosticSuppressor,
+        // `info USG####` (Unity), `warning CS####`, etc.
+        if line.contains(": warning ") || line.contains(": info ") {
+            continue;
+        }
+        let t = line.trim_start();
+        if t.starts_with("warning ") || t.starts_with("info ") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// True if `path` is a managed-code (CLI) PE binary. Reads enough of the PE
@@ -607,11 +672,29 @@ fn invoke_csc(csc_dll: &str, rsp_path: &str) -> std::result::Result<(), String> 
 /// <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format>
 fn is_managed_dll(path: &Path) -> bool {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                "is_managed_dll: cannot open {} — dropping ref ({})",
+                path.display(),
+                e
+            );
+            return false;
+        }
     };
     let mut buf = [0u8; 1024];
-    let Ok(n) = f.read(&mut buf) else { return false };
+    let n = match f.read(&mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(
+                "is_managed_dll: read failed for {} — dropping ref ({})",
+                path.display(),
+                e
+            );
+            return false;
+        }
+    };
     if n < 0x40 {
         return false;
     }
