@@ -16,15 +16,6 @@ use crate::project_scanner::parse_version_defines;
 
 pub struct LockfileScanner;
 
-/// Package names skipped by every project-side walk (lockfile_scanner +
-/// project_scanner). HotReload's asmrefs merge its sources into
-/// `UnityEditor.Purchasing`, but its internal types (`SingularityGroup.HotReload.DTO`,
-/// `EditorDependencies`, `Newtonsoft`) live in DLLs that ship as four parallel
-/// `RuntimeDependencies*.dll` variants. Unity picks one at runtime based on
-/// editor version; csc loading all of them produces duplicate-type noise.
-/// Treating the package as opaque is cheaper than modeling the variant pick.
-pub(crate) const BLACKLISTED_PACKAGE_DIRS: &[&str] = &["com.singularitygroup.hotreload"];
-
 /// Output of [`LockfileScanner::scan_with_artifacts`]: the lockfile plus the
 /// concrete `.dll`/`.asmdef` paths that contributed to it. The caller (lock-cache)
 /// uses the path list to build a fingerprint of contributing directories.
@@ -140,9 +131,6 @@ impl LockfileScanner {
             let root_dir = join_path(project_root, root);
             let hits = parallel_walk_dlls_and_asmdefs(&root_dir, project_root);
             for (rel, file_name) in hits {
-                if is_blacklisted_path(&rel) {
-                    continue;
-                }
                 contributing.push(rel.clone());
                 if file_name.ends_with(".dll") {
                     let name = &file_name[..file_name.len() - 4];
@@ -201,9 +189,6 @@ impl LockfileScanner {
             }
         };
         for entry in &missing_packages {
-            if BLACKLISTED_PACKAGE_DIRS.contains(&entry.name.as_str()) {
-                continue;
-            }
             let builtin = format!(
                 "{}/Unity.app/Contents/Resources/PackageManager/BuiltInPackages/{}",
                 unity_path, entry.name
@@ -401,22 +386,6 @@ fn parallel_walk_dlls_and_asmdefs(directory: &str, strip_base: &str) -> Vec<(Str
     // even though the parallel walker fans out non-deterministically per thread.
     hits.sort();
     hits
-}
-
-/// True when a relative scan path falls under a blacklisted package directory.
-/// Matches `Packages/<blacklisted>/...` or `Library/PackageCache/<blacklisted>@<hash>/...`.
-pub(crate) fn is_blacklisted_path(rel: &str) -> bool {
-    for &blacklisted in BLACKLISTED_PACKAGE_DIRS {
-        let p_prefix = format!("Packages/{}/", blacklisted);
-        if rel.starts_with(&p_prefix) || rel == p_prefix.trim_end_matches('/') {
-            return true;
-        }
-        let pc_prefix = format!("Library/PackageCache/{}@", blacklisted);
-        if rel.starts_with(&pc_prefix) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Package entry that `Library/PackageCache/` is expected to cover but doesn't.

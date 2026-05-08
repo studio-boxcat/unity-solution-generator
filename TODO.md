@@ -2,12 +2,6 @@
 
 ## Deferred
 
-### Configurable package blacklist (`lockfile_scanner.rs:BLACKLISTED_PACKAGE_DIRS`)
-
-Currently a `&'static [&str]` hardcoded to `["com.singularitygroup.hotreload"]`. Accepted as-is for the immediate need. Future: per-project override via CLI flag (`--ignore-package <name>` repeatable) or a `.usg-config.json` at project root, since other Unity projects will hit different problem packages (asmref-merging plus version-specific DLL variants is not a HotReload-only pattern).
-
-Relatedly, the const is a primitive `&[&str]` reused across files — strong-types policy (CLAUDE.md) suggests `PackageName(&'static str)`. Low priority while the list is one entry.
-
 ### `build_rsp` argument count
 
 `typecheck.rs:build_rsp` takes 8 args (clippy `too_many_arguments`). Pre-existing; the test-only re-export emerged but didn't introduce the smell. Pack into a `BuildRspInputs` struct if a 9th arg shows up.
