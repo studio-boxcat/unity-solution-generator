@@ -30,7 +30,7 @@ unity-solution-generator lock .                             # scan + write lockf
 unity-solution-generator generate . ios editor              # default: Library/UnitySolutionGenerator/ios-editor/
 unity-solution-generator generate . ios editor \
   --extra-refs "/path/to/Extra.dll,/path/to/Other.dll"     # additional DLL references
-unity-solution-generator typecheck . ios editor             # validate compile via direct csc.dll (no MSBuild)
+unity-solution-generator typecheck .                        # compile-check (defaults: ios editor); direct csc.dll, no MSBuild
 ```
 
 Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx`. Config: `prod` | `dev` | `editor`.
@@ -57,7 +57,7 @@ Platform defines:
 
 ### Compile validation (`typecheck`)
 
-`unity-solution-generator typecheck . <platform> <config>` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Output goes to `Library/UnitySolutionGenerator/typecheck-<variant>/`; the assemblies are `csc /refonly` metadata-only stubs (not runnable — Unity does the real build).
+`unity-solution-generator typecheck .` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck . android dev` etc.). Output goes to `Library/UnitySolutionGenerator/typecheck-<variant>/`; the assemblies are `csc /refonly` metadata-only stubs (not runnable — Unity does the real build).
 
 The headline win is the warm-no-op path: ~42 ms on meow-tower (13 asmdefs) via mtime-based UTD short-circuit. Cold rebuild is ~6 s (each `dotnet exec csc.dll` cold-starts Roslyn — closing this gap requires VBCSCompiler IPC, see [[TODO.md]]). Benchmarks: [[benchmark.md]].
 

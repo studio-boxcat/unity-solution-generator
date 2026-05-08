@@ -156,25 +156,38 @@ fn run_generate(args: &[String]) -> ExitCode {
 }
 
 fn run_typecheck(args: &[String]) -> ExitCode {
-    if args.len() < 3 {
-        die("typecheck requires: <unity-root> <platform> <config> [options]");
+    if args.is_empty() {
+        die("typecheck requires: <unity-root> [<platform>] [<config>] [options]");
     }
     let project_root = &args[0];
-    let Some(platform) = BuildPlatform::parse(&args[1]) else {
-        die(&format!(
-            "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
-            args[1]
-        ));
+    // Defaults match the retired build-unity-sln driver so callers can run
+    // `unity-solution-generator typecheck .` and get the Hot Reload pre-flight
+    // check without spelling out platform/config.
+    let platform = if args.len() > 1 {
+        match BuildPlatform::parse(&args[1]) {
+            Some(p) => p,
+            None => die(&format!(
+                "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
+                args[1]
+            )),
+        }
+    } else {
+        BuildPlatform::Ios
     };
-    let Some(build_config) = BuildConfig::parse(&args[2]) else {
-        die(&format!(
-            "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
-            args[2]
-        ));
+    let build_config = if args.len() > 2 {
+        match BuildConfig::parse(&args[2]) {
+            Some(c) => c,
+            None => die(&format!(
+                "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
+                args[2]
+            )),
+        }
+    } else {
+        BuildConfig::Editor
     };
 
     let mut extra_refs_raw: Option<String> = None;
-    let mut i = 3;
+    let mut i = if args.len() > 2 { 3 } else { args.len() };
     while i < args.len() {
         match args[i].as_str() {
             "--extra-refs" => {
@@ -264,7 +277,8 @@ fn print_usage() {
         "USAGE:
   unity-solution-generator lock <unity-root>
   unity-solution-generator generate <unity-root> <platform> <config> [options]
-  unity-solution-generator typecheck <unity-root> <platform> <config> [options]
+  unity-solution-generator typecheck <unity-root> [<platform>] [<config>] [options]
+                                       defaults: platform=ios, config=editor
 
 COMMANDS:
   lock                  Scan Unity installation and project to generate csproj.lock
