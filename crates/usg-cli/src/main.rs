@@ -38,9 +38,14 @@ fn main() -> ExitCode {
 }
 
 fn run_lock(args: &[String]) -> ExitCode {
-    let Some(unity_root) = args.first() else {
-        die("lock requires: <unity-root>");
-    };
+    // <unity-root> is optional — when omitted (or bare flags like --help land
+    // here), default to "." so `resolve_project_root` climbs from CWD to the
+    // nearest ancestor with `ProjectSettings/ProjectVersion.txt`.
+    let unity_root = args
+        .first()
+        .filter(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .unwrap_or(".");
     let resolved = resolve_project_root(unity_root);
     match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
         Ok(lockfile) => {
@@ -69,25 +74,26 @@ fn run_lock(args: &[String]) -> ExitCode {
 }
 
 fn run_generate(args: &[String]) -> ExitCode {
-    if args.len() < 3 {
-        die("generate requires: <unity-root> <platform> <config> [options]");
+    let (project_root, rest) = split_root_arg(args);
+    if rest.len() < 2 {
+        die("generate requires: [<unity-root>] <platform> <config> [options]");
     }
-    let project_root = &args[0];
-    let Some(platform) = BuildPlatform::parse(&args[1]) else {
+    let Some(platform) = BuildPlatform::parse(&rest[0]) else {
         die(&format!(
             "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
-            args[1]
+            rest[0]
         ));
     };
-    let Some(build_config) = BuildConfig::parse(&args[2]) else {
+    let Some(build_config) = BuildConfig::parse(&rest[1]) else {
         die(&format!(
             "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
-            args[2]
+            rest[1]
         ));
     };
 
     let mut extra_refs_raw: Option<String> = None;
-    let mut i = 3;
+    let mut i = 2;
+    let args = rest;
     while i < args.len() {
         match args[i].as_str() {
             "--extra-refs" => {
@@ -102,7 +108,7 @@ fn run_generate(args: &[String]) -> ExitCode {
         i += 1;
     }
 
-    let resolved = resolve_project_root(project_root);
+    let resolved = resolve_project_root(&project_root);
     let extra_refs = extra_refs_raw
         .as_deref()
         .map(DllRef::parse_list)
@@ -156,30 +162,28 @@ fn run_generate(args: &[String]) -> ExitCode {
 }
 
 fn run_typecheck(args: &[String]) -> ExitCode {
-    if args.is_empty() {
-        die("typecheck requires: <unity-root> [<platform>] [<config>] [options]");
-    }
-    let project_root = &args[0];
-    // Defaults match the retired build-unity-sln driver so callers can run
-    // `unity-solution-generator typecheck .` and get the Hot Reload pre-flight
-    // check without spelling out platform/config.
-    let platform = if args.len() > 1 {
-        match BuildPlatform::parse(&args[1]) {
+    // All positional args are optional. Defaults match the retired
+    // build-unity-sln driver: platform=ios, config=editor. With no <unity-root>
+    // (or none of the positionals), `resolve_project_root(".")` climbs from
+    // CWD to the nearest ancestor with `ProjectSettings/ProjectVersion.txt`.
+    let (project_root, rest) = split_root_arg(args);
+    let platform = if !rest.is_empty() {
+        match BuildPlatform::parse(&rest[0]) {
             Some(p) => p,
             None => die(&format!(
                 "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
-                args[1]
+                rest[0]
             )),
         }
     } else {
         BuildPlatform::Ios
     };
-    let build_config = if args.len() > 2 {
-        match BuildConfig::parse(&args[2]) {
+    let build_config = if rest.len() > 1 {
+        match BuildConfig::parse(&rest[1]) {
             Some(c) => c,
             None => die(&format!(
                 "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
-                args[2]
+                rest[1]
             )),
         }
     } else {
@@ -187,7 +191,8 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     };
 
     let mut extra_refs_raw: Option<String> = None;
-    let mut i = if args.len() > 2 { 3 } else { args.len() };
+    let args = rest;
+    let mut i = if args.len() > 1 { 2 } else { args.len() };
     while i < args.len() {
         match args[i].as_str() {
             "--extra-refs" => {
@@ -202,7 +207,7 @@ fn run_typecheck(args: &[String]) -> ExitCode {
         i += 1;
     }
 
-    let resolved = resolve_project_root(project_root);
+    let resolved = resolve_project_root(&project_root);
     let extra_refs = extra_refs_raw
         .as_deref()
         .map(DllRef::parse_list)
@@ -245,6 +250,22 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     }
 }
 
+/// Split `<unity-root>` (optional) from the remaining positional args.
+/// The first arg is treated as `<unity-root>` UNLESS it is empty, starts
+/// with `--` (a flag), or parses as a `BuildPlatform` (`ios|android|osx`)
+/// — in which case `<unity-root>` defaults to `"."` and the original args
+/// become the rest.
+fn split_root_arg(args: &[String]) -> (String, &[String]) {
+    match args.first() {
+        Some(first)
+            if !first.starts_with("--") && BuildPlatform::parse(first).is_none() =>
+        {
+            (first.clone(), &args[1..])
+        }
+        _ => (".".to_string(), args),
+    }
+}
+
 fn die(msg: &str) -> ! {
     eprintln!("error: {}", msg);
     std::process::exit(1);
@@ -275,10 +296,13 @@ fn init_tracing() {
 fn print_usage() {
     println!(
         "USAGE:
-  unity-solution-generator lock <unity-root>
-  unity-solution-generator generate <unity-root> <platform> <config> [options]
-  unity-solution-generator typecheck <unity-root> [<platform>] [<config>] [options]
-                                       defaults: platform=ios, config=editor
+  unity-solution-generator lock      [<unity-root>]
+  unity-solution-generator generate  [<unity-root>] <platform> <config> [options]
+  unity-solution-generator typecheck [<unity-root>] [<platform>] [<config>] [options]
+
+  When <unity-root> is omitted, climbs from the current directory to the
+  nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
+  `typecheck` also defaults platform=ios, config=editor.
 
 COMMANDS:
   lock                  Scan Unity installation and project to generate csproj.lock
@@ -288,7 +312,7 @@ COMMANDS:
                         meow-tower's justfile.
 
 ARGUMENTS:
-  unity-root            Unity project root
+  unity-root            Unity project root (defaults to climbing from CWD)
   platform              ios | android | osx
   config                prod | dev | editor
 
