@@ -1,4 +1,8 @@
 //! Test fixture helpers — port of `SolutionGeneratorTests` setup helpers.
+//! `#![allow(dead_code)]` because each `tests/*.rs` is a separate compile unit
+//! and any unused helper produces a per-binary warning. Tests as a whole use
+//! all of these.
+#![allow(dead_code)]
 
 use std::collections::BTreeSet;
 use std::fs;
