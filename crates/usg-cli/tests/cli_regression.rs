@@ -1,10 +1,9 @@
 //! CLI binary surface regression tests. These pin invariants the architecture
 //! overhaul (see [[architecture.md]]) must preserve:
 //!
-//! - **stdout = sln path** on `generate` success — `build-unity-sln.sh:163`
-//!   captures it and `meow-tower/justfile:105` chains on it.
-//! - **exit codes** — 0 on success, non-zero on failure (build-unity-sln
-//!   relies on these).
+//! - **stdout = sln path** on `generate` success — used as
+//!   `dotnet build "$(unity-solution-generator generate ...)"` in scripts.
+//! - **exit codes** — 0 on success, non-zero on failure (consumers rely on these).
 //! - **lockfile auto-creation** — Rider's FFI calls `usg_generate` without
 //!   running `lock` first; the same shape must work via the CLI path too.
 //! - **`--help` exits 0** — keeps `dotnet build`-style scripting safe.
@@ -62,7 +61,7 @@ fn unknown_subcommand_exits_nonzero() {
 }
 
 /// Pinned: `generate` writes the sln path on stdout.
-/// `build-unity-sln.sh` parses this output as the path it then feeds to dotnet.
+/// Consumers script `dotnet build "$(unity-solution-generator generate ...)"`.
 #[test]
 fn generate_emits_sln_path_to_stdout() {
     let tmp = fixture();

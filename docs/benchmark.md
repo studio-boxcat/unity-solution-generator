@@ -61,30 +61,28 @@ lockfile_io/read                        14.1 µs
 
 Run via `just bench` (all) or `just bench scan` (filter).
 
-## `build-unity-sln`: default vs `--emit`
+## `typecheck` vs the previous MSBuild driver
 
-The default mode skips work irrelevant to "does it compile?": Roslyn emits a metadata-only ref assembly (no IL, no method bodies), pdb generation off, all analyzers off, post-compile copy targets pruned, MSBuild Server (`DOTNET_CLI_USE_MSBUILD_SERVER=1`) persists across calls. Switches `dotnet build` → `dotnet msbuild` to skip the restore wrapper. Drops `-graph` (eval overhead outweighs scheduling gain when most projects are no-op).
-
-`--emit` opts into a full build (runnable IL, analyzers on, pdb generated).
+`unity-solution-generator typecheck` invokes `csc.dll` directly per asmdef, with mtime-based UTD short-circuit. No MSBuild involved. The previous driver (`build-unity-sln.sh`) wrapped `dotnet msbuild` with a stack of RAR-optimization flags + MSBuild Server + ref-only-assembly tricks; it was retired once `typecheck` cleared the Unity-quirk filtering bar.
 
 Benchmarks on meow-tower (13 asm, ~5k .cs):
 
-| Scenario | `--emit` (full) | default (no-emit) | Speedup |
+| Scenario | `build-unity-sln` (no-emit) | `usg typecheck` | Δ |
 |---|---|---|---|
-| Clean rebuild | 3.13 s | 1.47 s | **2.13×** |
-| Touch + rebuild | 2.36 s | 1.01 s | **2.33×** |
-| Warm no-op | 0.75 s | 0.46 s | **1.64×** |
+| Warm no-op | 460 ms | **42 ms** | **10.7× faster** |
+| Touch + rebuild | 2.22 s | 2.99 s | 1.35× slower |
+| Cold rebuild | 1.47 s | 6.6 s | ~4.5× slower |
 
-Reproduce: `hyperfine 'build-unity-sln --emit ios editor' 'build-unity-sln ios editor'` from a Unity project root, after a warm-up build of each.
+Reproduce: `hyperfine 'unity-solution-generator typecheck . ios editor'` from a Unity project root.
 
-### Edge-case pitfalls
+The headline win is the warm-no-op path — what Hot Reload pre-flight hits constantly. Touch+rebuild and cold rebuild are slower because:
 
-- Some emit-time-only diagnostics (rare; mostly migrated to bind/flow analysis in modern Roslyn) won't fire. Do one `--emit` build after major SDK bumps to confirm parity.
-- Source generators **still run** — Roslyn has no first-class skip-generator knob ([dotnet/roslyn#56113](https://github.com/dotnet/roslyn/issues/56113)).
+- **Touch+rebuild cascades**: csc with `/refonly /deterministic` produces identical bytes for unchanged inputs, but the `.dll` mtime advances on each compile, so a touched `.cs` in upstream X cascades into rebuilds of all downstream projects. Fix queued in [[TODO.md]] (content-hash UTD).
+- **Cold rebuild**: each `dotnet exec csc.dll` cold-starts Roslyn (~390 ms JIT + load × 9 projects). Fix queued in [[TODO.md]] (VBCSCompiler `/shared` IPC).
 
-### Why warm no-op is still ~460 ms
+### Why MSBuild's warm-no-op floor is 460 ms
 
-MSBuild's up-to-date check fails for our setup — `obj/Debug/<proj>.csproj.CoreCompileInputs.cache` is rewritten on every invocation with the same-second mtime as the `.dll`, so MSBuild re-invokes `csc` on all 9 projects every time. PerformanceSummary on a warm meow-tower run shows `Csc 9 calls 1168 ms` cumulative ≈ ~500 ms wall-clock with parallelism. The MSBuild Server, RAR optimizations, and analyzer-skip flags all contribute, but the floor is csc itself running unconditionally. Going below ~460 ms requires bypassing MSBuild — see the deferred direct-`csc /shared` path in [[TODO.md]].
+For posterity: MSBuild's up-to-date check failed for our setup — `obj/Debug/<proj>.csproj.CoreCompileInputs.cache` was rewritten on every invocation with the same-second mtime as the `.dll`, so MSBuild re-invoked `csc` on all 9 projects every time. PerformanceSummary on a warm meow-tower run showed `Csc 9 calls 1168 ms` cumulative ≈ ~500 ms wall-clock with parallelism. The MSBuild Server, RAR optimizations, and analyzer-skip flags all contributed, but the floor was csc itself running unconditionally. Bypassing MSBuild was the only way to drop below it.
 
 ## Caching layers
 

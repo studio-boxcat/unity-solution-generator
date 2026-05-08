@@ -5,7 +5,7 @@
 //! - **Deterministic GUID byte-equality** — protects `<ProjectGuid>` and `.sln`
 //!   wiring from accidental hash changes.
 //! - **CLI binary surface** — exit codes + stdout shape (parsed by
-//!   `build-unity-sln.sh` and meow-tower's justfile).
+//!   meow-tower's justfile).
 //! - **Lockfile auto-creation on `generate`** — Rider's FFI relies on this.
 //! - **Multi-asmdef variant filtering** — the audit-recommended fixture covers
 //!   Runtime / Editor / Tests / iOS-only branches in one synthetic project.

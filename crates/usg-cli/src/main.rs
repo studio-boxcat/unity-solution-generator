@@ -270,8 +270,8 @@ COMMANDS:
   lock                  Scan Unity installation and project to generate csproj.lock
   generate              Regenerate .csproj/.sln for a platform+config variant
   typecheck             Validate compile via direct csc.dll invocation
-                        (no MSBuild). Replaces build-unity-sln for Hot Reload
-                        pre-flight workflows.
+                        (no MSBuild). Used by Hot Reload pre-flight in
+                        meow-tower's justfile.
 
 ARGUMENTS:
   unity-root            Unity project root

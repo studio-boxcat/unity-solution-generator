@@ -22,7 +22,6 @@ just profile                  # benchmark against meow-tower
 - `unity-solution-generator` — CLI binary
 - `libUnitySolutionGenerator.dylib` — dynamic library (C ABI via `#[unsafe(no_mangle)] extern "C"`)
 - `UnitySolutionGenerator.h` — C header for the dylib (hand-maintained)
-- `build-unity-sln.sh` — build script wrapping generate + dotnet build
 
 ## CLI
 
@@ -31,7 +30,7 @@ unity-solution-generator lock .                             # scan + write lockf
 unity-solution-generator generate . ios editor              # default: Library/UnitySolutionGenerator/ios-editor/
 unity-solution-generator generate . ios editor \
   --extra-refs "/path/to/Extra.dll,/path/to/Other.dll"     # additional DLL references
-unity-solution-generator typecheck . ios editor             # validate compile via direct csc (partial — see TODO)
+unity-solution-generator typecheck . ios editor             # validate compile via direct csc.dll (no MSBuild)
 ```
 
 Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx`. Config: `prod` | `dev` | `editor`.
@@ -56,29 +55,13 @@ Platform defines:
 | `android` | `UNITY_ANDROID` |
 | `osx` | `UNITY_STANDALONE;UNITY_STANDALONE_OSX` |
 
-### Build validation
+### Compile validation (`typecheck`)
 
-`build-unity-sln` wraps generate + `dotnet build`. Auto-retries with fresh lock on build failure. Defaults: platform=`ios`, config=`editor`.
+`unity-solution-generator typecheck . <platform> <config>` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Output goes to `Library/UnitySolutionGenerator/typecheck-<variant>/`; the assemblies are `csc /refonly` metadata-only stubs (not runnable — Unity does the real build).
 
-```bash
-build-unity-sln ios prod                  # single variant (fast compile-check)
-build-unity-sln ios,android editor,dev    # 4 parallel builds (cartesian product)
-build-unity-sln osx editor                # macOS standalone (catches UNITY_STANDALONE_OSX errors)
-build-unity-sln --clean                   # clean cached artifacts
-build-unity-sln --emit ios editor         # full build with runnable IL (slower; rarely needed)
-```
+The headline win is the warm-no-op path: ~42 ms on meow-tower (13 asmdefs) via mtime-based UTD short-circuit. Cold rebuild is ~6 s (each `dotnet exec csc.dll` cold-starts Roslyn — closing this gap requires VBCSCompiler IPC, see [[TODO.md]]). Benchmarks: [[benchmark.md]].
 
-The default is a fast compile-check: Roslyn emits metadata-only ref assemblies (no IL, no method bodies), analyzers/pdb/post-compile copies skipped, MSBuild Server persists across calls. ~2× faster than `--emit`. Output is NOT runnable — Unity does the real build.
-
-Pass `--emit` only when you need actual IL output (e.g. running the assemblies outside Unity). Benchmarks: [[benchmark.md]].
-
-**Pitfalls of the default (no-emit) mode:**
-- Output assemblies are ref-only stubs — not runnable.
-- Alternating default and `--emit` invalidates MSBuild's up-to-date check (different artifact at same path) → first run after toggle is a full rebuild. Pin each workflow to one mode.
-
-Less-likely-to-bite pitfalls (rare-Roslyn diagnostic gaps, source generators still running): see [[benchmark.md]].
-
-Or call the generator directly — output is the `.sln` path to stdout:
+The previous shell driver (`build-unity-sln.sh`) wrapped `dotnet build` with retry-on-failure and parallel cartesian-product variants; it was retired once `typecheck` cleared the Unity-quirk filtering bar (native-DLL filter, cascading-failure handling). For full IL output (rarely needed since Unity rebuilds the solution itself), call MSBuild directly:
 
 ```bash
 dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v:q
@@ -150,4 +133,4 @@ Quick refs:
 unity-solution-generator lock .
 ```
 
-Re-run `lock` when Unity version changes or packages are added/removed. The lockfile is auto-generated on first `generate` if missing. `build-unity-sln` auto-retries with a fresh lock on build failure.
+Re-run `lock` when Unity version changes or packages are added/removed. The lockfile is auto-generated on first `generate` / `typecheck` if missing.

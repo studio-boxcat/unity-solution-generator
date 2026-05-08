@@ -2,17 +2,6 @@
 
 ## Active
 
-### Switch `meow-tower/justfile:105` to `usg typecheck editor`
-
-The Hot Reload `_scratch` recipe currently calls `build-unity-sln editor`
-(~460 ms warm no-op). `usg-cli typecheck` works end-to-end on meow-tower
-and is **~10.7× faster on the warm path** (42 ms). One-line change in the
-justfile, then verify the recipe works in practice.
-
-Same applies to `meow-tower-porting/justfile`.
-
-After this, `build-unity-sln.sh` can be retired entirely.
-
 ### Content-hash UTD instead of mtime
 
 `typecheck` currently uses mtime-based up-to-date check. csc with
@@ -26,16 +15,17 @@ Fix: hash the just-emitted `.dll` and compare to the previous hash;
 only update mtime / overwrite the file when bytes differ. Equivalent
 to `write_file_if_changed` for compile outputs.
 
-Expected impact: closes the touch+rebuild gap (currently 2.99 s with
-typecheck vs 2.22 s with build-unity-sln) — only the actually-changed
-project recompiles, downstream UTD-skips.
+Expected impact: closes the touch+rebuild gap (currently 2.99 s vs the
+retired `build-unity-sln`'s 2.22 s on the same case) — only the actually-
+changed project recompiles, downstream UTD-skips.
 
 ## Deferred
 
 ### Direct `csc /shared` typecheck path
 
-Closes the cold-rebuild gap (currently 6.6 s with typecheck vs 1.47 s
-with `build-unity-sln`'s no-emit mode).
+Closes the cold-rebuild gap (currently 6.6 s; the retired
+`build-unity-sln`'s no-emit mode hit 1.47 s on the same case via
+VBCSCompiler `/shared`).
 
 Each `dotnet exec csc.dll` invocation cold-starts Roslyn (~390 ms
 JIT + load). Speaking VBCSCompiler IPC over the named pipe lets a

@@ -8,13 +8,13 @@ What the codebase looks like after the Phase-3 overhaul. Borrows ideas from the 
 
 Ported from Swift, the codebase had accreted a few localized smells: hand-rolled JSON parser that silently truncated on edge cases, three uncoordinated cache version constants, parallel-walk Flusher boilerplate copy-pasted between `project_scanner` and `lockfile_scanner`. The public surface also exported flags and FFI functions no consumer used (`init`, `--output`, `--verbose`, `usg_lock`, FFI buffer args).
 
-The overhaul trimmed the public surface to the four real consumers, deduped the internal accretion, and added a `typecheck` subcommand that bypasses MSBuild for compile-check workflows. The shell driver (`build-unity-sln.sh`) is **kept** for now — typecheck shipped as a partial; Unity-quirk filtering (native DLLs in `/reference:`) needs more work before it can replace the driver. See [[TODO.md]].
+The overhaul trimmed the public surface to the four real consumers, deduped the internal accretion, and added a `typecheck` subcommand that bypasses MSBuild for compile-check workflows. The shell driver (`build-unity-sln.sh`) was retired once `typecheck` cleared the Unity-quirk filtering bar (native-DLL filter, cascading-failure handling). See [[TODO.md]] for follow-ups (content-hash UTD, `/shared` IPC).
 
 ## Prior art (what we borrowed)
 
 - **`com.unity.ide.rider`** ([needle-mirror](https://github.com/needle-mirror/com.unity.ide.rider)) — flat library shape, single `SyncSolution` entry point. Confirms our shape.
 - **Bee** ([Unity blog](https://blog.unity.com/engine-platform/accelerating-player-builds-with-incremental-build-pipeline)) — separates *describe graph* (pure data) from *execute graph* (workers/scheduling). At 13 asmdefs we kept this discipline as just `TypecheckOptions` + `run`, not two struct types.
-- **Cargo** ([Cargo Targets](https://doc.rust-lang.org/cargo/reference/cargo-targets.html), [RFC 3477](https://rust-lang.github.io/rfcs/3477-cargo-check-lang-policy.html)) — single binary with subcommands; `cargo check` was a subcommand from day one. Justifies retiring `build-unity-sln.sh` once typecheck is production-ready.
+- **Cargo** ([Cargo Targets](https://doc.rust-lang.org/cargo/reference/cargo-targets.html), [RFC 3477](https://rust-lang.github.io/rfcs/3477-cargo-check-lang-policy.html)) — single binary with subcommands; `cargo check` was a subcommand from day one. Justified retiring `build-unity-sln.sh` once typecheck shipped.
 - **Roslyn Compiler Server** ([Compiler Server.md](https://github.com/dotnet/roslyn/blob/main/docs/compilers/Compiler%20Server.md)) — VBCSCompiler IPC. We use `dotnet exec csc.dll` per project (no `/shared`); direct IPC deferred to [[TODO.md]].
 - **Cargo + Bazel** ([many caches of Bazel](https://blog.engflow.com/2024/05/13/the-many-caches-of-bazel/)) — wholesale cache invalidation via single version constant. No migrations.
 
@@ -24,7 +24,7 @@ Audit found exactly **4 caller sites** total. The redesign is sized for these an
 
 | Consumer | Channel | Surface needed |
 |---|---|---|
-| `meow-tower` Hot Reload pre-flight (`justfile:105`) | CLI | `build-unity-sln editor` exit code |
+| `meow-tower` Hot Reload pre-flight (`justfile:105`) | CLI | `unity-solution-generator typecheck . ios editor` exit code |
 | `meow-tower-porting` (same recipe) | CLI | same |
 | Rider in-Editor regen (`ProjectGeneration.cs:91`) | FFI | `usg_generate(root, "ios", "editor", ".", extraRefs)` + `usg_last_error()` |
 | Rider in-Editor regen (porting) | FFI | same |
@@ -128,7 +128,7 @@ Lives in `crates/usg-core/src/typecheck.rs`. Single `run(opts) -> Result<Typeche
 - VBCSCompiler IPC (`/shared` flag) — `dotnet exec csc.dll` is ~390 ms per cold call but the headline win is the warm-no-op fingerprint short-circuit, not per-call speed.
 - Analyzer config dedup (Roslyn USG0001 info-message).
 
-These remain in [[TODO.md]] before typecheck can replace `build-unity-sln.sh`.
+All three landed; `build-unity-sln.sh` retired. Remaining typecheck follow-ups (content-hash UTD, `/shared` IPC) tracked in [[TODO.md]].
 
 ## Pitfalls (avoided by design)
 
@@ -137,7 +137,7 @@ These remain in [[TODO.md]] before typecheck can replace `build-unity-sln.sh`.
 - **Persistent worker / daemon** — at 13 asmdefs, JIT amortization doesn't justify the protocol burden.
 - **Cache version coordination drift** — single `CACHE_VERSION` invalidates all 3 caches together.
 - **Hand-rolled JSON silently mistruncating** — replaced with `serde_json`.
-- **Shell driver state accretion** — `build-unity-sln.sh`'s retry-on-failure logic moves to Rust once typecheck stabilizes.
+- **Shell driver state accretion** — `build-unity-sln.sh`'s retry-on-failure logic was a smell-on-its-way-to-bug; typecheck inherits the simpler "lock auto-runs on demand" model with no retry needed.
 
 ## Non-goals
 
