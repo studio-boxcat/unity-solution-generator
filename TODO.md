@@ -2,25 +2,6 @@
 
 ## Deferred
 
-### Pipeline csc invocations across VBCSCompiler
-
-Cold rebuild is now 4.2 s (down from 6.6 s after `/shared` landed) but
-still slower than the retired `build-unity-sln` (1.47 s). The remaining
-gap is sequential dispatch — we walk the asmdef DAG and run one
-`dotnet exec csc.dll /shared` at a time. MSBuild Server pipelines its
-csc calls in parallel through VBCSCompiler.
-
-**Approach:**
-- Walk the DAG into "levels" (independent projects per level).
-- Per level, spawn N `dotnet exec csc.dll /shared` processes concurrently
-  (`rayon::par_iter` or `tokio` task per project).
-- Each connects to VBCSCompiler independently — the server already handles
-  concurrent requests over its named pipe.
-
-**Why not yet:** the warm + touch+rebuild paths (the dev iteration loop)
-are already faster than the retired driver. Cold rebuild is rare (Unity
-upgrade, fresh checkout). Revisit if it becomes the felt pain.
-
 ### Other rejected/closed during no-emit wiring
 
 - `-t:CoreCompile` (alone) — broke `ResolveProjectReferences`, downstream csprojs lose refs to upstream. Has to be `-t:Build` with property-level skips.

@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::error::{Result, io_err};
+use rayon::prelude::*;
+
+use crate::error::{GeneratorError, Result, io_err};
 use crate::lockfile::{DllRef, Lockfile, LockfileIO, RefCategory};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, resolve_real_path};
 use crate::project_scanner::{AsmDefRecord, ProjectCategory, ProjectScanner};
@@ -71,7 +73,7 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
     let scan = ProjectScanner::scan(&root, DEFAULT_GENERATOR_ROOT)?;
 
     let included = compute_included_projects(&scan.asm_def_by_name, opts);
-    let order = topo_sort(&included, &scan.asm_def_by_name);
+    let levels = topo_levels(&included, &scan.asm_def_by_name);
 
     // Output dir: per-variant under generator root, gitignored alongside other caches.
     let variant = format!("{}-{}", opts.platform.raw(), opts.build_config.raw());
@@ -128,82 +130,54 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
     // csc on a doomed compile that produces a wall of CS0006 noise.
     let mut failed_set: BTreeSet<String> = BTreeSet::new();
 
-    for name in &order {
-        let asm = &scan.asm_def_by_name[name];
+    // Process the DAG level-by-level. Within a level all projects are
+    // independent (no cross-edges), so we fan out via rayon — each worker
+    // spawns a `dotnet exec csc.dll /shared` which connects to the shared
+    // VBCSCompiler over its named pipe. The server already accepts
+    // concurrent requests, and our per-project filesystem writes target
+    // disjoint paths (`<name>.rsp`, `<name>.dll`).
+    //
+    // Sequential processing across levels is required because level N+1
+    // reads level N's `.dll` outputs as `/reference:` inputs and depends
+    // on the failed-set decision (cascade-skip).
+    for level in &levels {
+        let outcomes: Vec<(String, ProjectOutcome)> = level
+            .par_iter()
+            .map(|name| {
+                let outcome = compile_project(
+                    name,
+                    &scan,
+                    &included,
+                    &failed_set,
+                    &root,
+                    &out_dir,
+                    &csc_dll,
+                    &common_defines,
+                    &common_refs,
+                    &analyzers,
+                    &lockfile.lang_version,
+                );
+                (name.clone(), outcome)
+            })
+            .collect();
 
-        // Cascade skip: if any upstream failed, this one would just spew
-        // CS0006 ("metadata file ... could not be found") for the missing
-        // upstream `.dll`. Surface as a clear "skipped" rather than a real
-        // compile error.
-        if let Some(dep) = asm.references.iter().find(|r| failed_set.contains(*r)) {
-            failures.insert(
-                name.clone(),
-                format!("skipped (cascade): upstream '{}' failed", dep),
-            );
-            failed_set.insert(name.clone());
-            continue;
-        }
-
-        let sources = collect_sources(&root, asm, &scan.dirs_by_project);
-        if sources.is_empty() {
-            // No source files — nothing to compile (matches generate's behaviour
-            // of skipping empty projects from variant inclusion).
-            continue;
-        }
-
-        let proj_refs = collect_project_refs(asm, &included, &out_dir);
-        let out_dll = format!("{}/{}.dll", out_dir, name);
-
-        if is_up_to_date(&sources, &common_refs, &proj_refs, &out_dll) {
-            skipped += 1;
-            continue;
-        }
-
-        let mut defines = common_defines.clone();
-        for vd in &asm.version_defines {
-            defines.push(vd.define.clone());
-        }
-        defines.extend(asm.include_platforms.iter().cloned());
-        let lang_version = lockfile.lang_version.clone();
-
-        let rsp_path = format!("{}/{}.rsp", out_dir, name);
-        let rsp_body = build_rsp(
-            &lang_version,
-            &defines,
-            &common_refs,
-            &proj_refs,
-            &analyzers,
-            &sources,
-            &out_dll,
-            asm.allow_unsafe_code,
-        );
-        fs::write(&rsp_path, rsp_body).map_err(|e| io_err(&rsp_path, e))?;
-
-        // Snapshot pre-compile bytes + mtime. csc with `/refonly /deterministic`
-        // produces byte-identical output for unchanged inputs, but the .dll's
-        // mtime advances on every emit — that cascades into spurious downstream
-        // rebuilds (downstream's UTD sees `upstream.dll` newer than its own
-        // output). Compare bytes after compile; if identical, restore the old
-        // mtime so the cascade never starts.
-        let prev_bytes = fs::read(&out_dll).ok();
-        let prev_mtime = mtime_nsec(&out_dll);
-
-        match invoke_csc(&csc_dll, &rsp_path) {
-            Ok(()) => {
-                if let (Some(prev), Some(prev_t)) = (&prev_bytes, prev_mtime) {
-                    if let Ok(new) = fs::read(&out_dll) {
-                        if prev == &new {
-                            // Bytes identical — restore old mtime. Errors here
-                            // are non-fatal (worst case: spurious rebuild next run).
-                            let _ = restore_mtime(&out_dll, prev_t);
-                        }
-                    }
+        for (name, outcome) in outcomes {
+            match outcome {
+                ProjectOutcome::Recompiled => recompiled += 1,
+                ProjectOutcome::Skipped => skipped += 1,
+                ProjectOutcome::Empty => {}
+                ProjectOutcome::CascadeSkipped(dep) => {
+                    failures.insert(
+                        name.clone(),
+                        format!("skipped (cascade): upstream '{}' failed", dep),
+                    );
+                    failed_set.insert(name);
                 }
-                recompiled += 1;
-            }
-            Err(stderr) => {
-                failures.insert(name.clone(), stderr);
-                failed_set.insert(name.clone());
+                ProjectOutcome::Failed(stderr) => {
+                    failures.insert(name.clone(), stderr);
+                    failed_set.insert(name);
+                }
+                ProjectOutcome::Io(e) => return Err(e),
             }
         }
     }
@@ -244,12 +218,14 @@ fn compute_included_projects(
         .collect()
 }
 
-fn topo_sort(
+/// Group `included` into levels: `levels[0]` has no upstream deps in
+/// `included`; `levels[i+1]` has all its deps in `levels[0..=i]`. Within a
+/// level all projects are independent and can be compiled in parallel.
+/// Lex-sorted within levels for deterministic output.
+fn topo_levels(
     included: &BTreeSet<String>,
     asm_def_by_name: &HashMap<String, AsmDefRecord>,
-) -> Vec<String> {
-    // Iterative Kahn's. Stable ordering: within a level, sort lexicographically
-    // so the output is deterministic across runs (helps caching + debugging).
+) -> Vec<Vec<String>> {
     let mut indeg: HashMap<String, usize> = HashMap::new();
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     for name in included {
@@ -263,27 +239,129 @@ fn topo_sort(
             }
         }
     }
-    let mut ready: BTreeSet<String> = indeg
+
+    let mut levels: Vec<Vec<String>> = Vec::new();
+    let mut current: BTreeSet<String> = indeg
         .iter()
         .filter(|(_, &d)| d == 0)
         .map(|(n, _)| n.clone())
         .collect();
-    let mut out = Vec::with_capacity(included.len());
-    while let Some(n) = ready.iter().next().cloned() {
-        ready.remove(&n);
-        if let Some(succs) = adj.get(&n) {
-            for s in succs {
-                if let Some(d) = indeg.get_mut(s) {
-                    *d -= 1;
-                    if *d == 0 {
-                        ready.insert(s.clone());
+    while !current.is_empty() {
+        let mut next: BTreeSet<String> = BTreeSet::new();
+        for n in &current {
+            if let Some(succs) = adj.get(n) {
+                for s in succs {
+                    if let Some(d) = indeg.get_mut(s) {
+                        *d -= 1;
+                        if *d == 0 {
+                            next.insert(s.clone());
+                        }
                     }
                 }
             }
         }
-        out.push(n);
+        levels.push(current.into_iter().collect());
+        current = next;
     }
-    out
+    levels
+}
+
+/// Per-project compile outcome. Counters + failure-set updates happen on the
+/// caller side under the level-sequential lock; the parallel work (csc spawn)
+/// is contained inside `compile_project`.
+enum ProjectOutcome {
+    /// csc ran and exited 0.
+    Recompiled,
+    /// mtime UTD said inputs weren't newer than the cached output.
+    Skipped,
+    /// asmdef has no `.cs` files — nothing to compile.
+    Empty,
+    /// At least one upstream is in `failed_set`; compile would just spew CS0006.
+    CascadeSkipped(String),
+    /// csc exited non-zero. Stderr captured for reporting.
+    Failed(String),
+    /// Local I/O error (couldn't write the rsp, etc.) — fatal, surfaced to caller.
+    Io(GeneratorError),
+}
+
+/// Pure-ish: takes everything it needs by reference, mutates only its own
+/// per-project filesystem outputs (`<name>.rsp`, `<name>.dll`). Safe to call
+/// in parallel across projects within a topo level.
+#[allow(clippy::too_many_arguments)]
+fn compile_project(
+    name: &str,
+    scan: &crate::project_scanner::ScanResult,
+    included: &BTreeSet<String>,
+    failed_set: &BTreeSet<String>,
+    root: &str,
+    out_dir: &str,
+    csc_dll: &str,
+    common_defines: &[String],
+    common_refs: &[DllRef],
+    analyzers: &[String],
+    lang_version: &str,
+) -> ProjectOutcome {
+    let asm = &scan.asm_def_by_name[name];
+
+    if let Some(dep) = asm.references.iter().find(|r| failed_set.contains(*r)) {
+        return ProjectOutcome::CascadeSkipped(dep.clone());
+    }
+
+    let sources = collect_sources(root, asm, &scan.dirs_by_project);
+    if sources.is_empty() {
+        return ProjectOutcome::Empty;
+    }
+
+    let proj_refs = collect_project_refs(asm, included, out_dir);
+    let out_dll = format!("{}/{}.dll", out_dir, name);
+
+    if is_up_to_date(&sources, common_refs, &proj_refs, &out_dll) {
+        return ProjectOutcome::Skipped;
+    }
+
+    let mut defines: Vec<String> = common_defines.to_vec();
+    for vd in &asm.version_defines {
+        defines.push(vd.define.clone());
+    }
+    defines.extend(asm.include_platforms.iter().cloned());
+
+    let rsp_path = format!("{}/{}.rsp", out_dir, name);
+    let rsp_body = build_rsp(
+        lang_version,
+        &defines,
+        common_refs,
+        &proj_refs,
+        analyzers,
+        &sources,
+        &out_dll,
+        asm.allow_unsafe_code,
+    );
+    if let Err(e) = fs::write(&rsp_path, rsp_body) {
+        return ProjectOutcome::Io(io_err(&rsp_path, e));
+    }
+
+    // Snapshot pre-compile bytes + mtime. csc with `/refonly /deterministic`
+    // produces byte-identical output for unchanged inputs, but the .dll's
+    // mtime advances on every emit — that cascades into spurious downstream
+    // rebuilds (downstream's UTD sees `upstream.dll` newer than its own
+    // output). Compare bytes after compile; if identical, restore the old
+    // mtime so the cascade never starts.
+    let prev_bytes = fs::read(&out_dll).ok();
+    let prev_mtime = mtime_nsec(&out_dll);
+
+    match invoke_csc(csc_dll, &rsp_path) {
+        Ok(()) => {
+            if let (Some(prev), Some(prev_t)) = (&prev_bytes, prev_mtime) {
+                if let Ok(new) = fs::read(&out_dll) {
+                    if prev == &new {
+                        let _ = restore_mtime(&out_dll, prev_t);
+                    }
+                }
+            }
+            ProjectOutcome::Recompiled
+        }
+        Err(stderr) => ProjectOutcome::Failed(stderr),
+    }
 }
 
 // ── data collection ───────────────────────────────────────────────────────

@@ -69,17 +69,20 @@ Benchmarks on meow-tower (13 asm, ~5k .cs):
 
 | Scenario | `build-unity-sln` (no-emit) | `usg typecheck` | Δ |
 |---|---|---|---|
-| Warm no-op | 460 ms | **40 ms** | **11.5× faster** |
-| Touch + rebuild | 2.22 s | **581 ms** | **3.8× faster** |
-| Cold rebuild | 1.47 s | 4.2 s | ~2.9× slower |
+| Warm no-op | 460 ms | **38 ms** | **12.1× faster** |
+| Touch + rebuild | 2.22 s | **519 ms** | **4.3× faster** |
+| Cold rebuild | 1.47 s | **1.68 s** | ~14 % slower (effective parity) |
 
 Reproduce: `hyperfine 'unity-solution-generator typecheck'` from anywhere inside a Unity project.
 
-Three layers contribute:
+Four layers contribute:
 
-- **Warm no-op (11.5× win)**: mtime-based UTD short-circuit skips csc entirely.
-- **Touch+rebuild (3.8× win)**: **content-hash UTD** — csc with `/refonly /deterministic` produces byte-identical output for unchanged inputs, so when a touched `.cs` upstream produces an identical `.dll`, the pre-compile mtime is restored and downstream UTD skips. Only the project whose source actually changed recompiles. Plus **`/shared`** which connects each csc invocation to VBCSCompiler over a long-lived pipe (no Roslyn JIT cold-start per call).
-- **Cold rebuild (still slower)**: csc itself has to compile 5k files. `/shared` cuts JIT-startup waste but the actual compile work is bounded by csc. The retired MSBuild driver paralleled csc invocations through MSBuild Server's task graph; we run them sequentially through one VBCSCompiler. Pipelining them is the next ceiling — see [[TODO.md]].
+- **Warm no-op (12.1× win)**: mtime-based UTD short-circuit skips csc entirely.
+- **Content-hash UTD**: csc with `/refonly /deterministic` produces byte-identical output for unchanged inputs, so when a touched `.cs` upstream produces an identical `.dll`, the pre-compile mtime is restored and downstream UTD skips. Only the project whose source actually changed recompiles.
+- **`/shared`**: each csc invocation connects to VBCSCompiler over a long-lived pipe — no Roslyn JIT cold-start per call.
+- **Parallel level dispatch**: the asmdef DAG is grouped into levels; within a level all projects are independent and run concurrently via `rayon::par_iter`, each spawning its own `dotnet exec csc.dll /shared`. VBCSCompiler accepts concurrent requests over its named pipe.
+
+Cold rebuild now lands at the same order of magnitude as the retired MSBuild driver (which had its own parallel csc dispatch via MSBuild Server's task graph).
 
 ### Why MSBuild's warm-no-op floor is 460 ms
 
