@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/usg-core", "crates/usg-cli", "crates/usg-ffi"]
+members = ["crates/usg-core", "crates/usg-ffi"]
 
 [workspace.package]
 version = "0.1.0"

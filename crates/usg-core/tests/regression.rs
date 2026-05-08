@@ -207,6 +207,5 @@ fn android_prod_excludes_ios_only() {
     assert!(!names.iter().any(|n| n == "Bar"));
 }
 
-// CLI binary surface tests live in `crates/usg-cli/tests/cli_regression.rs`
-// (Cargo's `CARGO_BIN_EXE_<name>` env var is only set for tests in the same
-// package as the bin target).
+// CLI binary surface tests live in `tests/cli_regression.rs` (same package
+// since the bin target is now in usg-core).

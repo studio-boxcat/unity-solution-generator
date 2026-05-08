@@ -8,6 +8,14 @@ rust-version.workspace = true
 name = "usg_core"
 path = "src/lib.rs"
 
+# Companion binary lives in the same package — cargo idiom for "library + thin
+# CLI driver" (ripgrep, fd, …). The `CARGO_BIN_EXE_unity-solution-generator`
+# env var is set for tests in this package, which is why the CLI integration
+# tests live here too.
+[[bin]]
+name = "unity-solution-generator"
+path = "src/main.rs"
+
 [dependencies]
 walkdir.workspace = true
 ignore.workspace = true
@@ -15,6 +23,7 @@ rayon.workspace = true
 libc.workspace = true
 serde_json.workspace = true
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 tempfile = "3"

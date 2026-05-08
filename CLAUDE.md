@@ -5,8 +5,7 @@
 Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
 
 Cargo workspace under `crates/`:
-- `usg-core` — library (paths, lockfile, scanners, generator)
-- `usg-cli` — binary (`unity-solution-generator`)
+- `usg-core` — library (paths, lockfile, scanners, generator) + companion binary `unity-solution-generator`
 - `usg-ffi` — `cdylib` (`libUnitySolutionGenerator.dylib`) with the C ABI used by Unity `[DllImport]`
 
 ## Build

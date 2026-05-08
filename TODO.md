@@ -21,13 +21,6 @@ csc calls in parallel through VBCSCompiler.
 are already faster than the retired driver. Cold rebuild is rare (Unity
 upgrade, fresh checkout). Revisit if it becomes the felt pain.
 
-### Architecture v1 leftovers
-
-- **Fold `usg-cli` package into `usg-core` as `[[bin]]`** — cargo
-  companion-bin idiom; mechanical, no caller impact. Skipped during the
-  overhaul because the binary path is unaffected and the rename is pure
-  churn.
-
 ### Other rejected/closed during no-emit wiring
 
 - `-t:CoreCompile` (alone) — broke `ResolveProjectReferences`, downstream csprojs lose refs to upstream. Has to be `-t:Build` with property-level skips.

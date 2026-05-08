@@ -35,16 +35,17 @@ No CI, no other repos, no other tools.
 
 ```
 crates/
-  usg-core/                 lib (separate `usg-cli` package owns the binary)
-    Cargo.toml              [lib]
+  usg-core/                 lib + companion binary (cargo `[lib]` + `[[bin]]`)
+    Cargo.toml              [lib] + [[bin]] unity-solution-generator
     src/
       lib.rs                pub API + LOCKFILE_VERSION + CACHE_VERSION constants
+      main.rs               arg parse + subcommand dispatch
       lockfile.rs           Lockfile, DllRef, RefCategory, LockfileIO
       project_scanner.rs    project-side scan; AsmDefRecord, ProjectCategory
       lockfile_scanner.rs   Unity-install + project DLL/asmdef scan
       solution_generator.rs render + write csproj/sln/Directory.Build.props
-      typecheck.rs          DAG walk + csc invocations  (NEW, partial)
-      walk.rs               ONE shared parallel-walk helper (NEW)
+      typecheck.rs          DAG walk + csc invocations
+      walk.rs               ONE shared parallel-walk helper
       lock_cache.rs         lock-fingerprint cache; reads CACHE_VERSION
       generate_cache.rs     generate-fingerprint cache; reads CACHE_VERSION
       defines.rs            version + scripting defines
@@ -53,10 +54,7 @@ crates/
       profile.rs            tracing macros
       xml.rs                escape + deterministic GUID (pinned invariant)
       error.rs              GeneratorError + LockfileError + io_err helper
-  usg-cli/
-    Cargo.toml              [[bin]] unity-solution-generator
-    src/main.rs             arg parse + subcommand dispatch
-    tests/cli_regression.rs CLI surface pinning
+    tests/                  e2e + integration + cli_regression
   usg-ffi/
     Cargo.toml              [lib] cdylib + rlib (`UnitySolutionGenerator`)
     build.rs                installs @rpath/<dylib> macOS install_name
@@ -66,7 +64,7 @@ crates/
 
 `json.rs` deleted — replaced by `serde_json::Value` extraction at each call site.
 
-`usg-cli` was NOT folded into `usg-core` as a `[[bin]]` target (architecture v1 proposed it; left for a future cleanup since the binary path is unaffected and the rename is mechanical churn that could break shell-script callers if anything goes wrong).
+`usg-core` houses both the library and the `unity-solution-generator` binary (cargo companion-bin idiom — ripgrep, fd, etc.). The previous separate `usg-cli` package was folded back in once `unity-solution-generator typecheck` was the canonical compile-check entry point.
 
 ## Public API
 
