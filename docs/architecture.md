@@ -34,6 +34,7 @@ crates/
       walk.rs               shared parallel-walk helper
       lock_cache.rs         lock-fingerprint cache; reads CACHE_VERSION
       generate_cache.rs     generate-fingerprint cache; reads CACHE_VERSION
+      package_cache.rs      on-demand tarball extraction (Editor/*.tgz → ~/.cache)
       defines.rs            version + scripting defines
       paths.rs              path utilities
       io.rs                 read/write helpers + version-header validator
@@ -56,10 +57,12 @@ graph LR
     B --> C[generate]
     B --> T[typecheck]
     C -->|+ asmdef scan| D[.csproj/.sln]
-    T -->|+ asmdef scan + csc.dll| E[diagnostics + ref-only .dll]
+    T -->|+ asmdef scan + csc.dll| E[diagnostics + .dll]
 ```
 
 1. **`lock`** scans the Unity installation + project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` to find the Unity install path; walks `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock`.
+
+   Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/Contents/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `~/.cache/unity-solution-generator/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/.../PackageManager/Editor/*.tgz`). The latter two only fire for entries `packages-lock.json` names but PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
 2. **`generate`** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`; overridable via the Rust API's `with_output_dir`. The depth controls compile-pattern prefix — one `../` per path component back to project root.
 3. **`typecheck`** reads the lockfile + scan, builds csc args per asmdef, walks the dependency DAG level-by-level, invokes `dotnet exec csc.dll /shared` per dirty project. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds.
 
@@ -118,9 +121,21 @@ Library/UnitySolutionGenerator/
   .fingerprints/<options-hash>    ← short-circuits `generate` when nothing changed
   ios-editor/                     ← `generate` output: .csproj + .sln + Directory.Build.props
   android-prod/
-  typecheck-ios-editor/           ← `typecheck` output: csc /refonly .dlls + .rsp files
+  typecheck-ios-editor/           ← `typecheck` output: csc .dlls + .rsp files
   …
 ```
+
+Per-user cache lives outside the project:
+
+```
+~/.cache/unity-solution-generator/<unity-version>/
+  <package-name>/
+    <extracted .tgz contents>
+    .complete                     ← marker; absence = mid-extract or crashed
+  .lock.<package-name>            ← O_CREAT|O_EXCL extraction lock
+```
+
+Honors `XDG_CACHE_HOME`. Shared across worktrees (extraction is one-time per Unity version per package). Resolved at typecheck/generate time via the `$(UsgCache)` MSBuild placeholder.
 
 ## Cache versioning
 
@@ -137,10 +152,14 @@ Each cache file carries a `# version: N` header. Mismatch → wholesale invalida
 
 Bypasses MSBuild entirely. Per-asmdef args (refs from lockfile, sources from scan, defines from platform+config) are written to `<name>.rsp` and consumed via `dotnet exec /path/to/csc.dll /shared /noconfig @<name>.rsp`.
 
+- **No `/refonly`.** csc 4.10 (.NET 8 SDK) silently skips body-binding diagnostics under `/refonly` — argument-conversion errors at call sites don't surface, even though docs claim otherwise. We emit a full library and rely on `/deterministic` for byte-stable outputs (see Content-hash UTD). Hit on `meow-tower/orgel-fix`: typecheck reported `ok` while Unity Editor flagged a real `CS1503`. Test `tests/e2e.rs:rsp_has_no_refonly` locks the regression.
 - **Native-DLL filter.** Unity's lockfile sometimes points at native plugins (e.g. `unity_sprite_author.dll`). Passing those via `/reference:` to csc fires `CS0009: PE image doesn't contain managed metadata`. We check the PE header's CLR Runtime Header data-directory entry (index 14) — non-zero RVA = managed. MSBuild's `ResolveAssemblyReferences` task does the same check.
 - **Cascade skip.** If an asmdef references an upstream that failed (or was itself cascade-skipped), the downstream compile would just spew `CS0006`. We track a `failed_set` between levels and surface a `"skipped (cascade): upstream 'X' failed"` message instead.
-- **Content-hash UTD.** csc with `/refonly /deterministic` produces byte-identical output for unchanged inputs, but the post-compile mtime advances anyway. We snapshot pre-compile bytes + mtime and restore the mtime via `std::fs::FileTimes::set_modified` when the new bytes match — downstream's mtime UTD then sees the upstream as unchanged and skips.
+- **Content-hash UTD.** csc with `/deterministic` produces byte-identical output for unchanged inputs, but the post-compile mtime advances anyway. We snapshot pre-compile bytes + mtime and restore the mtime via `std::fs::FileTimes::set_modified` when the new bytes match — downstream's mtime UTD then sees the upstream as unchanged and skips.
 - **Parallel level dispatch.** The DAG is grouped into levels (Kahn's). Within a level all projects are independent and run concurrently via `rayon::par_iter`. Each worker spawns its own `dotnet exec csc.dll /shared`, all connecting to the same VBCSCompiler.
+- **Diagnostic filtering.** Failure output is post-filtered to drop `: warning ` and `: info ` lines. Bodies repeat across assemblies that share sources via asmref (e.g. `com.boxcat.libs` pulled into half a dozen projects); `info SP0001` lines from `DiagnosticSuppressor` are noise. Errors and the csc banner pass through. See `typecheck.rs:filter_diagnostics`.
+- **Lock-fingerprint missing-path sentinel.** `lock_cache::build_entries` records absent paths as `(p, 0)`; `is_valid` invalidates if such a path later appears. Without this, a fresh worktree where `Library/PackageCache/` doesn't exist at lock time produces an incomplete lockfile that Unity later populating PackageCache never invalidates. Test: `tests/e2e.rs:lock_fingerprint_sentinel_invalidates_on_appearance`.
+- **Package blacklist.** `BLACKLISTED_PACKAGE_DIRS` (`lockfile_scanner.rs`) skips specific packages from both project and lockfile walks. Currently lists `com.singularitygroup.hotreload` — its asmrefs merge editor-time sources into `UnityEditor.Purchasing` while its DLL ships in four parallel `RuntimeDependencies*.dll` editor-version variants; treating the package as opaque is cheaper than modelling Unity's variant pick.
 
 ## Pitfalls (avoided by design)
 

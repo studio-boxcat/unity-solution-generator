@@ -13,7 +13,7 @@ Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical m
 | `generate` (warm — fingerprint hit) | **2.1 ± 0.5 ms** | 1.6–5.6 |
 | `generate` (warm scan-cache, fingerprint missing) | ~5.6 ± 1.0 ms | 4.2–9.8 |
 | `generate` (output to project root via Rust API) | **5.5 ± 0.5 ms** | 4.9–7.9 |
-| `lock` (cold, fingerprint nuked each run) | **29.8 ± 2.4 ms** | 26.1–33.7 |
+| `lock` (cold, fingerprint nuked each run) | **59.5 ± 3.4 ms** | 55.9–63.6 |
 | `lock` (warm — fingerprint hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
 | startup (`--help`) | ~2 ms | — |
 
@@ -28,14 +28,16 @@ generate (5.78 ms total)
 │  └─ scan_cache.validate       2.82 ms
 └─ generate.write_variant n=9   0.64 ms
 
-lock cold (47.1 ms total)
-├─ lockfile_scanner.unity_install   0.90 ms     ← walkdir, sequential, small
-├─ lockfile_scanner.project_walk   45.1  ms     ← ignore parallel walk of PackageCache
-└─ lockfile_scanner.defines         0.71 ms
+lock cold (~97 ms total, with PackageCache-gap fallback firing on 13 packages)
+├─ lockfile_scanner.unity_install   1.5 ms     ← walkdir, sequential, small
+├─ lockfile_scanner.project_walk   92  ms     ← parallel walk + per-package fallback
+└─ lockfile_scanner.defines         3 ms
 
 lock warm
 └─ (no spans — fingerprint match short-circuits before LockfileScanner runs)
 ```
+
+The `project_walk` budget covers the original Assets/Packages/PackageCache walk plus per-missing-package walks of `BuiltInPackages/<name>` or `~/.cache/.../<name>`. The fallback runs only for entries `packages-lock.json` names but PackageCache hasn't resolved — empty in the steady state, so this is the worst-case cold path. Once PackageCache is fully populated the cold lock returns to ~30 ms.
 
 `generate` (warm scan-cache + warm fingerprint):
 ```
@@ -78,7 +80,7 @@ Reproduce: `hyperfine 'unity-solution-generator typecheck'` from anywhere inside
 Four layers contribute:
 
 - **Warm no-op (12.1× win)**: mtime-based UTD short-circuit skips csc entirely.
-- **Content-hash UTD**: csc with `/refonly /deterministic` produces byte-identical output for unchanged inputs, so when a touched `.cs` upstream produces an identical `.dll`, the pre-compile mtime is restored and downstream UTD skips. Only the project whose source actually changed recompiles.
+- **Content-hash UTD**: csc with `/deterministic` produces byte-identical output for unchanged inputs, so when a touched `.cs` upstream produces an identical `.dll`, the pre-compile mtime is restored and downstream UTD skips. Only the project whose source actually changed recompiles. (`/refonly` was dropped — it suppresses csc body diagnostics on .NET 8 SDK csc 4.10. See [[architecture.md#typecheck-deeper]].)
 - **`/shared`**: each csc invocation connects to VBCSCompiler over a long-lived pipe — no Roslyn JIT cold-start per call.
 - **Parallel level dispatch**: the asmdef DAG is grouped into levels; within a level all projects are independent and run concurrently via `rayon::par_iter`, each spawning its own `dotnet exec csc.dll /shared`. VBCSCompiler accepts concurrent requests over its named pipe.
 
@@ -94,7 +96,7 @@ For posterity: MSBuild's up-to-date check failed for our setup — `obj/Debug/<p
 |---|---|---|---|
 | `generate-fingerprint` | `Library/UnitySolutionGenerator/.fingerprints/<options-hash>` | mtime of `csproj.lock` or `scan-cache`; or any expected output file missing | entire `generate_from_lockfile` body — render+write skipped, cached `GenerateResult` returned |
 | `scan-cache` | `Library/UnitySolutionGenerator/scan-cache` | mtime of any contributing dir + each asmdef/asmref file (catches in-place edits — parent-dir mtime alone misses these) | full filesystem walk + per-asmdef JSON parse (records are pre-serialized into the cache) |
-| `lock-fingerprint` | `Library/UnitySolutionGenerator/lock-fingerprint` | mtime of Unity install + any contributing dir + ProjectVersion / ProjectSettings / manifest.json | entire Unity-install + project-side DLL/asmdef walk |
+| `lock-fingerprint` | `Library/UnitySolutionGenerator/lock-fingerprint` | mtime of Unity install + any contributing dir + ProjectVersion / ProjectSettings / manifest.json + extracted-tarball cache root; missing paths recorded as `(p, 0)` so first appearance also invalidates | entire Unity-install + project-side DLL/asmdef walk |
 
 Both caches store nanosecond mtimes via `MetadataExt::mtime_nsec`. Validation cost is `len(entries) × stat()` (~1–2 ms for hundreds of entries).
 

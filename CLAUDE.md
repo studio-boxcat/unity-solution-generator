@@ -56,7 +56,7 @@ Platform defines:
 
 ### Compile validation (`typecheck`)
 
-`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). Output assemblies are metadata-only stubs (not runnable — Unity does the real build). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
+`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). Output is a deterministic library DLL per asmdef — byte-identical for unchanged inputs (cascade-skip relies on this), and never the artifact Unity ships (Unity rebuilds the solution itself). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
 
 For full IL output (rarely needed since Unity rebuilds the solution itself), call MSBuild directly:
 
@@ -98,4 +98,4 @@ Quick refs:
 unity-solution-generator lock .
 ```
 
-Re-run `lock` when Unity version changes or packages are added/removed. The lockfile is auto-generated on first `generate` / `typecheck` if missing.
+Re-run `lock` when Unity version changes or packages are added/removed. The lockfile is auto-generated on first `generate` / `typecheck` if missing. Most environment changes (new files, populated `Library/PackageCache/`, edited asmdefs) auto-invalidate via `lock-fingerprint`; manual re-lock is rarely needed.
