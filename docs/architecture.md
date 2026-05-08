@@ -1,6 +1,6 @@
 # Architecture
 
-> **Related:** [[CLAUDE.md]], [[benchmark.md]], [[library.md]], [[TODO.md]]
+> **Related:** [[CLAUDE.md]], [[benchmark.md]], [[library-api.md]], [[TODO.md]]
 
 What the codebase looks like after the Phase-3 overhaul. Borrows ideas from the literature, scaled to a 3.6 k-LOC tool with four caller sites — none of those four are CI, none are external repos beyond `meow-tower` + `meow-tower-porting`.
 

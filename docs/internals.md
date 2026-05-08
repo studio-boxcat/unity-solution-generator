@@ -1,6 +1,6 @@
 # Internals
 
-> **Related:** [[CLAUDE.md]], [[architecture.md]], [[library.md]], [[benchmark.md]]
+> **Related:** [[CLAUDE.md]], [[architecture.md]], [[library-api.md]], [[benchmark.md]]
 
 Mechanics of the three subcommands (`lock`, `generate`, `typecheck`) — what they read, what they write, what the rules are. Architectural decisions live in [[architecture.md]]; this doc is the "given the architecture, what does each piece actually do?" reference.
 

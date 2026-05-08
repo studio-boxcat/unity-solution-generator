@@ -1,6 +1,6 @@
 # Unity Solution Generator
 
-> **Related:** [[architecture.md]], [[internals.md]], [[library.md]], [[benchmark.md]], [[TODO.md]]
+> **Related:** [[architecture.md]], [[internals.md]], [[library-api.md]], [[benchmark.md]], [[TODO.md]]
 
 Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
 
@@ -66,7 +66,7 @@ dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -
 
 ## Library API
 
-C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [[library.md]].
+C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [[library-api.md]].
 
 ## How it works
 
