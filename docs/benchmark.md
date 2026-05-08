@@ -70,15 +70,14 @@ Benchmarks on meow-tower (13 asm, ~5k .cs):
 | Scenario | `build-unity-sln` (no-emit) | `usg typecheck` | Δ |
 |---|---|---|---|
 | Warm no-op | 460 ms | **42 ms** | **10.7× faster** |
-| Touch + rebuild | 2.22 s | 2.99 s | 1.35× slower |
+| Touch + rebuild | 2.22 s | **1.54 s** | **1.44× faster** |
 | Cold rebuild | 1.47 s | 6.6 s | ~4.5× slower |
 
-Reproduce: `hyperfine 'unity-solution-generator typecheck . ios editor'` from a Unity project root.
+Reproduce: `hyperfine 'unity-solution-generator typecheck'` from anywhere inside a Unity project.
 
-The headline win is the warm-no-op path — what Hot Reload pre-flight hits constantly. Touch+rebuild and cold rebuild are slower because:
+Warm-no-op + touch+rebuild are both faster than the retired driver. The warm-no-op win comes from the mtime-based UTD short-circuit (no csc invocation at all). The touch+rebuild win comes from **content-hash UTD**: csc with `/refonly /deterministic` produces byte-identical output for unchanged inputs, so when a touched `.cs` upstream produces an identical `.dll`, we restore the pre-compile mtime and downstream UTD skips. Only the project whose source actually changed gets recompiled.
 
-- **Touch+rebuild cascades**: csc with `/refonly /deterministic` produces identical bytes for unchanged inputs, but the `.dll` mtime advances on each compile, so a touched `.cs` in upstream X cascades into rebuilds of all downstream projects. Fix queued in [[TODO.md]] (content-hash UTD).
-- **Cold rebuild**: each `dotnet exec csc.dll` cold-starts Roslyn (~390 ms JIT + load × 9 projects). Fix queued in [[TODO.md]] (VBCSCompiler `/shared` IPC).
+Cold rebuild is still slower: each `dotnet exec csc.dll` cold-starts Roslyn (~390 ms JIT + load × 9 projects). Fix queued in [[TODO.md]] (VBCSCompiler `/shared` IPC).
 
 ### Why MSBuild's warm-no-op floor is 460 ms
 

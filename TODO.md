@@ -1,24 +1,5 @@
 # TODO
 
-## Active
-
-### Content-hash UTD instead of mtime
-
-`typecheck` currently uses mtime-based up-to-date check. csc with
-`/refonly /deterministic` produces identical bytes for unchanged inputs,
-but the file mtime advances on each compile, so a touched `.cs` in
-upstream X cascades into an unnecessary rebuild of all downstream
-projects (their inputs include `X.dll` whose mtime is now > their
-output's mtime).
-
-Fix: hash the just-emitted `.dll` and compare to the previous hash;
-only update mtime / overwrite the file when bytes differ. Equivalent
-to `write_file_if_changed` for compile outputs.
-
-Expected impact: closes the touch+rebuild gap (currently 2.99 s vs the
-retired `build-unity-sln`'s 2.22 s on the same case) — only the actually-
-changed project recompiles, downstream UTD-skips.
-
 ## Deferred
 
 ### Direct `csc /shared` typecheck path

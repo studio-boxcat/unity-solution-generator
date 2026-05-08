@@ -8,10 +8,11 @@
 //! defeats stat-based UTD); we don't.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
+use std::fs::{self, File, FileTimes};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::error::{Result, io_err};
 use crate::lockfile::{DllRef, Lockfile, LockfileIO, RefCategory};
@@ -178,8 +179,28 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
         );
         fs::write(&rsp_path, rsp_body).map_err(|e| io_err(&rsp_path, e))?;
 
+        // Snapshot pre-compile bytes + mtime. csc with `/refonly /deterministic`
+        // produces byte-identical output for unchanged inputs, but the .dll's
+        // mtime advances on every emit — that cascades into spurious downstream
+        // rebuilds (downstream's UTD sees `upstream.dll` newer than its own
+        // output). Compare bytes after compile; if identical, restore the old
+        // mtime so the cascade never starts.
+        let prev_bytes = fs::read(&out_dll).ok();
+        let prev_mtime = mtime_nsec(&out_dll);
+
         match invoke_csc(&csc_dll, &rsp_path) {
-            Ok(()) => recompiled += 1,
+            Ok(()) => {
+                if let (Some(prev), Some(prev_t)) = (&prev_bytes, prev_mtime) {
+                    if let Ok(new) = fs::read(&out_dll) {
+                        if prev == &new {
+                            // Bytes identical — restore old mtime. Errors here
+                            // are non-fatal (worst case: spurious rebuild next run).
+                            let _ = restore_mtime(&out_dll, prev_t);
+                        }
+                    }
+                }
+                recompiled += 1;
+            }
             Err(stderr) => {
                 failures.insert(name.clone(), stderr);
                 failed_set.insert(name.clone());
@@ -367,6 +388,18 @@ fn mtime_nsec(p: impl AsRef<Path>) -> Option<u128> {
     let secs = m.mtime() as u128;
     let nsecs = m.mtime_nsec() as u128;
     Some(secs * 1_000_000_000 + nsecs)
+}
+
+/// Set `path`'s mtime to a previously-recorded `mtime_nsec` value.
+/// Used to roll back csc's freshly-emitted mtime when the bytes match the
+/// pre-compile bytes — see "content-hash UTD" in `run`.
+fn restore_mtime(path: &str, mtime_ns: u128) -> std::io::Result<()> {
+    let secs = (mtime_ns / 1_000_000_000) as u64;
+    let nanos = (mtime_ns % 1_000_000_000) as u32;
+    let t = UNIX_EPOCH + Duration::new(secs, nanos);
+    let f = File::options().write(true).open(path)?;
+    f.set_times(FileTimes::new().set_modified(t))?;
+    Ok(())
 }
 
 fn is_up_to_date(
