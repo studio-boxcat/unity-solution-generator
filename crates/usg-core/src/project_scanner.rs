@@ -16,7 +16,6 @@ use rayon::prelude::*;
 
 use crate::error::{GeneratorError, Result};
 use crate::io::{create_dir_all, has_matching_version, read_file, write_file_if_changed};
-use crate::json::{extract_json_bool, extract_json_string, extract_json_string_array};
 use crate::paths::{join_path, parent_directory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,70 +46,58 @@ impl AsmDefRecord {
     pub fn load(root_path: &str, relative_path: &str) -> Result<Option<AsmDefRecord>> {
         let full = join_path(root_path, relative_path);
         let json = read_file(&full)?;
-        let Some(name) = extract_json_string(&json, "name") else {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
+            // asmdef present but malformed — treat same as missing-name (skip).
             return Ok(None);
         };
-        let include_platforms = extract_json_string_array(&json, "includePlatforms");
-        let define_constraints = extract_json_string_array(&json, "defineConstraints");
+        let Some(name) = v.get("name").and_then(|x| x.as_str()).map(String::from) else {
+            return Ok(None);
+        };
+        let include_platforms = json_string_array(&v, "includePlatforms");
+        let define_constraints = json_string_array(&v, "defineConstraints");
         Ok(Some(AsmDefRecord {
             name,
             directory: parent_directory(relative_path).to_string(),
-            references: extract_json_string_array(&json, "references"),
+            references: json_string_array(&v, "references"),
             category: infer_category(&include_platforms, &define_constraints),
             include_platforms,
-            allow_unsafe_code: extract_json_bool(&json, "allowUnsafeCode").unwrap_or(false),
-            version_defines: parse_version_defines(&json),
+            allow_unsafe_code: v
+                .get("allowUnsafeCode")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            version_defines: parse_version_defines(&v),
         }))
     }
 }
 
-pub fn parse_version_defines(json: &str) -> Vec<VersionDefine> {
-    let needle = "\"versionDefines\"";
-    let Some(idx) = json.find(needle) else {
+fn json_string_array(v: &serde_json::Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn parse_version_defines(v: &serde_json::Value) -> Vec<VersionDefine> {
+    let Some(arr) = v.get("versionDefines").and_then(|x| x.as_array()) else {
         return Vec::new();
     };
-    let bytes = json.as_bytes();
-    let mut i = idx + needle.len();
-    while i < bytes.len() && bytes[i] != b'[' {
-        i += 1;
-    }
-    if i >= bytes.len() {
-        return Vec::new();
-    }
-    i += 1;
-    let mut out = Vec::new();
-    while i < bytes.len() {
-        match bytes[i] {
-            b']' => break,
-            b'{' => {
-                let obj_start = i;
-                let mut depth = 1;
-                i += 1;
-                while i < bytes.len() && depth > 0 {
-                    match bytes[i] {
-                        b'{' => depth += 1,
-                        b'}' => depth -= 1,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                let obj = &json[obj_start..i];
-                if let (Some(p), Some(d)) = (
-                    extract_json_string(obj, "name"),
-                    extract_json_string(obj, "define"),
-                ) {
-                    if !p.is_empty() && !d.is_empty() {
-                        out.push(VersionDefine {
-                            package_name: p,
-                            define: d,
-                        });
-                    }
-                }
+    arr.iter()
+        .filter_map(|obj| {
+            let p = obj.get("name").and_then(|x| x.as_str())?;
+            let d = obj.get("define").and_then(|x| x.as_str())?;
+            if p.is_empty() || d.is_empty() {
+                return None;
             }
-            _ => i += 1,
-        }
-    }
-    out
+            Some(VersionDefine {
+                package_name: p.to_string(),
+                define: d.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn infer_category(include_platforms: &[String], define_constraints: &[String]) -> ProjectCategory {
@@ -338,10 +325,13 @@ fn find_assembly_owner(directory: &str, assembly_roots: &HashMap<String, String>
 
 fn load_asm_ref(root_path: &str, relative_path: &str) -> Result<Option<(String, String)>> {
     let json = read_file(&join_path(root_path, relative_path))?;
-    let Some(reference) = extract_json_string(&json, "reference") else {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
         return Ok(None);
     };
-    Ok(Some((parent_directory(relative_path).to_string(), reference)))
+    let Some(reference) = v.get("reference").and_then(|x| x.as_str()) else {
+        return Ok(None);
+    };
+    Ok(Some((parent_directory(relative_path).to_string(), reference.to_string())))
 }
 
 fn resolve_legacy_project(directory: &str) -> Option<&'static str> {

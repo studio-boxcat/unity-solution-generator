@@ -10,7 +10,6 @@ use usg_core::{
     BuildConfig, BuildPlatform, DllRef, GenerateOptions, Lockfile, LockfileIO, ProjectScanner,
     RefCategory, SolutionGenerator,
     defines::{generate_version_defines, parse_scripting_defines},
-    json::extract_json_object_keys,
     solution_generator::render_directory_build_props,
 };
 
@@ -600,27 +599,9 @@ fn lockfile_generate_csproj_xml_well_formed() {
     assert_eq!(opens, closes);
 }
 
-#[test]
-fn extract_json_object_keys_test() {
-    let json = r#"{
-      "dependencies": {
-        "com.unity.modules.audio": "1.0.0",
-        "com.unity.modules.physics2d": "2.0.0",
-        "singular-unity-package": "3.1.0"
-      }
-    }"#;
-    let keys: std::collections::HashSet<String> =
-        extract_json_object_keys(json, "dependencies").into_iter().collect();
-    let expected: std::collections::HashSet<String> = [
-        "com.unity.modules.audio",
-        "com.unity.modules.physics2d",
-        "singular-unity-package",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    assert_eq!(keys, expected);
-}
+// `extract_json_object_keys_test` deleted along with `json.rs` (replaced by
+// `serde_json::Value::as_object().keys()` at the call sites). Behaviour
+// covered indirectly by the lockfile-scanner integration paths.
 
 #[test]
 fn scan_cache_invalidates_on_new_cs_file() {

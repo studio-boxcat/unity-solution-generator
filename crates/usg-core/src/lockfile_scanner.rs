@@ -11,7 +11,6 @@ use walkdir::WalkDir;
 use crate::defines::{DEFAULT_FEATURE_DEFINES, generate_version_defines, parse_scripting_defines};
 use crate::error::{LockfileError, Result};
 use crate::io::{file_exists, list_directory, read_file};
-use crate::json::extract_json_object_keys;
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{join_path, resolve_real_path};
 use crate::project_scanner::parse_version_defines;
@@ -381,8 +380,12 @@ fn collect_asmdef_version_defines(project_root: &str, asmdef_paths: &[String]) -
 
     let manifest_path = join_path(project_root, "Packages/manifest.json");
     if let Ok(manifest) = read_file(&manifest_path) {
-        for pkg in extract_json_object_keys(&manifest, "dependencies") {
-            installed_packages.insert(pkg);
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&manifest) {
+            if let Some(deps) = v.get("dependencies").and_then(|x| x.as_object()) {
+                for pkg in deps.keys() {
+                    installed_packages.insert(pkg.clone());
+                }
+            }
         }
     }
     for entry in list_directory(&join_path(project_root, "Packages")) {
@@ -397,7 +400,10 @@ fn collect_asmdef_version_defines(project_root: &str, asmdef_paths: &[String]) -
         let Ok(content) = read_file(path) else {
             continue;
         };
-        for vd in parse_version_defines(&content) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        for vd in parse_version_defines(&v) {
             if installed_packages.contains(&vd.package_name) {
                 all.insert(vd.define);
             }

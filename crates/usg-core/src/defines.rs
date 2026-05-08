@@ -1,5 +1,4 @@
 use crate::io::read_file;
-use crate::json::trim_ws;
 use crate::paths::join_path;
 
 /// Generate Unity's `UNITY_X_Y_Z`, `UNITY_X_Y`, `UNITY_X`, and `UNITY_X_Y_OR_NEWER`
@@ -143,10 +142,10 @@ pub fn parse_scripting_defines(project_root: &str) -> Vec<String> {
             break;
         }
         if let Some(colon) = line.find(':') {
-            let value = trim_ws(&line[colon + 1..]);
+            let value = line[colon + 1..].trim();
             if !value.is_empty() {
                 for d in value.split(';') {
-                    let d = trim_ws(d);
+                    let d = d.trim();
                     if !d.is_empty() {
                         all.insert(d.to_string());
                     }

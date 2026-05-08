@@ -3,7 +3,6 @@ use std::path::Path;
 
 use crate::error::{LockfileError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
-use crate::json::trim_ws;
 use crate::lock_cache;
 use crate::lockfile_scanner::LockfileScanner;
 use crate::paths::{join_path, lockfile_path, parent_directory};
@@ -347,7 +346,7 @@ fn write_ref_section(s: &mut String, name: &str, refs: &[DllRef]) {
 fn parse_header_line(line: &str) -> Option<(&str, &str)> {
     let colon = line.find(':')?;
     let key = &line[..colon];
-    let value = trim_ws(&line[colon + 1..]);
+    let value = line[colon + 1..].trim();
     Some((key, value))
 }
 

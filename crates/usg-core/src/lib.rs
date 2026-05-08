@@ -17,7 +17,6 @@ pub mod defines;
 pub mod error;
 pub(crate) mod generate_cache;
 pub mod io;
-pub mod json;
 pub(crate) mod lock_cache;
 pub mod lockfile;
 pub mod lockfile_scanner;

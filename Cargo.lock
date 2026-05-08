@@ -722,6 +722,7 @@ dependencies = [
  "ignore",
  "libc",
  "rayon",
+ "serde_json",
  "tempfile",
  "tracing",
  "walkdir",
