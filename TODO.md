@@ -25,6 +25,38 @@ Bypass MSBuild entirely on the warm path for an even lower floor (~50–150 ms v
 - **Strong precedent:** Unity's own [Bee](https://aras-p.info/blog/2019/06/21/Replacing-a-live-system-is-really-hard/) is exactly this pattern (custom DAG scheduler driving csc directly, cache in `Library/Bee/`). They chose not to wrap Ninja.
 - **Risk to avoid up front:** never write anything into the output `.dll`'s directory besides the `.dll` itself, or DIY UTD will misfire the same way MSBuild's `obj/.../CoreCompileInputs.cache` does today.
 
+### `usg-cli typecheck` — landed but not yet replacing `build-unity-sln`
+
+Phase 3 Ckpt 3 of the overhaul shipped the subcommand + module skeleton
+(`crates/usg-core/src/typecheck.rs`, ~280 LOC; CLI dispatch wired). It
+correctly: reads the lockfile, walks the asmdef DAG, builds csc args,
+resolves `$(UnityPath)` / `$(ProjectRoot)`, runs `dotnet exec csc.dll @rsp`
+per dirty project, aggregates exit codes, mtime-based UTD short-circuit.
+
+**Doesn't yet replace `build-unity-sln.sh`** because the lockfile contains
+several Unity-specific reference shapes that csc rejects:
+
+- **Native DLLs** in `Project` category (e.g.
+  `Assets/50_Modules/Tools/TexturePacker/Editor/unity_sprite_author.dll`)
+  → csc errors with `CS0009: PE image doesn't contain managed metadata`.
+  MSBuild's `ResolveAssemblyReferences` task filters these; we need
+  equivalent filtering — either pattern-based (e.g. directories named
+  `Editor` next to platform-native binaries) or PE-header inspection
+  (read the first ~80 bytes, check for COR header).
+- **Cascading failures**: when one project fails to compile (above), all
+  downstream projects fail with `CS0006: Metadata file ... could not be
+  found` because their `/reference:` to that project's output dll is now
+  missing. Need to either skip-downstream-on-upstream-failure or accumulate
+  diagnostics differently.
+- The `info USG0001: Only allowed to have one file passed in with
+  extension '.AdditionalFile.txt'` warning suggests Unity's Roslyn analyzer
+  config is being pulled in twice. Investigate whether we should pass
+  `/additionalfile:` flags or filter the analyzer set.
+
+Until these land, `build-unity-sln.sh` stays the canonical compile-check
+driver. The Hot Reload pre-flight in `meow-tower/justfile:105` continues
+calling `build-unity-sln editor`.
+
 ### Other rejected/closed during no-emit wiring
 
 - `-t:CoreCompile` (alone) — broke `ResolveProjectReferences`, downstream csprojs lose refs to upstream. Has to be `-t:Build` with property-level skips.

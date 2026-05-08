@@ -48,7 +48,7 @@ impl From<LockfileError> for GeneratorError {
     }
 }
 
-pub(crate) fn io_err(path: impl Into<String>, source: io::Error) -> GeneratorError {
+pub fn io_err(path: impl Into<String>, source: io::Error) -> GeneratorError {
     GeneratorError::Io {
         path: path.into(),
         source,

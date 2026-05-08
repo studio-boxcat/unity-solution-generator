@@ -2,7 +2,8 @@ use std::process::ExitCode;
 
 use usg_core::{
     BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
-    SolutionGenerator, lockfile_path, resolve_project_root,
+    SolutionGenerator, TypecheckOptions, lockfile_path, resolve_project_root,
+    typecheck::run as typecheck_run,
 };
 
 fn main() -> ExitCode {
@@ -22,8 +23,15 @@ fn main() -> ExitCode {
             args.remove(0);
             run_generate(&args)
         }
+        Some("typecheck") => {
+            args.remove(0);
+            run_typecheck(&args)
+        }
         Some(other) => {
-            die(&format!("Unknown command '{}'. Use 'lock' or 'generate'.", other));
+            die(&format!(
+                "Unknown command '{}'. Use 'lock', 'generate', or 'typecheck'.",
+                other
+            ));
         }
         None => unreachable!(),
     }
@@ -147,6 +155,83 @@ fn run_generate(args: &[String]) -> ExitCode {
     }
 }
 
+fn run_typecheck(args: &[String]) -> ExitCode {
+    if args.len() < 3 {
+        die("typecheck requires: <unity-root> <platform> <config> [options]");
+    }
+    let project_root = &args[0];
+    let Some(platform) = BuildPlatform::parse(&args[1]) else {
+        die(&format!(
+            "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
+            args[1]
+        ));
+    };
+    let Some(build_config) = BuildConfig::parse(&args[2]) else {
+        die(&format!(
+            "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
+            args[2]
+        ));
+    };
+
+    let mut extra_refs_raw: Option<String> = None;
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--extra-refs" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--extra-refs requires a comma-separated list of DLL paths");
+                }
+                extra_refs_raw = Some(args[i].clone());
+            }
+            other => die(&format!("Unknown option: {}", other)),
+        }
+        i += 1;
+    }
+
+    let resolved = resolve_project_root(project_root);
+    let extra_refs = extra_refs_raw
+        .as_deref()
+        .map(DllRef::parse_list)
+        .unwrap_or_default();
+    let opts = TypecheckOptions::new(resolved, platform)
+        .with_build_config(build_config)
+        .with_extra_refs(extra_refs);
+
+    match typecheck_run(&opts) {
+        Ok(result) => {
+            if result.ok() {
+                eprintln!(
+                    "ok: {} recompiled, {} skipped",
+                    result.recompiled, result.skipped
+                );
+                ExitCode::SUCCESS
+            } else {
+                for (name, msg) in &result.failures {
+                    eprintln!("=== {} ===", name);
+                    eprintln!("{}", msg);
+                }
+                eprintln!(
+                    "FAILED: {}/{} project(s) ({})",
+                    result.failures.len(),
+                    result.failures.len() + result.recompiled + result.skipped,
+                    result
+                        .failures
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn die(msg: &str) -> ! {
     eprintln!("error: {}", msg);
     std::process::exit(1);
@@ -179,10 +264,14 @@ fn print_usage() {
         "USAGE:
   unity-solution-generator lock <unity-root>
   unity-solution-generator generate <unity-root> <platform> <config> [options]
+  unity-solution-generator typecheck <unity-root> <platform> <config> [options]
 
 COMMANDS:
   lock                  Scan Unity installation and project to generate csproj.lock
   generate              Regenerate .csproj/.sln for a platform+config variant
+  typecheck             Validate compile via direct csc.dll invocation
+                        (no MSBuild). Replaces build-unity-sln for Hot Reload
+                        pre-flight workflows.
 
 ARGUMENTS:
   unity-root            Unity project root

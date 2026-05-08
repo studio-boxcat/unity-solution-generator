@@ -24,6 +24,7 @@ pub mod paths;
 pub mod profile;
 pub mod project_scanner;
 pub mod solution_generator;
+pub mod typecheck;
 pub(crate) mod walk;
 pub mod xml;
 
@@ -38,6 +39,7 @@ pub use project_scanner::{AsmDefRecord, ProjectCategory, ProjectScanner, ScanRes
 pub use solution_generator::{
     BuildConfig, BuildPlatform, GenerateOptions, GenerateResult, SolutionGenerator,
 };
+pub use typecheck::{TypecheckOptions, TypecheckResult};
 /// Test-only re-exports of internal helpers. Not part of the stable public API.
 #[doc(hidden)]
 pub mod __test_only {

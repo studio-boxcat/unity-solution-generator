@@ -46,7 +46,7 @@ impl BuildPlatform {
         }
     }
 
-    fn platform_defines(self) -> &'static [&'static str] {
+    pub fn platform_defines(self) -> &'static [&'static str] {
         match self {
             BuildPlatform::Ios => &["UNITY_IOS", "UNITY_IPHONE"],
             BuildPlatform::Android => &["UNITY_ANDROID"],
