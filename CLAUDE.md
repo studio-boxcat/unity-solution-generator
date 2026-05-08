@@ -1,6 +1,6 @@
 # Unity Solution Generator
 
-> **Related:** [[architecture.md]], [[library.md]], [[benchmark.md]], [[TODO.md]]
+> **Related:** [[architecture.md]], [[internals.md]], [[library.md]], [[benchmark.md]], [[TODO.md]]
 
 Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
 
@@ -56,11 +56,9 @@ Platform defines:
 
 ### Compile validation (`typecheck`)
 
-`unity-solution-generator typecheck .` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck . android dev` etc.). Output goes to `Library/UnitySolutionGenerator/typecheck-<variant>/`; the assemblies are `csc /refonly` metadata-only stubs (not runnable — Unity does the real build).
+`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). Output assemblies are metadata-only stubs (not runnable — Unity does the real build). Mechanics in [[internals.md]]; benchmarks in [[benchmark.md]].
 
-The headline win is the warm-no-op path: ~42 ms on meow-tower (13 asmdefs) via mtime-based UTD short-circuit. Cold rebuild is ~6 s (each `dotnet exec csc.dll` cold-starts Roslyn — closing this gap requires VBCSCompiler IPC, see [[TODO.md]]). Benchmarks: [[benchmark.md]].
-
-The previous shell driver (`build-unity-sln.sh`) wrapped `dotnet build` with retry-on-failure and parallel cartesian-product variants; it was retired once `typecheck` cleared the Unity-quirk filtering bar (native-DLL filter, cascading-failure handling). For full IL output (rarely needed since Unity rebuilds the solution itself), call MSBuild directly:
+For full IL output (rarely needed since Unity rebuilds the solution itself), call MSBuild directly:
 
 ```bash
 dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v:q
@@ -72,50 +70,18 @@ C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [
 
 ## How it works
 
+Three subcommands sharing a scan + lockfile:
+
 ```mermaid
 graph LR
     A[lock] -->|scan Unity + project| B[csproj.lock]
     B --> C[generate]
+    B --> T[typecheck]
     C -->|+ asmdef scan| D[.csproj/.sln]
+    T -->|+ asmdef scan + csc.dll| E[diagnostics]
 ```
 
-1. **Lock** scans the Unity installation and project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` to find the Unity install path, then scans `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, and `Library/PackageCache/`. Output: `csproj.lock`.
-
-2. **Generate** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, and renders `.csproj` files (XML header + analyzers + DLL refs + compile patterns + project references) + `.sln` + `Directory.Build.props` (injects `$(ProjectRoot)`, `$(UnityPath)`, and all defines). The output directory (defaulted to `Library/UnitySolutionGenerator/<variant>/`, overridable via the Rust API's `with_output_dir`) controls compile pattern prefix depth — one `../` per path component back to project root.
-
-
-### Category inference
-
-| Rule | Category |
-|------|----------|
-| `defineConstraints` contains `"UNITY_INCLUDE_TESTS"` | **test** |
-| `includePlatforms` is exactly `["Editor"]` | **editor** |
-| `defineConstraints` contains `"UNITY_EDITOR"` | **editor** |
-| Everything else | **runtime** |
-
-Platform-specific assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`) are treated as **runtime**, but only included in prod/dev variants when the target platform matches. Editor variants include all projects regardless.
-
-### Source ownership
-
-For each directory containing `.cs` files, the generator walks upward to the nearest `asmdef` or `asmref` assembly root. Unresolved directories fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.). Directories ending with `~` or starting with `.` are excluded.
-
-### Directory structure
-
-All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored):
-
-```
-Library/UnitySolutionGenerator/
-  csproj.lock                     ← lockfile (user-visible, may be checked in)
-  scan-cache                      ← cached filesystem scan (mtime-validated)
-  lock-fingerprint                ← short-circuits `lock` when nothing changed
-  .fingerprints/<options-hash>    ← short-circuits `generate` when nothing changed
-  ios-editor/                     ← variant: .csproj + .sln + Directory.Build.props
-  android-prod/
-  typecheck-ios-editor/           ← variant: csc-emitted ref-only .dlls + .rsp files (typecheck subcommand)
-  ...
-```
-
-Cache files are version-headed (`CACHE_VERSION` in `lib.rs`); a constant bump triggers wholesale cold rebuild. The user-visible `csproj.lock` has its own `LOCKFILE_VERSION` so dev-local cache changes don't touch checked-in lockfiles.
+Mechanics — category-inference rules, source-ownership walk, on-disk layout, cache versioning, typecheck internals — live in [[internals.md]].
 
 ## Performance
 
