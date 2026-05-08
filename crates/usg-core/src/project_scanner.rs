@@ -377,9 +377,10 @@ fn resolve_legacy_project(directory: &str) -> Option<&'static str> {
 
 // ── scan cache ────────────────────────────────────────────────────────────
 
-/// Bump on incompatible scan-cache format changes. Old caches will silently
-/// regenerate — never silently parse with stale meaning.
-const SCAN_CACHE_VERSION: u32 = 1;
+/// Routed through the workspace-level `CACHE_VERSION` so the scan-cache,
+/// lock-fingerprint, and generate-fingerprint all bump together. See
+/// [[architecture.md]] (Versioning section).
+const SCAN_CACHE_VERSION: u32 = crate::CACHE_VERSION;
 
 fn load_cached_scan(cache_path: &str, root_path: &str) -> Option<FileScan> {
     let _s = tracing::info_span!("scan_cache.validate").entered();

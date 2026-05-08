@@ -16,9 +16,8 @@ use crate::paths::{join_path, parent_directory};
 
 const FINGERPRINT_FILE: &str = "lock-fingerprint";
 
-/// Bump on incompatible lock-fingerprint format changes. Old fingerprints will
-/// silently regenerate — never silently parse with stale meaning.
-const LOCK_FINGERPRINT_VERSION: u32 = 1;
+/// Routed through the workspace-level `CACHE_VERSION`. See [[architecture.md]].
+const LOCK_FINGERPRINT_VERSION: u32 = crate::CACHE_VERSION;
 
 pub fn fingerprint_path(generator_dir: &str) -> String {
     join_path(generator_dir, FINGERPRINT_FILE)

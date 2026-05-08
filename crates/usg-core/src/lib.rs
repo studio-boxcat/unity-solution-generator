@@ -2,6 +2,17 @@
 //!
 //! Ported from the Swift `SolutionGeneratorCore` target.
 
+/// Version of the user-visible `csproj.lock` format. Bump only on intentional
+/// schema changes; `csproj.lock` may be checked in, so a bump means consumers
+/// re-lock against possibly different Unity installs. See [[architecture.md]].
+pub const LOCKFILE_VERSION: u32 = 1;
+
+/// Version of the dev-local cache files (`scan-cache`, `lock-fingerprint`,
+/// `.fingerprints/<hash>`). Bumping invalidates ALL three caches wholesale —
+/// no migrations. These files are gitignored under `Library/`, so cold-rebuild
+/// on bump is harmless. Cargo / Bazel idiom.
+pub const CACHE_VERSION: u32 = 1;
+
 pub mod defines;
 pub mod error;
 pub(crate) mod generate_cache;

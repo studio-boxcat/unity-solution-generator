@@ -23,9 +23,8 @@ use crate::solution_generator::{GenerateOptions, GenerateResult};
 
 const FINGERPRINTS_DIR: &str = ".fingerprints";
 
-/// Bump on incompatible generate-fingerprint format changes. Old fingerprints
-/// will silently regenerate — never silently parse with stale meaning.
-const GENERATE_FINGERPRINT_VERSION: u32 = 1;
+/// Routed through the workspace-level `CACHE_VERSION`. See [[architecture.md]].
+const GENERATE_FINGERPRINT_VERSION: u32 = crate::CACHE_VERSION;
 
 /// Build the canonical options string. Anything that affects the rendered
 /// output goes here; anything cosmetic (e.g. `verbose`, which only affects
