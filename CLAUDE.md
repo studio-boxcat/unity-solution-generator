@@ -1,6 +1,6 @@
 # Unity Solution Generator
 
-> **Related:** [[architecture.md]], [[internals.md]], [[library-api.md]], [[benchmark.md]], [[TODO.md]]
+> **Related:** [[architecture.md]], [[library-api.md]], [[benchmark.md]], [[TODO.md]]
 
 Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
 
@@ -56,7 +56,7 @@ Platform defines:
 
 ### Compile validation (`typecheck`)
 
-`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). Output assemblies are metadata-only stubs (not runnable — Unity does the real build). Mechanics in [[internals.md]]; benchmarks in [[benchmark.md]].
+`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). Output assemblies are metadata-only stubs (not runnable — Unity does the real build). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
 
 For full IL output (rarely needed since Unity rebuilds the solution itself), call MSBuild directly:
 
@@ -81,7 +81,7 @@ graph LR
     T -->|+ asmdef scan + csc.dll| E[diagnostics]
 ```
 
-Mechanics — category-inference rules, source-ownership walk, on-disk layout, cache versioning, typecheck internals — live in [[internals.md]].
+Mechanics — category-inference rules, source-ownership walk, on-disk layout, cache versioning, typecheck internals — live in [[architecture.md]].
 
 ## Performance
 
