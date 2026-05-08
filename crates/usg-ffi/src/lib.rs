@@ -49,8 +49,14 @@ unsafe fn cstr_to_str<'a>(p: &'a *const c_char) -> Option<&'a str> {
 /// Generate `.csproj`/`.sln` files from an existing lockfile.
 /// Auto-runs the equivalent of `unity-solution-generator lock` if no lockfile exists.
 ///
+/// `slnPathOut` / `slnPathOutLen` are optional — pass `NULL, 0` to skip. When
+/// non-null, the buffer receives the relative path to the generated `.sln`
+/// (NUL-terminated). Negative `slnPathOutLen` is rejected (would otherwise
+/// sign-extend in the bounds check).
+///
 /// # Safety
 /// All `*const c_char` arguments must be valid NUL-terminated UTF-8 (or null where allowed).
+/// `slnPathOut`, when non-null, must point to a writable buffer of at least `slnPathOutLen` bytes.
 /// Single-threaded contract — caller must serialize calls (cache files aren't reentrant-safe).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn usg_generate(
@@ -59,6 +65,8 @@ pub unsafe extern "C" fn usg_generate(
     config: *const c_char,
     output_dir: *const c_char,
     extra_refs: *const c_char,
+    sln_path_out: *mut c_char,
+    sln_path_out_len: c_int,
 ) -> c_int {
     clear_last_error();
 
@@ -108,9 +116,39 @@ pub unsafe extern "C" fn usg_generate(
             return 1;
         }
     };
-    if let Err(e) = SolutionGenerator::new().generate_from_lockfile(&options, &lockfile) {
-        set_last_error(format!("{}", e));
-        return 1;
+    let result = match SolutionGenerator::new().generate_from_lockfile(&options, &lockfile) {
+        Ok(r) => r,
+        Err(e) => {
+            set_last_error(format!("{}", e));
+            return 1;
+        }
+    };
+
+    if !sln_path_out.is_null() {
+        // C# `int` is signed; a negative value here would sign-extend to a huge
+        // `usize` and bypass the bounds check, allowing an OOB write into the
+        // caller's buffer. Reject up front.
+        if sln_path_out_len <= 0 {
+            set_last_error(format!(
+                "Invalid slnPathOutLen ({}); must be > 0",
+                sln_path_out_len
+            ));
+            return 1;
+        }
+        let path = result.variant_sln_path.as_bytes();
+        let cap = sln_path_out_len as usize;
+        if path.len() + 1 > cap {
+            set_last_error(format!(
+                "Buffer too small ({} bytes) for path ({} needed)",
+                cap,
+                path.len() + 1
+            ));
+            return 1;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(path.as_ptr(), sln_path_out as *mut u8, path.len());
+            *sln_path_out.add(path.len()) = 0;
+        }
     }
     0
 }

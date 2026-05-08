@@ -343,19 +343,19 @@ fn is_up_to_date(
         return false;
     };
     for s in sources {
-        if mtime_nsec(s).is_none_or(|t| t > out_mtime) {
+        if mtime_nsec(s).map_or(true, |t| t > out_mtime) {
             return false;
         }
     }
     for r in refs {
         // Refs are pre-resolved (`$(UnityPath)` substituted) by `run`.
         // If a path doesn't exist, treat as dirty.
-        if mtime_nsec(&r.path).is_none_or(|t| t > out_mtime) {
+        if mtime_nsec(&r.path).map_or(true, |t| t > out_mtime) {
             return false;
         }
     }
     for p in proj_refs {
-        if mtime_nsec(p).is_none_or(|t| t > out_mtime) {
+        if mtime_nsec(p).map_or(true, |t| t > out_mtime) {
             return false;
         }
     }

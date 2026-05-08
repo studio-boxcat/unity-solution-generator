@@ -12,7 +12,7 @@ Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical m
 |---------|----------|-------|
 | `generate` (warm — fingerprint hit) | **2.1 ± 0.5 ms** | 1.6–5.6 |
 | `generate` (warm scan-cache, fingerprint missing) | ~5.6 ± 1.0 ms | 4.2–9.8 |
-| `generate --root` | **5.5 ± 0.5 ms** | 4.9–7.9 |
+| `generate` (output to project root via Rust API) | **5.5 ± 0.5 ms** | 4.9–7.9 |
 | `lock` (cold, fingerprint nuked each run) | **29.8 ± 2.4 ms** | 26.1–33.7 |
 | `lock` (warm — fingerprint hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
 | startup (`--help`) | ~2 ms | — |

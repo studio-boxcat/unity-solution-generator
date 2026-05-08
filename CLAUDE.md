@@ -1,5 +1,7 @@
 # Unity Solution Generator
 
+> **Related:** [[architecture.md]], [[library.md]], [[benchmark.md]], [[TODO.md]]
+
 Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
 
 Cargo workspace under `crates/`:
@@ -27,23 +29,16 @@ just profile                  # benchmark against meow-tower
 ```bash
 unity-solution-generator lock .                             # scan + write lockfile
 unity-solution-generator generate . ios editor              # default: Library/UnitySolutionGenerator/ios-editor/
-unity-solution-generator generate . ios editor --root       # output to project root
-unity-solution-generator generate . ios editor \
-  --output Library/hotreload/Solution                       # output to custom dir
 unity-solution-generator generate . ios editor \
   --extra-refs "/path/to/Extra.dll,/path/to/Other.dll"     # additional DLL references
+unity-solution-generator typecheck . ios editor             # validate compile via direct csc (partial — see TODO)
 ```
-
-`init` is a deprecated alias for `lock`.
 
 Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx`. Config: `prod` | `dev` | `editor`.
 
 | Option | Description |
 |--------|-------------|
-| `-o`, `--output <dir>` | Output to `<dir>` (relative to project root) instead of variant subdir |
-| `--root` | Alias for `--output .` (output to project root) |
 | `--extra-refs <paths>` | Comma-separated absolute paths to additional DLLs |
-| `-v`, `--verbose` | Print unresolved directory samples |
 
 ### Platform + configuration
 
@@ -75,13 +70,13 @@ build-unity-sln --emit ios editor         # full build with runnable IL (slower;
 
 The default is a fast compile-check: Roslyn emits metadata-only ref assemblies (no IL, no method bodies), analyzers/pdb/post-compile copies skipped, MSBuild Server persists across calls. ~2× faster than `--emit`. Output is NOT runnable — Unity does the real build.
 
-Pass `--emit` only when you need actual IL output (e.g. running the assemblies outside Unity). Benchmarks: [[docs/benchmark.md]].
+Pass `--emit` only when you need actual IL output (e.g. running the assemblies outside Unity). Benchmarks: [[benchmark.md]].
 
 **Pitfalls of the default (no-emit) mode:**
 - Output assemblies are ref-only stubs — not runnable.
 - Alternating default and `--emit` invalidates MSBuild's up-to-date check (different artifact at same path) → first run after toggle is a full rebuild. Pin each workflow to one mode.
 
-Less-likely-to-bite pitfalls (rare-Roslyn diagnostic gaps, source generators still running): see [[docs/benchmark.md]].
+Less-likely-to-bite pitfalls (rare-Roslyn diagnostic gaps, source generators still running): see [[benchmark.md]].
 
 Or call the generator directly — output is the `.sln` path to stdout:
 
@@ -91,7 +86,7 @@ dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -
 
 ## Library API
 
-C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [[docs/library.md]].
+C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [[library.md]].
 
 ## How it works
 
@@ -104,7 +99,7 @@ graph LR
 
 1. **Lock** scans the Unity installation and project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` to find the Unity install path, then scans `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, and `Library/PackageCache/`. Output: `csproj.lock`.
 
-2. **Generate** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, and renders `.csproj` files (XML header + analyzers + DLL refs + compile patterns + project references) + `.sln` + `Directory.Build.props` (injects `$(ProjectRoot)`, `$(UnityPath)`, and all defines). `--output` controls compile pattern prefix depth — one `../` per path component from output directory back to project root.
+2. **Generate** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, and renders `.csproj` files (XML header + analyzers + DLL refs + compile patterns + project references) + `.sln` + `Directory.Build.props` (injects `$(ProjectRoot)`, `$(UnityPath)`, and all defines). The output directory (defaulted to `Library/UnitySolutionGenerator/<variant>/`, overridable via the Rust API's `with_output_dir`) controls compile pattern prefix depth — one `../` per path component back to project root.
 
 
 ### Category inference
@@ -134,12 +129,15 @@ Library/UnitySolutionGenerator/
   .fingerprints/<options-hash>    ← short-circuits `generate` when nothing changed
   ios-editor/                     ← variant: .csproj + .sln + Directory.Build.props
   android-prod/
+  typecheck-ios-editor/           ← variant: csc-emitted ref-only .dlls + .rsp files (typecheck subcommand)
   ...
 ```
 
+Cache files are version-headed (`CACHE_VERSION` in `lib.rs`); a constant bump triggers wholesale cold rebuild. The user-visible `csproj.lock` has its own `LOCKFILE_VERSION` so dev-local cache changes don't touch checked-in lockfiles.
+
 ## Performance
 
-End-to-end + microbenchmark numbers, per-section profiling output, caching-layer details, concurrency notes, and `USG_PROFILE` instrumentation: see [[docs/benchmark.md]].
+End-to-end + microbenchmark numbers, per-section profiling output, caching-layer details, concurrency notes, and `USG_PROFILE` instrumentation: see [[benchmark.md]].
 
 Quick refs:
 - `just profile` / `just profile-spans` — meow-tower wall-clock + per-section breakdown

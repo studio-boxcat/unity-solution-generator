@@ -1,67 +1,72 @@
-# Architecture (DRAFT v2)
+# Architecture
 
 > **Related:** [[CLAUDE.md]], [[benchmark.md]], [[library.md]], [[TODO.md]]
->
-> Status: design draft. Phase 4 finalizes against what ships.
+
+What the codebase looks like after the Phase-3 overhaul. Borrows ideas from the literature, scaled to a 3.6 k-LOC tool with four caller sites — none of those four are CI, none are external repos beyond `meow-tower` + `meow-tower-porting`.
 
 ## Background
 
-Ported from Swift, the codebase has accreted a few localized smells: hand-rolled `json.rs` that silently truncates on edge cases, three uncoordinated cache version constants (`SCAN_CACHE_VERSION` / `LOCK_FINGERPRINT_VERSION` / `GENERATE_FINGERPRINT_VERSION`), category-inference rules duplicated between `project_scanner.rs:116` and `solution_generator.rs:245`, parallel-walk Flusher boilerplate copy-pasted between `project_scanner` and `lockfile_scanner`. The public surface also exports flags and FFI functions no consumer uses (`init`, `--output`/`--root`, `--verbose`, `usg_lock`, `osx` platform).
+Ported from Swift, the codebase had accreted a few localized smells: hand-rolled JSON parser that silently truncated on edge cases, three uncoordinated cache version constants, parallel-walk Flusher boilerplate copy-pasted between `project_scanner` and `lockfile_scanner`. The public surface also exported flags and FFI functions no consumer used (`init`, `--output`, `--verbose`, `usg_lock`, FFI buffer args).
 
-This redesign trims the public surface to the **four real consumers** (audit found exactly four call sites total: two CLI via `build-unity-sln`, two FFI from Rider — both in `meow-tower` and `meow-tower-porting`), dedupes the internal accretion, and adds a `typecheck` subcommand that replaces the `build-unity-sln.sh` shell driver.
+The overhaul trimmed the public surface to the four real consumers, deduped the internal accretion, and added a `typecheck` subcommand that bypasses MSBuild for compile-check workflows. The shell driver (`build-unity-sln.sh`) is **kept** for now — typecheck shipped as a partial; Unity-quirk filtering (native DLLs in `/reference:`) needs more work before it can replace the driver. See [[TODO.md]].
+
+## Prior art (what we borrowed)
+
+- **`com.unity.ide.rider`** ([needle-mirror](https://github.com/needle-mirror/com.unity.ide.rider)) — flat library shape, single `SyncSolution` entry point. Confirms our shape.
+- **Bee** ([Unity blog](https://blog.unity.com/engine-platform/accelerating-player-builds-with-incremental-build-pipeline)) — separates *describe graph* (pure data) from *execute graph* (workers/scheduling). At 13 asmdefs we kept this discipline as just `TypecheckOptions` + `run`, not two struct types.
+- **Cargo** ([Cargo Targets](https://doc.rust-lang.org/cargo/reference/cargo-targets.html), [RFC 3477](https://rust-lang.github.io/rfcs/3477-cargo-check-lang-policy.html)) — single binary with subcommands; `cargo check` was a subcommand from day one. Justifies retiring `build-unity-sln.sh` once typecheck is production-ready.
+- **Roslyn Compiler Server** ([Compiler Server.md](https://github.com/dotnet/roslyn/blob/main/docs/compilers/Compiler%20Server.md)) — VBCSCompiler IPC. We use `dotnet exec csc.dll` per project (no `/shared`); direct IPC deferred to [[TODO.md]].
+- **Cargo + Bazel** ([many caches of Bazel](https://blog.engflow.com/2024/05/13/the-many-caches-of-bazel/)) — wholesale cache invalidation via single version constant. No migrations.
 
 ## Use cases
 
+Audit found exactly **4 caller sites** total. The redesign is sized for these and nothing else.
+
 | Consumer | Channel | Surface needed |
 |---|---|---|
-| `meow-tower` Hot Reload pre-flight (`justfile:105`) | CLI | `typecheck <root> <platform> <config>` exit code |
+| `meow-tower` Hot Reload pre-flight (`justfile:105`) | CLI | `build-unity-sln editor` exit code |
 | `meow-tower-porting` (same recipe) | CLI | same |
-| Rider in-Editor regen (`ProjectGeneration.cs:91`) | FFI | `usg_generate(root, platform, "editor", ".", extraRefs)` + `usg_last_error()` |
+| Rider in-Editor regen (`ProjectGeneration.cs:91`) | FFI | `usg_generate(root, "ios", "editor", ".", extraRefs)` + `usg_last_error()` |
 | Rider in-Editor regen (porting) | FFI | same |
 
 No CI, no other repos, no other tools.
 
-## End-state layout
+## Layout
 
 ```
 crates/
-  usg-core/                 lib + bin (companion-bin idiom — drops usg-cli package)
-    Cargo.toml              [lib] + [[bin]] unity-solution-generator
+  usg-core/                 lib (separate `usg-cli` package owns the binary)
+    Cargo.toml              [lib]
     src/
       lib.rs                pub API + LOCKFILE_VERSION + CACHE_VERSION constants
-      main.rs               CLI dispatch — arg parse only
-      lockfile.rs           Lockfile, DllRef, RefCategory, BuildPlatform, BuildConfig,
-                            ProjectCategory + the ONE category-inference rule
-      asmdef.rs             AsmDef record (serde_json — replaces hand-rolled json.rs)
-      defines.rs            existing, unchanged
-      fs.rs                 paths, write_if_changed (was paths.rs + io.rs)
-      walk.rs               ONE parallel-walk helper                      ← NEW
-      scan.rs               unity install + project scan
-                            (merge of lockfile_scanner.rs + project_scanner.rs walk paths)
-      generate.rs           render + write csproj/sln/Directory.Build.props
-                            (was solution_generator.rs; rendering inline, no sub-tree)
-      typecheck.rs          run(opts) -> ExitCode                         ← NEW
-      lock_cache.rs         existing; reads CACHE_VERSION from lib.rs
-      generate_cache.rs     existing; reads CACHE_VERSION from lib.rs
-      error.rs              single Error enum
-      profile.rs            unchanged
-      xml.rs                unchanged (deterministic GUID is a pinned invariant)
-      ⌫ json.rs             DELETED
-
-  usg-ffi/                  unchanged shape; signatures shrunk
-    Cargo.toml
-    build.rs                unchanged
-    src/lib.rs              shrunk: 2 fns (was 3) + simpler signatures
-    tests/abi_smoke.rs      extended for new signature
-
-dist/
-  unity-solution-generator         (built bin)
-  libUnitySolutionGenerator.dylib  (built FFI)
-  UnitySolutionGenerator.h         (manually maintained)
-  ⌫ build-unity-sln.sh             ← DELETED — typecheck subcommand replaces it
+      lockfile.rs           Lockfile, DllRef, RefCategory, LockfileIO
+      project_scanner.rs    project-side scan; AsmDefRecord, ProjectCategory
+      lockfile_scanner.rs   Unity-install + project DLL/asmdef scan
+      solution_generator.rs render + write csproj/sln/Directory.Build.props
+      typecheck.rs          DAG walk + csc invocations  (NEW, partial)
+      walk.rs               ONE shared parallel-walk helper (NEW)
+      lock_cache.rs         lock-fingerprint cache; reads CACHE_VERSION
+      generate_cache.rs     generate-fingerprint cache; reads CACHE_VERSION
+      defines.rs            version + scripting defines
+      paths.rs              path utilities
+      io.rs                 read/write helpers + version-header validator
+      profile.rs            tracing macros
+      xml.rs                escape + deterministic GUID (pinned invariant)
+      error.rs              GeneratorError + LockfileError + io_err helper
+  usg-cli/
+    Cargo.toml              [[bin]] unity-solution-generator
+    src/main.rs             arg parse + subcommand dispatch
+    tests/cli_regression.rs CLI surface pinning
+  usg-ffi/
+    Cargo.toml              [lib] cdylib + rlib (`UnitySolutionGenerator`)
+    build.rs                installs @rpath/<dylib> macOS install_name
+    src/lib.rs              C ABI: usg_generate + usg_last_error
+    tests/abi_smoke.rs      FFI signature pinning (post-trim)
 ```
 
-Net: 13 modules in `usg-core` (was 13 — `json.rs` deleted, `walk.rs` added; `paths.rs` + `io.rs` collapse to `fs.rs`; rendering inlines into `generate.rs`). Two crates instead of three.
+`json.rs` deleted — replaced by `serde_json::Value` extraction at each call site.
+
+`usg-cli` was NOT folded into `usg-core` as a `[[bin]]` target (architecture v1 proposed it; left for a future cleanup since the binary path is unaffected and the rename is mechanical churn that could break shell-script callers if anything goes wrong).
 
 ## Public API
 
@@ -70,134 +75,92 @@ Net: 13 modules in `usg-core` (was 13 — `json.rs` deleted, `walk.rs` added; `p
 | Subcommand | Args | Status |
 |---|---|---|
 | `lock` | `<root>` | unchanged |
-| `generate` | `<root> <platform> <config> [--extra-refs <paths>]` | trimmed |
-| `typecheck` | `<root> <platform> <config> [--extra-refs <paths>]` | NEW |
+| `generate` | `<root> <platform> <config> [--extra-refs <paths>]` | trimmed (no `--output`/`--root`/`-v`) |
+| `typecheck` | `<root> <platform> <config> [--extra-refs <paths>]` | NEW, partial — see [[TODO.md]] |
 
-Dropped: `init` (deprecated), `--output`/`--root` (no consumer — FFI hardcodes `.`, CLI uses default variant dir), `-v`/`--verbose` (no reader), `osx` platform (no consumer — confirmed by audit; CLAUDE.md mention is aspirational).
+Dropped: `init` (deprecated alias), `--output`/`--root`, `-v`/`--verbose`.
 
 ### FFI (cdylib)
 
 ```c
 int32_t usg_generate(const char *projectRoot, const char *platform,
                      const char *config, const char *outputDir,
-                     const char *extraRefs);
+                     const char *extraRefs,
+                     char *slnPathOut, int32_t slnPathOutLen);
 const char *usg_last_error(void);
 ```
 
-Dropped: `usg_lock` (no caller); `slnPathOut` + `slnPathOutLen` args (Rider passes `IntPtr.Zero, 0`, no other caller).
+Dropped: `usg_lock` (no caller). The `slnPathOut` / `slnPathOutLen` args were *kept* — although Rider passes `IntPtr.Zero, 0` and never reads the path, the buffer machinery is non-trivial to retire safely (signature changes ripple through the dylib + C# DllImport in lockstep) and the negative-buffer-len sign-extend hazard is structurally guarded.
 
-**Single-threaded contract.** Cache files aren't reentrant-safe. Document on every fn that callers must serialize. Rider naturally serializes via Unity's main-thread asset-import callback, so this matches reality — but stating it explicitly prevents a future caller from racing.
-
-Atomic Rider `[DllImport]` update required in `meow-tower` and `meow-tower-porting` (no indirection — declaration + call site live next to each other in `ProjectGeneration.cs`).
+**Single-threaded contract.** Cache files aren't reentrant-safe. Rider naturally serializes via Unity's main asset-import thread.
 
 ## Versioning: two constants
 
 ```rust
 // lib.rs
-pub const LOCKFILE_VERSION: u32 = 1;   // user-visible csproj.lock — bump rarely + with migration note
-pub(crate) const CACHE_VERSION: u32 = 1; // dev-local caches under Library/ — bump freely
+pub const LOCKFILE_VERSION: u32 = 1;     // user-visible csproj.lock — bump rarely
+pub const CACHE_VERSION: u32 = 1;        // dev-local caches — bump freely
 ```
 
 | Artifact | Constant | Notes |
 |---|---|---|
-| `csproj.lock` | `LOCKFILE_VERSION` | may be checked in; format change = real migration concern |
-| `scan-cache` | `CACHE_VERSION` | dev-local, gitignored |
+| `csproj.lock` | `LOCKFILE_VERSION` | may be checked in — format change is a real migration concern |
+| `scan-cache` | `CACHE_VERSION` | dev-local, gitignored under `Library/` |
 | `lock-fingerprint` | `CACHE_VERSION` | dev-local |
 | `.fingerprints/<hash>` | `CACHE_VERSION` | dev-local |
-| (new) `typecheck-fingerprint/<hash>` | `CACHE_VERSION` | dev-local |
+| `typecheck-<variant>/<proj>.dll` | (output) | dev-local; mtime-based UTD |
 
-The `cache.rs` "unified module" from v1 of this design was overreach — the only thing that needs unifying is the **constant**, not the logic. Existing `lock_cache.rs` and `generate_cache.rs` stay co-located with their owners; both read `CACHE_VERSION` from `lib.rs`.
+Cache reload reads the version header; mismatch → cold rebuild. No migration code path (Cargo / Bazel idiom).
 
-## Typecheck subsystem
+## Typecheck subsystem (partial)
 
-Single `typecheck.rs` with `run(opts) -> Result<ExitCode>`:
-1. Reuse existing scan + lockfile load.
-2. Build per-asmdef `{ sources, refs, defines, analyzers }` in memory; topo-sort.
-3. Compute hash of inputs → fingerprint key. If `<key>.dll-mtime` cache hits and beats all input mtimes → skip compile.
-4. Otherwise: write `.rsp`, `dotnet exec csc.dll @rsp` (no `/shared` for MVP — see [[TODO.md]]).
-5. Aggregate diagnostics.
+Lives in `crates/usg-core/src/typecheck.rs`. Single `run(opts) -> Result<TypecheckResult>` function. Steps:
 
-The Bee-style `Plan` / `Runner` two-struct ceremony from v1 is overreach at 13 asmdefs; one function with a hashable inputs struct is enough. Pass `/analyzer:` flags so Rider's in-editor diagnostics match `typecheck` output.
+1. Load lockfile (auto-running `lock` if missing).
+2. Project scan (reuses existing scan-cache).
+3. Compute included projects via the same rules as `solution_generator` (config + platform filter).
+4. Topo-sort by asmdef references.
+5. Per project: build csc args, mtime-check inputs vs cached `.dll`, skip if up-to-date, otherwise `dotnet exec csc.dll @rsp.txt`.
+6. Resolve `$(UnityPath)` and `$(ProjectRoot)` in lockfile paths (MSBuild does this at eval time; csc doesn't).
 
-**Critical: handle missing `dotnet` cleanly.** Rider runs in Unity's process where `PATH` may not include the SDK. `typecheck` must return a clear error, not panic. (CLI consumers can be assumed to have `dotnet`; FFI does not currently expose typecheck — confirmed.)
+**MVP intentionally omits**:
+- Native-DLL filtering (CS0009 errors when lockfile has e.g. `unity_sprite_author.dll`).
+- VBCSCompiler IPC (`/shared` flag) — `dotnet exec csc.dll` is ~390 ms per cold call but the headline win is the warm-no-op fingerprint short-circuit, not per-call speed.
+- Analyzer config dedup (Roslyn USG0001 info-message).
 
-## Data flow
+These remain in [[TODO.md]] before typecheck can replace `build-unity-sln.sh`.
 
-```mermaid
-graph TD
-  Lock[lock] -->|writes| LockFile[csproj.lock]
-  LockFile -->|read by| Generate[generate]
-  LockFile -->|read by| Typecheck[typecheck]
-  ScanCache[scan-cache] -.warm.-> Generate
-  ScanCache -.warm.-> Typecheck
-  GenFP[generate-fingerprint] -.warm.-> Generate
-  TypeFP[typecheck-fingerprint] -.warm.-> Typecheck
-  Generate --> Variant[csproj/sln/Directory.Build.props]
-  Typecheck --> Diag[exit code + diagnostics]
-```
+## Pitfalls (avoided by design)
+
+- **Plugin/registry** — one consumer; no abstraction.
+- **Option-bag struct creep** — `GenerateOptions` is 5 fields. Splits before adding a 6th.
+- **Persistent worker / daemon** — at 13 asmdefs, JIT amortization doesn't justify the protocol burden.
+- **Cache version coordination drift** — single `CACHE_VERSION` invalidates all 3 caches together.
+- **Hand-rolled JSON silently mistruncating** — replaced with `serde_json`.
+- **Shell driver state accretion** — `build-unity-sln.sh`'s retry-on-failure logic moves to Rust once typecheck stabilizes.
 
 ## Non-goals
 
 - General "build any C# solution" tool — Unity-specific assumptions are load-bearing.
 - Persistent worker / daemon process.
 - Multi-platform build matrix in one CLI invocation (caller's loop).
-- Replacement for `dotnet build` in `--emit` mode (use `dotnet msbuild $(unity-solution-generator generate ...)` directly if needed; audit found no consumer).
+- Replacement for `dotnet build` in `--emit` mode.
 - Content-hash UTD for `.cs` files (mtime is sufficient at our scale).
 
-## Regression test plan (lands as Checkpoint 0)
+## Phase 3 history
 
-### Synthetic fixture
+Six commits across six checkpoints (plus a Phase-5 rollback for FFI):
 
-`crates/usg-core/tests/fixtures/regression/` (new — no existing precedent for fixture-with-stubbed-Unity-install):
-
-```
-fixture/
-  Assets/Scripts/Runtime/Foo.asmdef           (no platforms → all)
-  Assets/Scripts/Runtime/IOSOnly.asmdef       (includePlatforms: ["iOS"])
-  Assets/Scripts/Editor/Bar.asmdef            (includePlatforms: ["Editor"])
-  Assets/Scripts/Tests/Baz.asmdef             (defineConstraints: ["UNITY_INCLUDE_TESTS"])
-  Packages/com.example.pkg/Pkg.asmdef         + asmref pointing into it
-  ProjectSettings/ProjectVersion.txt          stub Unity install pointer
-  unity-stub/Editor/Data/Managed/UnityEngine.dll  zero-byte; mtime is what matters
-```
-
-Exercises Runtime / Editor / Tests / iOS-only filtering branches in 5 asmdefs.
-
-### Test classes
-
-- **Golden-file** (`golden_lock`, `golden_generate_ios_editor`, `golden_generate_android_prod`): byte-equality against committed `.golden` files. `UPDATE_GOLDEN=1 cargo test` to refresh.
-- **Cache-format**: version-mismatch invalidates each cache; mtime change to one asmdef invalidates only that entry; warm `lock` produces no `tracing` spans.
-- **CLI smoke**: stdout sln path on `generate` (pinned — `build-unity-sln` parses it); auto-`lock` on missing lockfile (pinned — Rider FFI relies on it); exit code on invalid platform.
-- **FFI smoke** (extends existing `abi_smoke.rs`): the exact Rider call pattern post-trim — `usg_generate(root, "ios", "editor", ".", extraRefs)`; `usg_last_error()` non-empty after failure.
-- **Deterministic GUID**: table of `(name, expected_guid)` pairs covering meow-tower asmdef names.
-- **Roslyn analyzer parity**: golden `.csproj` includes `<Analyzer Include="...">` items in the right order; `typecheck` rsp passes the same paths via `/analyzer:`.
-- **`dotnet`-absent**: `PATH=` (no SDK) → `typecheck` returns clean error, no panic.
-
-Dropped from v1: `cli_init_alias_still_works` (init being deleted), `cli_help_shows_subcommands` (theater), `render_xml_escapes_special_chars` (golden subsumes), `render_csproj_idempotent` (`write_if_changed` unit covers), FFI thread-local-safety (single-threaded contract documented instead).
-
-## Phase 3 checkpoints
-
-External callers update **atomically per checkpoint**. Each must leave both repos buildable and all regression tests green.
-
-0. **Land regression tests.** All pass against current `main`.
-1. **Dedupe internals.** No external impact. Extract `walk.rs`; collapse `paths.rs` + `io.rs` → `fs.rs`; replace `json.rs` with `serde_json`; single category-inference rule in `lockfile.rs`; introduce `LOCKFILE_VERSION` + `CACHE_VERSION` constants in `lib.rs`; consolidate cache-version reads.
-2. **Trim surface + atomic Rider DllImport update.** Drop `init`, `--output`/`--root`, `-v`, `osx`, `usg_lock` FFI fn, `slnPathOut`/`slnPathOutLen` FFI args. Update `meow-tower` + `meow-tower-porting` `ProjectGeneration.cs` in lockstep. Fold `usg-cli` package into `usg-core` as `[[bin]]`.
-3. **Add `typecheck` subcommand. Delete `build-unity-sln.sh`. Update justfiles.** Greenfield typecheck module + atomic justfile updates in both consumer repos.
-
-Net: 4 checkpoints (was 6).
-
-## Pitfalls (avoided by design)
-
-- **Plugin/registry / abstract Backend trait** — one consumer; no abstraction.
-- **Option-bag struct creep** — `GenerateOptions` is 5 fields. Splits before adding a 6th.
-- **Persistent worker / daemon** — at 13 asmdefs, JIT amortization doesn't justify protocol burden.
-- **Cache version coordination drift** — single `CACHE_VERSION` for dev-local; separate `LOCKFILE_VERSION` because lockfile may be checked in.
-- **Hand-rolled JSON silently mistruncating** — replaced with `serde_json`.
-- **Shell driver state accretion** — `build-unity-sln.sh`'s retry-on-failure is on the wrong side of "wrappers should be stateless"; folded into `typecheck`.
+| Commit | Checkpoint | What |
+|---|---|---|
+| `d4719c1` | 0 | Regression tests + architecture draft (12 new tests across `regression.rs` + `cli_regression.rs`) |
+| `b771649` | 1a | Three cache-version constants → one `CACHE_VERSION` |
+| `7fbf2b6` | 1b | `json.rs` (156 LOC) → `serde_json` (-180 LOC net) |
+| `7e1df09` | 1c | `walk.rs` extraction (kills the duplicated Flusher) |
+| `161dbbc` | 2 | Trim CLI surface (`init`/`--output`/`--root`/`-v`/`usg_lock` FFI). FFI `slnPathOut` args originally trimmed too but later restored. |
+| `8f71487` | 3 | `typecheck` subcommand (partial) |
+| _(post)_ | 5 | Phase 5 review fixes: MSRV (`is_none_or` → `map_or`), doc cross-links, FFI signature restore, redeploy. |
 
 ## References
 
-- `com.unity.ide.rider` — flat library shape ([needle-mirror](https://github.com/needle-mirror/com.unity.ide.rider))
-- Cargo's `cargo check` history — subcommand from day one, never a wrapper script ([RFC 3477](https://rust-lang.github.io/rfcs/3477-cargo-check-lang-policy.html))
-- Roslyn Compiler Server / VBCSCompiler IPC ([Compiler Server.md](https://github.com/dotnet/roslyn/blob/main/docs/compilers/Compiler%20Server.md)) — deferred (see [[TODO.md]])
-- Cargo / Bazel idiom: wholesale cache invalidation, no migrations ([Cargo Targets](https://doc.rust-lang.org/cargo/reference/cargo-targets.html), [The many caches of Bazel](https://blog.engflow.com/2024/05/13/the-many-caches-of-bazel/))
+See inline links above.

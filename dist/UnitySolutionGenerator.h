@@ -14,6 +14,7 @@
 // config:      "editor", "prod", or "dev"
 // outputDir:   relative dir (e.g. "Library/hotreload/Solution"), "." for root, NULL for default
 // extraRefs:   comma-separated absolute DLL paths, or NULL
+// slnPathOut:  buffer receives the output .sln path (relative to project root), or NULL to skip
 //
 // Single-threaded contract — caller must serialize calls (cache files
 // aren't reentrant-safe). Unity calls naturally serialize via the main
@@ -23,7 +24,9 @@ int32_t usg_generate(
     const char *platform,
     const char *config,
     const char *outputDir,       // nullable
-    const char *extraRefs        // nullable
+    const char *extraRefs,       // nullable
+    char *slnPathOut,            // nullable
+    int32_t slnPathOutLen
 );
 
 // Last error message, or NULL. Valid until the next usg_ call.
