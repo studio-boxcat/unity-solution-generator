@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/usg-core", "crates/usg-ffi"]
+members = ["crates/usg-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,16 +8,16 @@ edition = "2021"
 rust-version = "1.80"
 
 [workspace.dependencies]
-usg-core = { path = "crates/usg-core" }
 walkdir = "2"
 ignore = "0.4"
 rayon = "1.10"
 libc = "0.2"
 serde_json = "1"
 
+# `panic = "unwind"` (the default) is required by FFI hosts that wrap calls
+# in `catch_unwind` (e.g. meow-tower's BoxcatBridge). Don't set "abort" here.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
 opt-level = 3

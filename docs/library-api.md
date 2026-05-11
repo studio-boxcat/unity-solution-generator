@@ -2,35 +2,25 @@
 
 > **Related:** [[CLAUDE.md]]
 
-`libUnitySolutionGenerator.dylib` exposes a C ABI (for Unity `[DllImport]`) plus a Rust API via the `usg-core` crate.
+Published to crates.io as `unity-solution-generator`. Cdylib lives downstream
+(meow-tower's `BoxcatBridge`); this crate exposes only a Rust API.
 
-## C ABI (`dist/UnitySolutionGenerator.h`)
+## High-level (`unity_solution_generator::generate`)
 
-```c
-int32_t usg_generate(const char *projectRoot, const char *platform, const char *config,
-                     const char *outputDir, const char *extraRefs);
-const char *usg_last_error(void);  // valid until next usg_ call
+```rust
+unity_solution_generator::generate(
+    project_root,
+    "ios",       // platform: ios | android | osx
+    "editor",    // config:   prod | dev | editor
+    None,        // output_dir; None → Library/UnitySolutionGenerator/<platform>-<config>/
+    None,        // extra_refs: comma-separated DLL paths (or None)
+)?;
 ```
 
-C# usage:
+Single-threaded contract — caller serializes calls (cache files aren't
+reentrant-safe). Auto-runs the equivalent of `lock` if no lockfile exists.
 
-```csharp
-[DllImport("UnitySolutionGenerator")]
-static extern int usg_generate(string projectRoot, string platform, string config,
-                               string outputDir, string extraRefs);
-
-[DllImport("UnitySolutionGenerator")]
-static extern IntPtr usg_last_error();
-
-if (usg_generate(root, "ios", "editor", ".", "/path/to/Extra.dll") != 0)
-    throw new Exception(Marshal.PtrToStringAnsi(usg_last_error()));
-```
-
-`outputDir`: relative path, `"."` for project root, `null` for default variant dir. `extraRefs`: comma-separated absolute DLL paths, `null` for none. `usg_generate` auto-runs the equivalent of `lock` if no lockfile exists.
-
-**Single-threaded contract.** Cache files aren't reentrant-safe; callers must serialize. Unity callers naturally serialize via the main asset-import thread.
-
-## Rust API (`use usg_core::*`)
+## Lower-level building blocks (`use unity_solution_generator::*`)
 
 | Type | Description |
 |------|-------------|
@@ -45,7 +35,9 @@ if (usg_generate(root, "ios", "editor", ".", "/path/to/Extra.dll") != 0)
 | `RefCategory` | `Engine`, `Editor`, `Netstandard`, `PlaybackIos`, `PlaybackAndroid`, `PlaybackStandalone`, `Project` |
 
 ```rust
-use usg_core::{BuildConfig, BuildPlatform, DllRef, GenerateOptions, LockfileIO, SolutionGenerator};
+use unity_solution_generator::{
+    BuildConfig, BuildPlatform, DllRef, GenerateOptions, LockfileIO, SolutionGenerator,
+};
 
 let lockfile = LockfileIO::read("Library/UnitySolutionGenerator/csproj.lock")?;
 let options = GenerateOptions::new(project_root, BuildPlatform::Ios)

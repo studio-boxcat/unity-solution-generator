@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use usg_core::{DllRef, Lockfile, RefCategory};
+use unity_solution_generator::{DllRef, Lockfile, RefCategory};
 
 pub struct Fixture {
     pub _tmp: TempDir,

@@ -47,3 +47,37 @@ pub mod __test_only {
     pub use crate::lock_cache::{build_entries, is_valid};
     pub use crate::typecheck::__test_only_build_rsp as build_rsp;
 }
+
+/// High-level convenience: parse string args + run the full generate pipeline.
+///
+/// Used by the CLI and by external FFI hosts (see meow-tower's BoxcatBridge).
+/// `platform` accepts `ios|android|osx`; `config` accepts `prod|dev|editor`.
+/// `extra_refs` is a comma-separated list of DLL paths (see `DllRef::parse_list`).
+/// Loads or scans the lockfile as needed.
+pub fn generate(
+    project_root: &str,
+    platform: &str,
+    config: &str,
+    output_dir: Option<&str>,
+    extra_refs: Option<&str>,
+) -> Result<()> {
+    let build_platform = BuildPlatform::parse(platform).ok_or_else(|| {
+        GeneratorError::Other(format!(
+            "Unknown platform '{platform}'. Use 'ios', 'android', or 'osx'."
+        ))
+    })?;
+    let build_config = BuildConfig::parse(config).ok_or_else(|| {
+        GeneratorError::Other(format!(
+            "Unknown config '{config}'. Use 'prod', 'dev', or 'editor'."
+        ))
+    })?;
+    let resolved = resolve_project_root(project_root);
+    let extra_refs_vec: Vec<DllRef> = extra_refs.map(DllRef::parse_list).unwrap_or_default();
+    let options = GenerateOptions::new(resolved.clone(), build_platform)
+        .with_build_config(build_config)
+        .with_output_dir(output_dir)
+        .with_extra_refs(extra_refs_vec);
+    let lockfile = LockfileIO::load_or_scan(&resolved, DEFAULT_GENERATOR_ROOT)?;
+    SolutionGenerator::new().generate_from_lockfile(&options, &lockfile)?;
+    Ok(())
+}

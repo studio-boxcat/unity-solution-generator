@@ -4,7 +4,7 @@
 //!
 //! Usage at a call site:
 //! ```ignore
-//! use usg_core::profile::section;
+//! use unity_solution_generator::profile::section;
 //! let _s = section!("scan.parallel-walk", root = root_path);
 //! ```
 //!

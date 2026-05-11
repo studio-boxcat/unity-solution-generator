@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use usg_core::{
+use unity_solution_generator::{
     BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
     SolutionGenerator, TypecheckOptions, lockfile_path, resolve_project_root,
     typecheck::run as typecheck_run,
@@ -284,7 +284,7 @@ fn init_tracing() {
         _ => "info",
     };
     let filter =
-        EnvFilter::try_from_env("USG_LOG").unwrap_or_else(|_| EnvFilter::new(format!("usg_core={level}")));
+        EnvFilter::try_from_env("USG_LOG").unwrap_or_else(|_| EnvFilter::new(format!("unity_solution_generator={level}")));
     fmt()
         .with_target(false)
         .with_writer(std::io::stderr)

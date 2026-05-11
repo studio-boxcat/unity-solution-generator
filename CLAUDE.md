@@ -4,23 +4,20 @@
 
 Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity projects from `asmdef`/`asmref` layout, without requiring the Unity Editor.
 
-Cargo workspace under `crates/`:
-- `usg-core` — library (paths, lockfile, scanners, generator) + companion binary `unity-solution-generator`
-- `usg-ffi` — `cdylib` (`libUnitySolutionGenerator.dylib`) with the C ABI used by Unity `[DllImport]`
+Single crate at `crates/usg-core/` (lib + companion binary `unity-solution-generator`), published to crates.io as `unity-solution-generator`. FFI/cdylib lives outside this repo — meow-tower's `BoxcatBridge` consumes the rlib and exposes a `bxc_usg_generate` C ABI.
 
 ## Build
 
 ```bash
-just build                    # release binary + dylib → dist/
+just build                    # release binary → dist/
 just test                     # run tests
 just install                  # symlink to ~/.local/bin
 just profile                  # benchmark against meow-tower
+just publish                  # cargo publish (irreversible)
 ```
 
 **Output** (`dist/`):
 - `unity-solution-generator` — CLI binary
-- `libUnitySolutionGenerator.dylib` — dynamic library (C ABI via `#[unsafe(no_mangle)] extern "C"`)
-- `UnitySolutionGenerator.h` — C header for the dylib (hand-maintained)
 
 ## CLI
 

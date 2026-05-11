@@ -2,7 +2,7 @@
 mod common;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use usg_core::LockfileIO;
+use unity_solution_generator::LockfileIO;
 
 fn bench_lockfile_io(c: &mut Criterion) {
     let mut group = c.benchmark_group("lockfile_io");

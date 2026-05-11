@@ -1,11 +1,17 @@
 [package]
-name = "usg-core"
+name = "unity-solution-generator"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Regenerates Unity .csproj/.sln files from asmdef/asmref layout without launching the Unity editor."
+license = "MIT"
+repository = "https://github.com/studio-boxcat/unity-solution-generator"
+readme = "../../README.md"
+keywords = ["unity", "csproj", "sln", "asmdef"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
-name = "usg_core"
+name = "unity_solution_generator"
 path = "src/lib.rs"
 
 # Companion binary lives in the same package — cargo idiom for "library + thin

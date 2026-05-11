@@ -8,6 +8,7 @@ pub enum GeneratorError {
     Io { path: String, source: io::Error },
     Lockfile(LockfileError),
     DuplicateAsmDefName(String),
+    Other(String),
 }
 
 #[derive(Debug)]
@@ -23,6 +24,7 @@ impl fmt::Display for GeneratorError {
             GeneratorError::Io { path, source } => write!(f, "{}: {}", source, path),
             GeneratorError::Lockfile(e) => write!(f, "{}", e),
             GeneratorError::DuplicateAsmDefName(n) => write!(f, "Duplicate asmdef name: '{}'", n),
+            GeneratorError::Other(msg) => write!(f, "{}", msg),
         }
     }
 }

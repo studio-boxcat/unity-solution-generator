@@ -15,7 +15,7 @@ mod common;
 use std::path::Path;
 
 use common::{make_temp_root, write_file};
-use usg_core::{
+use unity_solution_generator::{
     BuildConfig, BuildPlatform, GenerateOptions, Lockfile, RefCategory, SolutionGenerator,
     xml::deterministic_guid,
 };
@@ -78,7 +78,7 @@ fn lockfile_for_fixture() -> Lockfile {
     lf.refs
         .entry(RefCategory::Engine)
         .or_default()
-        .push(usg_core::DllRef::new(
+        .push(unity_solution_generator::DllRef::new(
             "UnityEngine",
             "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/UnityEngine.dll",
         ));

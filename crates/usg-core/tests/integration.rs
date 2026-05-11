@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use common::{assert_compile_set, make_temp_root, read_compile_set, read_file, write_file};
-use usg_core::{
+use unity_solution_generator::{
     BuildConfig, BuildPlatform, DllRef, GenerateOptions, Lockfile, LockfileIO, ProjectScanner,
     RefCategory, SolutionGenerator,
     defines::{generate_version_defines, parse_scripting_defines},

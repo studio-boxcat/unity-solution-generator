@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use common::{make_temp_root, read_compile_set, read_file, write_file};
-use usg_core::{
+use unity_solution_generator::{
     BuildConfig, BuildPlatform, DllRef, GenerateOptions, GeneratorError, Lockfile, LockfileIO,
     ProjectScanner, RefCategory, SolutionGenerator,
 };
@@ -454,19 +454,19 @@ fn lock_fingerprint_short_circuits_rescan() {
     write_file(root, "Assets/A/Code.cs", "x");
 
     // Build a fingerprint from a single relative path; verify is_valid round-trips.
-    let entries = usg_core::__test_only::build_entries(
+    let entries = unity_solution_generator::__test_only::build_entries(
         root.to_str().unwrap(),
         root.to_str().unwrap(),
         &["Assets/A/Code.cs".to_string()],
         &[],
     );
     assert!(!entries.is_empty());
-    assert!(usg_core::__test_only::is_valid(&entries));
+    assert!(unity_solution_generator::__test_only::is_valid(&entries));
 
     // Touching a contributing dir must invalidate.
     std::thread::sleep(std::time::Duration::from_millis(20));
     write_file(root, "Assets/A/Other.cs", "y");
-    assert!(!usg_core::__test_only::is_valid(&entries));
+    assert!(!unity_solution_generator::__test_only::is_valid(&entries));
 }
 
 /// Regression: lockfile must invalidate when a missing input later appears.
@@ -484,7 +484,7 @@ fn lock_fingerprint_sentinel_invalidates_on_appearance() {
 
     // build_entries should record `Library/PackageCache` as missing — see
     // `lock_cache::build_entries` (it's seeded unconditionally at the abs root).
-    let entries = usg_core::__test_only::build_entries(
+    let entries = unity_solution_generator::__test_only::build_entries(
         root.to_str().unwrap(),
         root.to_str().unwrap(),
         &[],
@@ -497,11 +497,11 @@ fn lock_fingerprint_sentinel_invalidates_on_appearance() {
         "missing path must be recorded with mtime=0 sentinel; got {:?}",
         recorded
     );
-    assert!(usg_core::__test_only::is_valid(&entries));
+    assert!(unity_solution_generator::__test_only::is_valid(&entries));
 
     // Path appears → fingerprint invalidates.
     std::fs::create_dir_all(&absent).unwrap();
-    assert!(!usg_core::__test_only::is_valid(&entries));
+    assert!(!unity_solution_generator::__test_only::is_valid(&entries));
 }
 
 /// Regression: typecheck must surface method-body diagnostics (CS1503 etc.).
@@ -518,7 +518,7 @@ fn lock_fingerprint_sentinel_invalidates_on_appearance() {
 #[test]
 fn rsp_has_no_refonly() {
     use std::path::PathBuf;
-    let rsp = usg_core::__test_only::build_rsp(
+    let rsp = unity_solution_generator::__test_only::build_rsp(
         "9.0",
         &[],
         &[],

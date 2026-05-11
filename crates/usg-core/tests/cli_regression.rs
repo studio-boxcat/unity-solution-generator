@@ -29,10 +29,10 @@ fn fixture() -> tempfile::TempDir {
     write(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n");
     write(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
     write(root, "Assets/A/Code.cs", "class Code {}\n");
-    let lf = usg_core::Lockfile::empty("6000.2.7f2", "/test/unity");
+    let lf = unity_solution_generator::Lockfile::empty("6000.2.7f2", "/test/unity");
     let lf_dir = root.join("Library/UnitySolutionGenerator");
     std::fs::create_dir_all(&lf_dir).unwrap();
-    usg_core::LockfileIO::write(&lf, lf_dir.join("csproj.lock").to_str().unwrap()).unwrap();
+    unity_solution_generator::LockfileIO::write(&lf, lf_dir.join("csproj.lock").to_str().unwrap()).unwrap();
     tmp
 }
 

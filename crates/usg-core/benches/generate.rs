@@ -2,7 +2,7 @@
 mod common;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use usg_core::{BuildConfig, BuildPlatform, GenerateOptions, SolutionGenerator};
+use unity_solution_generator::{BuildConfig, BuildPlatform, GenerateOptions, SolutionGenerator};
 
 fn bench_generate(c: &mut Criterion) {
     let mut group = c.benchmark_group("generate.from_lockfile");

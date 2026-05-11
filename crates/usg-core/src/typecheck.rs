@@ -113,7 +113,7 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
             if is_managed_dll(Path::new(&r.path)) {
                 true
             } else {
-                tracing::debug!(target: "usg_core::typecheck", path = %r.path, "filtered: not a managed DLL");
+                tracing::debug!(target: "unity_solution_generator::typecheck", path = %r.path, "filtered: not a managed DLL");
                 false
             }
         })

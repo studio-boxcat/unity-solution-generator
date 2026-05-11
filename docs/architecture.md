@@ -42,12 +42,11 @@ crates/
       xml.rs                escape + deterministic GUID (pinned invariant)
       error.rs              GeneratorError + LockfileError + io_err helper
     tests/                  e2e + integration + cli_regression
-  usg-ffi/
-    Cargo.toml              [lib] cdylib + rlib (`UnitySolutionGenerator`)
-    build.rs                installs @rpath/<dylib> macOS install_name
-    src/lib.rs              C ABI: usg_generate + usg_last_error
-    tests/abi_smoke.rs      FFI signature pinning
 ```
+
+The crate publishes to crates.io as `unity-solution-generator`. Cdylib hosting
+(C ABI for Unity `[DllImport]`) lives downstream in meow-tower's BoxcatBridge —
+this repo has no FFI.
 
 ## Top-level flow
 
@@ -188,6 +187,6 @@ Spans use [`tracing`](https://docs.rs/tracing/). Default off — zero runtime co
 
 - `USG_PROFILE=1 unity-solution-generator <cmd>` — info-level spans, one stderr line per span close with `time.busy`.
 - `USG_PROFILE=full` — includes lower-level child spans.
-- `USG_LOG=usg_core::project_scanner=debug` — drop-in `EnvFilter` directives.
+- `USG_LOG=unity_solution_generator::project_scanner=debug` — drop-in `EnvFilter` directives.
 
 Wall-clock benchmarks against meow-tower live in [[benchmark.md]].
