@@ -4,7 +4,7 @@
 //! - **stdout = sln path** on `generate` success — used as
 //!   `dotnet build "$(unity-solution-generator generate ...)"` in scripts.
 //! - **exit codes** — 0 on success, non-zero on failure (consumers rely on these).
-//! - **lockfile auto-creation** — Rider's FFI calls `usg_generate` without
+//! - **lockfile auto-creation** — Rider's FFI calls `generate()` without
 //!   running `lock` first; the same shape must work via the CLI path too.
 //! - **`--help` exits 0** — keeps `dotnet build`-style scripting safe.
 

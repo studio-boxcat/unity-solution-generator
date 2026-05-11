@@ -344,7 +344,7 @@ fn inplace_asmdef_edit_invalidates_scan_cache() {
 
 #[test]
 fn no_lockfile_no_templates_falls_back_via_cli_path() {
-    // CLI-side: when no lockfile and no templates exist, the FFI `usg_generate`
+    // CLI-side: when no lockfile and no templates exist, `generate()`
     // and the CLI `generate` both auto-run lock. We can't exercise the Unity-install
     // scan (no Unity in CI), but we *can* assert that calling generate_from_lockfile
     // directly with no asmdefs at all produces the legacy fallback projects.

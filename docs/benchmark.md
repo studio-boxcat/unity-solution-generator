@@ -111,4 +111,4 @@ Both caches store nanosecond mtimes via `MetadataExt::mtime_nsec`. Validation co
 Spans use [`tracing`](https://docs.rs/tracing/). Default off — zero runtime cost. Opt in:
 - `USG_PROFILE=1 unity-solution-generator <cmd>` — info-level spans, one stderr line per span close with `time.busy`.
 - `USG_PROFILE=full` — includes lower-level child spans.
-- `USG_LOG=usg_core::project_scanner=debug` — drop-in `EnvFilter` directives override the default.
+- `USG_LOG=unity_solution_generator::project_scanner=debug` — drop-in `EnvFilter` directives override the default.

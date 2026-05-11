@@ -12,7 +12,7 @@ Audit found exactly **four caller sites** total. The design is sized for these a
 |---|---|---|
 | `meow-tower` Hot Reload pre-flight (`justfile:105`) | CLI | `unity-solution-generator typecheck` exit code |
 | `meow-tower-porting` (same recipe) | CLI | same |
-| Rider in-Editor regen (`ProjectGeneration.cs:90`) | FFI | `usg_generate(root, "ios", "editor", ".", extraRefs)` + `usg_last_error()` |
+| Rider in-Editor regen (`ProjectGeneration.cs:90`) | FFI | `bxc_usg_generate(...)` + `bxc_last_error()` via meow-tower's BoxcatBridge (which crates.io-deps this crate) |
 | Rider in-Editor regen (porting) | FFI | same |
 
 No CI, no other repos, no other tools.
@@ -77,14 +77,11 @@ graph LR
 
 `<root>` is optional — when omitted, the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
 
-### FFI (cdylib)
+### Rust API
 
-```c
-int32_t usg_generate(const char *projectRoot, const char *platform,
-                     const char *config, const char *outputDir,
-                     const char *extraRefs);
-const char *usg_last_error(void);
-```
+This crate has no cdylib. Editor callers use meow-tower's `BoxcatBridge`, which
+crates.io-deps this crate and exposes a `bxc_usg_generate` / `bxc_last_error`
+C ABI matching `unity_solution_generator::generate`'s parameter shape.
 
 **Single-threaded contract.** Cache files aren't reentrant-safe. Rider naturally serializes via Unity's main asset-import thread.
 
