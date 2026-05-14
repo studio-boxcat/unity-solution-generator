@@ -77,7 +77,7 @@ graph LR
 | `lock` | `[<root>]` |
 | `generate` | `[<root>] <platform> <config> [--extra-refs <paths>]` |
 | `typecheck` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>]` (defaults: `ios editor`) |
-| `build` | `[<root>] <platform> <config> [--extra-refs <paths>] [-- <dotnet-build-args>...]` |
+| `build` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>] [-- <dotnet-build-args>...]` (defaults: `ios editor`) |
 
 `<root>` is optional — when omitted, the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
 

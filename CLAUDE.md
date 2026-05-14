@@ -38,7 +38,7 @@ unity-solution-generator generate . ios editor              # default: Library/U
 unity-solution-generator generate . ios editor \
   --extra-refs "/path/to/Extra.dll,/path/to/Other.dll"     # additional DLL references
 unity-solution-generator typecheck .                        # compile-check (defaults: ios editor); direct csc.dll, no MSBuild
-unity-solution-generator build . ios prod                   # generate + `dotnet build` (default: -v:q)
+unity-solution-generator build .                            # generate + `dotnet build` (defaults: ios editor, -v:q)
 unity-solution-generator build . ios prod -- -m --no-restore -v:n  # forward args after `--` to dotnet build
 ```
 
@@ -71,7 +71,7 @@ Platform defines:
 For full IL output (rarely needed since Unity rebuilds the solution itself), use `build`, which generates the `.sln` and shells out to `dotnet build`:
 
 ```bash
-unity-solution-generator build . ios prod                          # default `-v:q`
+unity-solution-generator build .                                   # defaults: ios editor, `-v:q`
 unity-solution-generator build . ios prod -- -m --no-restore -v:q  # forward args after `--`
 ```
 

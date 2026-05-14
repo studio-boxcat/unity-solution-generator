@@ -78,7 +78,7 @@ fn run_lock(args: &[String]) -> ExitCode {
 }
 
 fn run_generate(args: &[String]) -> ExitCode {
-    match generate_sln(args, "generate") {
+    match generate_sln(args, "generate", false) {
         Ok(sln_path) => {
             println!("{}", sln_path);
             ExitCode::SUCCESS
@@ -96,7 +96,7 @@ fn run_build(args: &[String]) -> ExitCode {
             None => (args, &[]),
         };
 
-    let sln_path = match generate_sln(gen_args, "build") {
+    let sln_path = match generate_sln(gen_args, "build", true) {
         Ok(p) => p,
         Err(code) => return code,
     };
@@ -118,48 +118,23 @@ fn run_build(args: &[String]) -> ExitCode {
 
 /// Shared `generate`/`build` driver. Parses positional + `--extra-refs`,
 /// runs the generator, prints any warnings to stderr, and returns the
-/// `.sln` path on success or an `ExitCode` on failure.
-fn generate_sln(args: &[String], cmd_name: &str) -> Result<String, ExitCode> {
+/// `.sln` path on success or an `ExitCode` on failure. When
+/// `defaults_allowed`, omitted platform/config fall back to `ios editor`
+/// (matching `typecheck`); otherwise both are required.
+fn generate_sln(
+    args: &[String],
+    cmd_name: &str,
+    defaults_allowed: bool,
+) -> Result<String, ExitCode> {
     let (project_root, rest) = split_root_arg(args);
-    if rest.len() < 2 {
+    if !defaults_allowed && rest.len() < 2 {
         die(&format!(
             "{cmd_name} requires: [<unity-root>] <platform> <config> [options]"
         ));
     }
-    let Some(platform) = BuildPlatform::parse(&rest[0]) else {
-        die(&format!(
-            "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
-            rest[0]
-        ));
-    };
-    let Some(build_config) = BuildConfig::parse(&rest[1]) else {
-        die(&format!(
-            "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
-            rest[1]
-        ));
-    };
-
-    let mut extra_refs_raw: Option<String> = None;
-    let mut i = 2;
-    while i < rest.len() {
-        match rest[i].as_str() {
-            "--extra-refs" => {
-                i += 1;
-                if i >= rest.len() {
-                    die("--extra-refs requires a comma-separated list of DLL paths");
-                }
-                extra_refs_raw = Some(rest[i].clone());
-            }
-            other => die(&format!("Unknown option: {}", other)),
-        }
-        i += 1;
-    }
+    let (platform, build_config, extra_refs) = parse_variant_args(rest);
 
     let resolved = resolve_project_root(&project_root);
-    let extra_refs = extra_refs_raw
-        .as_deref()
-        .map(DllRef::parse_list)
-        .unwrap_or_default();
     let options = GenerateOptions::new(resolved.clone(), platform)
         .with_build_config(build_config)
         .with_extra_refs(extra_refs);
@@ -210,51 +185,9 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     // (or none of the positionals), `resolve_project_root(".")` climbs from
     // CWD to the nearest ancestor with `ProjectSettings/ProjectVersion.txt`.
     let (project_root, rest) = split_root_arg(args);
-    let platform = if !rest.is_empty() {
-        match BuildPlatform::parse(&rest[0]) {
-            Some(p) => p,
-            None => die(&format!(
-                "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
-                rest[0]
-            )),
-        }
-    } else {
-        BuildPlatform::Ios
-    };
-    let build_config = if rest.len() > 1 {
-        match BuildConfig::parse(&rest[1]) {
-            Some(c) => c,
-            None => die(&format!(
-                "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
-                rest[1]
-            )),
-        }
-    } else {
-        BuildConfig::Editor
-    };
-
-    let mut extra_refs_raw: Option<String> = None;
-    let args = rest;
-    let mut i = if args.len() > 1 { 2 } else { args.len() };
-    while i < args.len() {
-        match args[i].as_str() {
-            "--extra-refs" => {
-                i += 1;
-                if i >= args.len() {
-                    die("--extra-refs requires a comma-separated list of DLL paths");
-                }
-                extra_refs_raw = Some(args[i].clone());
-            }
-            other => die(&format!("Unknown option: {}", other)),
-        }
-        i += 1;
-    }
+    let (platform, build_config, extra_refs) = parse_variant_args(rest);
 
     let resolved = resolve_project_root(&project_root);
-    let extra_refs = extra_refs_raw
-        .as_deref()
-        .map(DllRef::parse_list)
-        .unwrap_or_default();
     let opts = TypecheckOptions::new(resolved, platform)
         .with_build_config(build_config)
         .with_extra_refs(extra_refs);
@@ -291,6 +224,52 @@ fn run_typecheck(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Parse `<platform> <config>` (both optional, defaulting to `ios editor`)
+/// followed by `--extra-refs <paths>`. Shared by `typecheck` and the
+/// `generate`/`build` driver. Callers that require both positionals enforce
+/// that themselves before calling.
+fn parse_variant_args(rest: &[String]) -> (BuildPlatform, BuildConfig, Vec<DllRef>) {
+    let platform = match rest.first() {
+        Some(s) => BuildPlatform::parse(s).unwrap_or_else(|| {
+            die(&format!(
+                "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
+                s
+            ))
+        }),
+        None => BuildPlatform::Ios,
+    };
+    let build_config = match rest.get(1) {
+        Some(s) => BuildConfig::parse(s).unwrap_or_else(|| {
+            die(&format!(
+                "Unknown config '{}'. Use 'prod', 'dev', or 'editor'.",
+                s
+            ))
+        }),
+        None => BuildConfig::Editor,
+    };
+
+    let mut extra_refs_raw: Option<String> = None;
+    let mut i = rest.len().min(2);
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--extra-refs" => {
+                i += 1;
+                if i >= rest.len() {
+                    die("--extra-refs requires a comma-separated list of DLL paths");
+                }
+                extra_refs_raw = Some(rest[i].clone());
+            }
+            other => die(&format!("Unknown option: {}", other)),
+        }
+        i += 1;
+    }
+    let extra_refs = extra_refs_raw
+        .as_deref()
+        .map(DllRef::parse_list)
+        .unwrap_or_default();
+    (platform, build_config, extra_refs)
 }
 
 /// Split `<unity-root>` (optional) from the remaining positional args.
@@ -342,11 +321,11 @@ fn print_usage() {
   unity-solution-generator lock      [<unity-root>]
   unity-solution-generator generate  [<unity-root>] <platform> <config> [options]
   unity-solution-generator typecheck [<unity-root>] [<platform>] [<config>] [options]
-  unity-solution-generator build     [<unity-root>] <platform> <config> [options] [-- <dotnet-build-args>...]
+  unity-solution-generator build     [<unity-root>] [<platform>] [<config>] [options] [-- <dotnet-build-args>...]
 
   When <unity-root> is omitted, climbs from the current directory to the
   nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
-  `typecheck` also defaults platform=ios, config=editor.
+  `typecheck` and `build` also default platform=ios, config=editor.
 
 COMMANDS:
   lock                  Scan Unity installation and project to generate csproj.lock
