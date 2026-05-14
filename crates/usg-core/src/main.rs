@@ -1,4 +1,4 @@
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use unity_solution_generator::{
     BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
@@ -27,9 +27,13 @@ fn main() -> ExitCode {
             args.remove(0);
             run_typecheck(&args)
         }
+        Some("build") => {
+            args.remove(0);
+            run_build(&args)
+        }
         Some(other) => {
             die(&format!(
-                "Unknown command '{}'. Use 'lock', 'generate', or 'typecheck'.",
+                "Unknown command '{}'. Use 'lock', 'generate', 'typecheck', or 'build'.",
                 other
             ));
         }
@@ -74,9 +78,53 @@ fn run_lock(args: &[String]) -> ExitCode {
 }
 
 fn run_generate(args: &[String]) -> ExitCode {
+    match generate_sln(args, "generate") {
+        Ok(sln_path) => {
+            println!("{}", sln_path);
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+fn run_build(args: &[String]) -> ExitCode {
+    // Split off `--`-passthrough first; everything before goes to generate,
+    // everything after is forwarded verbatim to `dotnet build`.
+    let (gen_args, dotnet_args): (&[String], &[String]) =
+        match args.iter().position(|a| a == "--") {
+            Some(i) => (&args[..i], &args[i + 1..]),
+            None => (args, &[]),
+        };
+
+    let sln_path = match generate_sln(gen_args, "build") {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    // Default to `-v:q` so MSBuild chatter doesn't bury real diagnostics.
+    let default_args = ["-v:q".to_string()];
+    let dotnet_args: &[String] = if dotnet_args.is_empty() { &default_args } else { dotnet_args };
+
+    eprintln!("dotnet build {} {}", sln_path, dotnet_args.join(" "));
+    match Command::new("dotnet").arg("build").arg(&sln_path).args(dotnet_args).status() {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(s) => ExitCode::from(s.code().unwrap_or(1).clamp(1, 255) as u8),
+        Err(e) => {
+            eprintln!("error: failed to spawn `dotnet`: {}", e);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Shared `generate`/`build` driver. Parses positional + `--extra-refs`,
+/// runs the generator, prints any warnings to stderr, and returns the
+/// `.sln` path on success or an `ExitCode` on failure.
+fn generate_sln(args: &[String], cmd_name: &str) -> Result<String, ExitCode> {
     let (project_root, rest) = split_root_arg(args);
     if rest.len() < 2 {
-        die("generate requires: [<unity-root>] <platform> <config> [options]");
+        die(&format!(
+            "{cmd_name} requires: [<unity-root>] <platform> <config> [options]"
+        ));
     }
     let Some(platform) = BuildPlatform::parse(&rest[0]) else {
         die(&format!(
@@ -93,15 +141,14 @@ fn run_generate(args: &[String]) -> ExitCode {
 
     let mut extra_refs_raw: Option<String> = None;
     let mut i = 2;
-    let args = rest;
-    while i < args.len() {
-        match args[i].as_str() {
+    while i < rest.len() {
+        match rest[i].as_str() {
             "--extra-refs" => {
                 i += 1;
-                if i >= args.len() {
+                if i >= rest.len() {
                     die("--extra-refs requires a comma-separated list of DLL paths");
                 }
-                extra_refs_raw = Some(args[i].clone());
+                extra_refs_raw = Some(rest[i].clone());
             }
             other => die(&format!("Unknown option: {}", other)),
         }
@@ -121,42 +168,38 @@ fn run_generate(args: &[String]) -> ExitCode {
     // before generating; the lock-fingerprint cache makes a redundant `lock`
     // call cheap.
     let lockfile_p = lockfile_path(&resolved, DEFAULT_GENERATOR_ROOT);
-    let result = {
-        let lockfile = if std::path::Path::new(&lockfile_p).exists() {
-            match LockfileIO::read(&lockfile_p) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    return ExitCode::from(1);
-                }
+    let lockfile = if std::path::Path::new(&lockfile_p).exists() {
+        match LockfileIO::read(&lockfile_p) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return Err(ExitCode::from(1));
             }
-        } else {
-            eprintln!("No lockfile found, running lock...");
-            match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
-                Ok(l) => {
-                    eprintln!("Locked: {}", l.unity_version);
-                    l
-                }
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    return ExitCode::from(1);
-                }
+        }
+    } else {
+        eprintln!("No lockfile found, running lock...");
+        match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
+            Ok(l) => {
+                eprintln!("Locked: {}", l.unity_version);
+                l
             }
-        };
-        SolutionGenerator::new().generate_from_lockfile(&options, &lockfile)
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return Err(ExitCode::from(1));
+            }
+        }
     };
 
-    match result {
+    match SolutionGenerator::new().generate_from_lockfile(&options, &lockfile) {
         Ok(r) => {
-            println!("{}", r.variant_sln_path);
             for w in r.warnings {
                 eprintln!("warning: {}", w);
             }
-            ExitCode::SUCCESS
+            Ok(r.variant_sln_path)
         }
         Err(e) => {
             eprintln!("error: {}", e);
-            ExitCode::from(1)
+            Err(ExitCode::from(1))
         }
     }
 }
@@ -299,6 +342,7 @@ fn print_usage() {
   unity-solution-generator lock      [<unity-root>]
   unity-solution-generator generate  [<unity-root>] <platform> <config> [options]
   unity-solution-generator typecheck [<unity-root>] [<platform>] [<config>] [options]
+  unity-solution-generator build     [<unity-root>] <platform> <config> [options] [-- <dotnet-build-args>...]
 
   When <unity-root> is omitted, climbs from the current directory to the
   nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
@@ -310,6 +354,8 @@ COMMANDS:
   typecheck             Validate compile via direct csc.dll invocation
                         (no MSBuild). Used by Hot Reload pre-flight in
                         meow-tower's justfile.
+  build                 Run `dotnet build` on the generated .sln. Args after
+                        `--` are forwarded verbatim (defaults to `-v:q`).
 
 ARGUMENTS:
   unity-root            Unity project root (defaults to climbing from CWD)

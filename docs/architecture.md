@@ -55,8 +55,10 @@ graph LR
     A[lock] -->|scan Unity + project| B[csproj.lock]
     B --> C[generate]
     B --> T[typecheck]
+    B --> X[build]
     C -->|+ asmdef scan| D[.csproj/.sln]
     T -->|+ asmdef scan + csc.dll| E[diagnostics + .dll]
+    X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
 
 1. **`lock`** scans the Unity installation + project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` to find the Unity install path; walks `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock`.
@@ -64,6 +66,7 @@ graph LR
    Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/Contents/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `~/.cache/unity-solution-generator/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/.../PackageManager/Editor/*.tgz`). The latter two only fire for entries `packages-lock.json` names but PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
 2. **`generate`** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`; overridable via the Rust API's `with_output_dir`. The depth controls compile-pattern prefix — one `../` per path component back to project root.
 3. **`typecheck`** reads the lockfile + scan, builds csc args per asmdef, walks the dependency DAG level-by-level, invokes `dotnet exec csc.dll /shared` per dirty project. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds.
+4. **`build`** runs `generate`, then shells out to `dotnet build <variant>.sln`. Args after `--` are forwarded verbatim (defaults to `-v:q`). MSBuild writes assemblies to `obj/Debug/<asmdef>.dll` and per-project reference copies to `Temp/Bin/Debug/<asmdef>/` under the variant directory (`<OutputPath>` is hardcoded in the csproj template — solution_generator.rs:552).
 
 ## Public API
 
@@ -74,6 +77,7 @@ graph LR
 | `lock` | `[<root>]` |
 | `generate` | `[<root>] <platform> <config> [--extra-refs <paths>]` |
 | `typecheck` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>]` (defaults: `ios editor`) |
+| `build` | `[<root>] <platform> <config> [--extra-refs <paths>] [-- <dotnet-build-args>...]` |
 
 `<root>` is optional — when omitted, the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
 
@@ -115,6 +119,8 @@ Library/UnitySolutionGenerator/
   lock-fingerprint                ← short-circuits `lock` when nothing changed
   .fingerprints/<options-hash>    ← short-circuits `generate` when nothing changed
   ios-editor/                     ← `generate` output: .csproj + .sln + Directory.Build.props
+    obj/Debug/<asmdef>.dll        ←   `build` output: MSBuild assemblies
+    Temp/Bin/Debug/<asmdef>/      ←   `build` output: per-project reference DLL copies
   android-prod/
   typecheck-ios-editor/           ← `typecheck` output: csc .dlls + .rsp files
   …

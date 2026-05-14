@@ -27,6 +27,8 @@ unity-solution-generator generate . ios editor              # default: Library/U
 unity-solution-generator generate . ios editor \
   --extra-refs "/path/to/Extra.dll,/path/to/Other.dll"     # additional DLL references
 unity-solution-generator typecheck .                        # compile-check (defaults: ios editor); direct csc.dll, no MSBuild
+unity-solution-generator build . ios prod                   # generate + `dotnet build` (default: -v:q)
+unity-solution-generator build . ios prod -- -m --no-restore -v:n  # forward args after `--` to dotnet build
 ```
 
 Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx`. Config: `prod` | `dev` | `editor`.
@@ -55,10 +57,11 @@ Platform defines:
 
 `unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). Output is a deterministic library DLL per asmdef — byte-identical for unchanged inputs (cascade-skip relies on this), and never the artifact Unity ships (Unity rebuilds the solution itself). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
 
-For full IL output (rarely needed since Unity rebuilds the solution itself), call MSBuild directly:
+For full IL output (rarely needed since Unity rebuilds the solution itself), use `build`, which generates the `.sln` and shells out to `dotnet build`:
 
 ```bash
-dotnet build "$(unity-solution-generator generate . ios prod)" -m --no-restore -v:q
+unity-solution-generator build . ios prod                          # default `-v:q`
+unity-solution-generator build . ios prod -- -m --no-restore -v:q  # forward args after `--`
 ```
 
 ## Library API
@@ -67,16 +70,20 @@ C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [
 
 ## How it works
 
-Three subcommands sharing a scan + lockfile:
+Subcommands share a scan + lockfile:
 
 ```mermaid
 graph LR
     A[lock] -->|scan Unity + project| B[csproj.lock]
     B --> C[generate]
     B --> T[typecheck]
+    B --> X[build]
     C -->|+ asmdef scan| D[.csproj/.sln]
     T -->|+ asmdef scan + csc.dll| E[diagnostics]
+    X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
+
+`build` writes MSBuild artifacts under the same variant directory `generate` emits to: assemblies land in `obj/Debug/<asmdef>.dll`, with per-project copies of every reference DLL under `Temp/Bin/Debug/<asmdef>/`. Disk usage is significant (hundreds of MB on large projects) — `typecheck` is the lighter option when you only need diagnostics.
 
 Mechanics — category-inference rules, source-ownership walk, on-disk layout, cache versioning, typecheck internals — live in [[architecture.md]].
 
