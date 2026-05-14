@@ -9,15 +9,26 @@ Single crate at `crates/usg-core/` (lib + companion binary `unity-solution-gener
 ## Build
 
 ```bash
-just build                    # release binary → dist/
+just build                    # release binary → dist/ (gitignored)
 just test                     # run tests
-just install                  # symlink to ~/.local/bin
+just install                  # build from source + symlink to ~/.local/bin (Rust toolchain required)
 just profile                  # benchmark against meow-tower
-just publish                  # cargo publish (irreversible)
+just release 0.1.1            # bump version, tag, push — CI builds + uploads binary to GH Releases
+just publish                  # cargo publish to crates.io (run after `just release` + CI green)
 ```
 
-**Output** (`dist/`):
+**Output** (`dist/`, gitignored):
 - `unity-solution-generator` — CLI binary
+
+## Distribution
+
+| Audience | Channel | Command |
+|---|---|---|
+| You (dev, Rust toolchain installed) | local build | `just install` |
+| Coworkers (no Rust toolchain) | GH Releases prebuilt binary | provisioned independently |
+| meow-tower's `BoxcatBridge` | crates.io rlib | `cargo` resolves transitively |
+
+`just release <version>` cuts the GH Release: bumps `Cargo.toml`, commits, tags `v<version>`, pushes. The `.github/workflows/release.yml` workflow builds on `macos-14` (arm64) and uploads the binary as a release asset.
 
 ## CLI
 

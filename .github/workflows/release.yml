@@ -1,0 +1,35 @@
+# Builds the CLI binary on macOS arm64 and attaches it to a GitHub Release.
+# Triggered by pushing a `v*` tag (e.g. `v0.1.1`). The tag must match the
+# version in `Cargo.toml` — `just release <version>` handles bump+tag+push.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # needed to create the release + upload assets
+
+jobs:
+  build:
+    runs-on: macos-14  # arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Build release binary
+        run: just build
+
+      - name: Create release + upload binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/unity-solution-generator

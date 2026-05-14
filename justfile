@@ -10,13 +10,34 @@ default:
 # Build release binary
 build:
     cargo build --manifest-path "{{pkg}}/Cargo.toml" --release
+    mkdir -p "{{pkg}}/dist"
     cp "{{pkg}}/target/release/unity-solution-generator" "{{bin}}"
     codesign -s - -f "{{bin}}"  # adhoc-sign so hardened runtime tools accept the binary
 
-# Install to ~/.local/bin
+# Install to ~/.local/bin (build from source — requires Rust toolchain)
 install: build
     mkdir -p ~/.local/bin
     ln -sf "{{bin}}" ~/.local/bin/unity-solution-generator
+
+# Cut a release: bump version, commit, tag, push. CI builds + uploads binary.
+# After CI succeeds, run `just publish` to push to crates.io.
+# Usage: just release 0.1.1
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! [[ "{{VERSION}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "error: version must be semver (e.g. 0.1.1)" >&2; exit 1
+    fi
+    if ! git diff-index --quiet HEAD --; then
+      echo "error: working tree dirty — commit or stash first" >&2; exit 1
+    fi
+    sed -i '' 's/^version = ".*"/version = "{{VERSION}}"/' "{{pkg}}/Cargo.toml"
+    cargo update -p unity-solution-generator --manifest-path "{{pkg}}/Cargo.toml"
+    git add "{{pkg}}/Cargo.toml" "{{pkg}}/Cargo.lock"
+    git commit -m "release: v{{VERSION}}"
+    git tag "v{{VERSION}}"
+    git push origin HEAD
+    git push origin "v{{VERSION}}"
 
 # Run tests
 test:
