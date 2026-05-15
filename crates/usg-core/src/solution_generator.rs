@@ -553,7 +553,7 @@ fn render_csproj_header(
     <DefineConstants>$(DefineConstants)</DefineConstants>\n\
     <ErrorReport>prompt</ErrorReport>\n\
     <WarningLevel>4</WarningLevel>\n\
-    <NoWarn>0169,0649</NoWarn>\n\
+    <NoWarn>0169,0649,8524,8597,8600,8601,8602,8603,8604,8605,8607,8608,8609,8610,8611,8612,8613,8614,8615,8616,8617,8618,8619,8620,8621,8622,8624,8625,8629,8631,8632,8633,8634,8643,8644,8645,8653,8654,8655,8667,8669,8670</NoWarn>\n\
     <AllowUnsafeBlocks>{unsafe_str}</AllowUnsafeBlocks>\n\
     <TreatWarningsAsErrors>False</TreatWarningsAsErrors>\n\
   </PropertyGroup>\n\

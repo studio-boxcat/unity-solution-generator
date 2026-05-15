@@ -2,7 +2,7 @@ use std::process::{Command, ExitCode};
 
 use unity_solution_generator::{
     BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
-    SolutionGenerator, TypecheckOptions, lockfile_path, resolve_project_root,
+    SolutionGenerator, TypecheckOptions, resolve_project_root,
     typecheck::run as typecheck_run,
 };
 
@@ -139,29 +139,14 @@ fn generate_sln(
         .with_build_config(build_config)
         .with_extra_refs(extra_refs);
 
-    // Lockfile is the only supported input now. If absent, scan-and-write it
-    // before generating; the lock-fingerprint cache makes a redundant `lock`
-    // call cheap.
-    let lockfile_p = lockfile_path(&resolved, DEFAULT_GENERATOR_ROOT);
-    let lockfile = if std::path::Path::new(&lockfile_p).exists() {
-        match LockfileIO::read(&lockfile_p) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("error: {}", e);
-                return Err(ExitCode::from(1));
-            }
-        }
-    } else {
-        eprintln!("No lockfile found, running lock...");
-        match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
-            Ok(l) => {
-                eprintln!("Locked: {}", l.unity_version);
-                l
-            }
-            Err(e) => {
-                eprintln!("error: {}", e);
-                return Err(ExitCode::from(1));
-            }
+    // Always route through `scan_and_write`: it serves the cached lockfile on
+    // a fingerprint hit (~ms) and rescans on a miss. A bare `read` would use
+    // a stale lockfile (e.g. dangling refs to deleted files → MSB3245).
+    let lockfile = match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return Err(ExitCode::from(1));
         }
     };
 

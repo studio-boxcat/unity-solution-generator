@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use crate::error::{LockfileError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
@@ -198,15 +197,13 @@ impl LockfileIO {
         Ok(scanned.lockfile)
     }
 
-    /// Read the lockfile if present, else scan + write a fresh one.
-    /// See [`scan_and_write`](Self::scan_and_write) for the `generator_root` argument.
+    /// Ensure the lockfile is fresh and return it. Thin alias for
+    /// [`scan_and_write`](Self::scan_and_write), which already short-circuits
+    /// via the fingerprint cache when nothing on disk has changed. A bare
+    /// `read` would silently use a stale lockfile (e.g. references to files
+    /// that no longer exist on disk) and surface as `MSB3245` from `dotnet build`.
     pub fn load_or_scan(project_root: &str, generator_root: &str) -> Result<Lockfile> {
-        let path = lockfile_path(project_root, generator_root);
-        if Path::new(&path).exists() {
-            Self::read(&path)
-        } else {
-            Self::scan_and_write(project_root, generator_root)
-        }
+        Self::scan_and_write(project_root, generator_root)
     }
 
     pub fn write(lockfile: &Lockfile, path: &str) -> Result<()> {

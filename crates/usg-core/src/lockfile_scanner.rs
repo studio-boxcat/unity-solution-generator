@@ -78,6 +78,16 @@ impl LockfileScanner {
         let mut netstd_refs: Vec<DllRef> = Vec::new();
         walk_files(&netstd_base, &netstd_base, &[".dll"], false, |rel, name| {
             let n = &name[..name.len() - 4];
+            // Drop the WCF family. `System.Private.ServiceModel.dll` declares a
+            // dep on `System.Reflection.DispatchProxy` v4.0.6.0, but Unity only
+            // ships the v4.0.5.0 shim — MSBuild's RAR can't unify and emits a
+            // multi-line MSB3277 per csproj on `dotnet build`. WCF isn't usable
+            // from a Unity runtime anyway, so excluding the family is safe.
+            if n == "System.Private.ServiceModel"
+                || n.starts_with("System.ServiceModel")
+            {
+                return;
+            }
             netstd_refs.push(DllRef::new(
                 n,
                 format!("$(UnityPath)/Unity.app/Contents/NetStandard/{}", rel),

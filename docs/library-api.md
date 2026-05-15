@@ -18,7 +18,8 @@ unity_solution_generator::generate(
 ```
 
 Single-threaded contract — caller serializes calls (cache files aren't
-reentrant-safe). Auto-runs the equivalent of `lock` if no lockfile exists.
+reentrant-safe). Validates the `lock-fingerprint` on every call and auto-runs
+`lock` if the lockfile is missing or stale.
 
 ## Lower-level building blocks (`use unity_solution_generator::*`)
 

@@ -113,4 +113,4 @@ Quick refs:
 unity-solution-generator lock .
 ```
 
-Re-run `lock` when Unity version changes or packages are added/removed. The lockfile is auto-generated on first `generate` / `typecheck` if missing. Most environment changes (new files, populated `Library/PackageCache/`, edited asmdefs) auto-invalidate via `lock-fingerprint`; manual re-lock is rarely needed.
+Every `generate` / `typecheck` / `build` invocation validates the `lock-fingerprint` and rescans if anything contributing to the lockfile changed (files added/removed, Unity install moved, edited asmdefs, populated `Library/PackageCache/`). On a fingerprint hit the check costs ~ms; manual `lock` is only needed when you want to force-rescan without running a subcommand.
