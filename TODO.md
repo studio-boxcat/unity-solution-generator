@@ -14,6 +14,18 @@
 
 `just profile` calls `generate . ios editor --root` which currently exits non-zero on first warmup (pre-existing — the `--root` flag may have been renamed/removed). Recipe needs an audit; for now hyperfine just skips that row.
 
+### `run_build` double-parses `<root> <platform> <config>`
+
+`main.rs:99-108` parses args once for `print_invocation_banner`, then `generate_sln` re-parses inside itself. Clean fix (push the parsed tuple down) needs a private `generate_sln_with_opts` shape or a callback — both worse than the duplicate parse at current scale. Three trivial string parses, no risk of drift while defaults stay shared via `parse_variant_args`. Revisit if a third banner-needing caller appears.
+
+### UTD source/ref-mtime branches lack direct tests
+
+`tests/typecheck_paths.rs` covers stamp/disk-mtime branches of `is_up_to_date` and the post-cascade `max_input_mtime` floor, but doesn't directly exercise "source newer than out_dll → recompile" or "DllRef newer than out_dll → recompile" in isolation. Two ~6-line tests would lock these in. Today they're covered transitively via the cascade-floor test.
+
+### `Display` for `BuildPlatform`/`BuildConfig`
+
+`main.rs:303` calls `.raw()` to format the strong types in the banner. A `Display` impl on each would let logs/formats use `{platform}` directly without the lossy `.raw()` hop. Trivial; no caller harm today.
+
 ### Other rejected/closed during no-emit wiring
 
 - `-t:CoreCompile` (alone) — broke `ResolveProjectReferences`, downstream csprojs lose refs to upstream. Has to be `-t:Build` with property-level skips.
