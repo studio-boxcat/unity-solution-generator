@@ -333,16 +333,16 @@ fn compile_project(
     defines.extend(asm.include_platforms.iter().cloned());
 
     let rsp_path = format!("{}/{}.rsp", out_dir, name);
-    let rsp_body = build_rsp(
+    let rsp_body = build_rsp(&BuildRspInputs {
         lang_version,
-        &defines,
-        common_refs,
-        &proj_refs,
+        defines: &defines,
+        refs: common_refs,
+        proj_refs: &proj_refs,
         analyzers,
-        &sources,
-        &out_dll,
-        asm.allow_unsafe_code,
-    );
+        sources: &sources,
+        out_dll: &out_dll,
+        allow_unsafe: asm.allow_unsafe_code,
+    });
     if let Err(e) = fs::write(&rsp_path, rsp_body) {
         return ProjectOutcome::Io(io_err(&rsp_path, e));
     }
@@ -677,17 +677,8 @@ fn find_csc_dll() -> Option<String> {
 }
 
 #[doc(hidden)]
-pub fn __test_only_build_rsp(
-    lang_version: &str,
-    defines: &[String],
-    refs: &[DllRef],
-    proj_refs: &[PathBuf],
-    analyzers: &[String],
-    sources: &[PathBuf],
-    out_dll: &str,
-    allow_unsafe: bool,
-) -> String {
-    build_rsp(lang_version, defines, refs, proj_refs, analyzers, sources, out_dll, allow_unsafe)
+pub fn __test_only_build_rsp(inputs: &BuildRspInputs) -> String {
+    build_rsp(inputs)
 }
 
 /// Test-only re-exports of internal path/stamp/UTD helpers. Stable surface
@@ -705,16 +696,21 @@ pub mod __test_only {
     }
 }
 
-fn build_rsp(
-    lang_version: &str,
-    defines: &[String],
-    refs: &[DllRef],
-    proj_refs: &[PathBuf],
-    analyzers: &[String],
-    sources: &[PathBuf],
-    out_dll: &str,
-    allow_unsafe: bool,
-) -> String {
+/// Inputs to `build_rsp`. Named-field struct to keep the call site readable
+/// and to avoid the clippy `too_many_arguments` lint as more flags get added.
+#[doc(hidden)]
+pub struct BuildRspInputs<'a> {
+    pub lang_version: &'a str,
+    pub defines: &'a [String],
+    pub refs: &'a [DllRef],
+    pub proj_refs: &'a [PathBuf],
+    pub analyzers: &'a [String],
+    pub sources: &'a [PathBuf],
+    pub out_dll: &'a str,
+    pub allow_unsafe: bool,
+}
+
+fn build_rsp(i: &BuildRspInputs) -> String {
     // `/noconfig` MUST go on the command line (not in the rsp) — otherwise csc
     // emits CS2023 and reads its default csc.rsp anyway. See `invoke_csc`.
     let mut s = String::new();
@@ -727,24 +723,24 @@ fn build_rsp(
     // emit a full library; `/deterministic` keeps output byte-identical for
     // unchanged inputs so the mtime-restore cascade-skip trick still works.
     s.push_str("/deterministic\n");
-    s.push_str(&format!("/langversion:{}\n", lang_version));
-    s.push_str(&format!("/out:{}\n", out_dll));
-    if allow_unsafe {
+    s.push_str(&format!("/langversion:{}\n", i.lang_version));
+    s.push_str(&format!("/out:{}\n", i.out_dll));
+    if i.allow_unsafe {
         s.push_str("/unsafe+\n");
     }
-    if !defines.is_empty() {
-        s.push_str(&format!("/define:{}\n", defines.join(";")));
+    if !i.defines.is_empty() {
+        s.push_str(&format!("/define:{}\n", i.defines.join(";")));
     }
-    for r in refs {
+    for r in i.refs {
         s.push_str(&format!("/reference:{}\n", r.path));
     }
-    for p in proj_refs {
+    for p in i.proj_refs {
         s.push_str(&format!("/reference:{}\n", p.display()));
     }
-    for a in analyzers {
+    for a in i.analyzers {
         s.push_str(&format!("/analyzer:{}\n", a));
     }
-    for src in sources {
+    for src in i.sources {
         s.push_str(&format!("{}\n", src.display()));
     }
     s

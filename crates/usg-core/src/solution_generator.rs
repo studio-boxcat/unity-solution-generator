@@ -29,6 +29,8 @@ impl BuildPlatform {
         })
     }
 
+    /// CLI / config string ("ios", "android", "osx"). Round-trip with `parse`.
+    /// Equivalent to `Display::fmt`; kept as a pub fn for explicit-API callers.
     pub fn raw(self) -> &'static str {
         match self {
             BuildPlatform::Ios => "ios",
@@ -55,6 +57,12 @@ impl BuildPlatform {
     }
 }
 
+impl std::fmt::Display for BuildPlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.raw())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildConfig {
     Editor,
@@ -72,12 +80,20 @@ impl BuildConfig {
         })
     }
 
+    /// CLI / config string ("editor", "dev", "prod"). Round-trip with `parse`.
+    /// Equivalent to `Display::fmt`; kept as a pub fn for explicit-API callers.
     pub fn raw(self) -> &'static str {
         match self {
             BuildConfig::Editor => "editor",
             BuildConfig::Dev => "dev",
             BuildConfig::Prod => "prod",
         }
+    }
+}
+
+impl std::fmt::Display for BuildConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.raw())
     }
 }
 

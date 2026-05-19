@@ -308,7 +308,7 @@ fn walk_files(
         return;
     }
     let base = Path::new(base_path);
-    let mut iter = WalkDir::new(directory)
+    let iter = WalkDir::new(directory)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
@@ -321,7 +321,7 @@ fn walk_files(
             }
             true
         });
-    while let Some(entry) = iter.next() {
+    for entry in iter {
         let Ok(entry) = entry else {
             continue;
         };

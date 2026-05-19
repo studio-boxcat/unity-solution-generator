@@ -42,9 +42,9 @@ fn main() -> ExitCode {
 }
 
 fn run_lock(args: &[String]) -> ExitCode {
-    // <unity-root> is optional — when omitted (or bare flags like --help land
-    // here), default to "." so `resolve_project_root` climbs from CWD to the
-    // nearest ancestor with `ProjectSettings/ProjectVersion.txt`.
+    // `lock` only needs <root>; platform/config/extra-refs are irrelevant.
+    // Default to "." so `resolve_project_root` climbs from CWD to the nearest
+    // ancestor with `ProjectSettings/ProjectVersion.txt`.
     let unity_root = args
         .first()
         .filter(|a| !a.starts_with("--"))
@@ -78,7 +78,8 @@ fn run_lock(args: &[String]) -> ExitCode {
 }
 
 fn run_generate(args: &[String]) -> ExitCode {
-    match generate_sln(args, "generate", false) {
+    let inv = Invocation::parse_strict(args, "generate");
+    match generate_sln(&inv) {
         Ok(sln_path) => {
             println!("{}", sln_path);
             ExitCode::SUCCESS
@@ -88,7 +89,7 @@ fn run_generate(args: &[String]) -> ExitCode {
 }
 
 fn run_build(args: &[String]) -> ExitCode {
-    // Split off `--`-passthrough first; everything before goes to generate,
+    // Split off `--`-passthrough first; everything before is the invocation,
     // everything after is forwarded verbatim to `dotnet build`.
     let (gen_args, dotnet_args): (&[String], &[String]) =
         match args.iter().position(|a| a == "--") {
@@ -96,18 +97,10 @@ fn run_build(args: &[String]) -> ExitCode {
             None => (args, &[]),
         };
 
-    let (project_root, rest) = split_root_arg(gen_args);
-    let (platform, config, _) = parse_variant_args(rest);
-    let resolved = resolve_project_root(&project_root);
-    print_invocation_banner(
-        "build",
-        platform,
-        config,
-        &resolved,
-        &typecheck_output_dir(&resolved, DEFAULT_GENERATOR_ROOT, platform, config),
-    );
+    let inv = Invocation::parse(gen_args);
+    inv.print_banner("build");
 
-    let sln_path = match generate_sln(gen_args, "build", true) {
+    let sln_path = match generate_sln(&inv) {
         Ok(p) => p,
         Err(code) => return code,
     };
@@ -127,33 +120,17 @@ fn run_build(args: &[String]) -> ExitCode {
     }
 }
 
-/// Shared `generate`/`build` driver. Parses positional + `--extra-refs`,
-/// runs the generator, prints any warnings to stderr, and returns the
-/// `.sln` path on success or an `ExitCode` on failure. When
-/// `defaults_allowed`, omitted platform/config fall back to `ios editor`
-/// (matching `typecheck`); otherwise both are required.
-fn generate_sln(
-    args: &[String],
-    cmd_name: &str,
-    defaults_allowed: bool,
-) -> Result<String, ExitCode> {
-    let (project_root, rest) = split_root_arg(args);
-    if !defaults_allowed && rest.len() < 2 {
-        die(&format!(
-            "{cmd_name} requires: [<unity-root>] <platform> <config> [options]"
-        ));
-    }
-    let (platform, build_config, extra_refs) = parse_variant_args(rest);
-
-    let resolved = resolve_project_root(&project_root);
-    let options = GenerateOptions::new(resolved.clone(), platform)
-        .with_build_config(build_config)
-        .with_extra_refs(extra_refs);
+/// Shared `generate`/`build` driver. Runs the generator, prints warnings to
+/// stderr, returns the `.sln` path on success or an `ExitCode` on failure.
+fn generate_sln(inv: &Invocation) -> Result<String, ExitCode> {
+    let options = GenerateOptions::new(inv.project_root.clone(), inv.platform)
+        .with_build_config(inv.config)
+        .with_extra_refs(inv.extra_refs.clone());
 
     // Always route through `scan_and_write`: it serves the cached lockfile on
     // a fingerprint hit (~ms) and rescans on a miss. A bare `read` would use
     // a stale lockfile (e.g. dangling refs to deleted files → MSB3245).
-    let lockfile = match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
+    let lockfile = match LockfileIO::scan_and_write(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -176,25 +153,12 @@ fn generate_sln(
 }
 
 fn run_typecheck(args: &[String]) -> ExitCode {
-    // All positional args are optional. Defaults match the retired
-    // build-unity-sln driver: platform=ios, config=editor. With no <unity-root>
-    // (or none of the positionals), `resolve_project_root(".")` climbs from
-    // CWD to the nearest ancestor with `ProjectSettings/ProjectVersion.txt`.
-    let (project_root, rest) = split_root_arg(args);
-    let (platform, build_config, extra_refs) = parse_variant_args(rest);
+    let inv = Invocation::parse(args);
+    inv.print_banner("typecheck");
 
-    let resolved = resolve_project_root(&project_root);
-    print_invocation_banner(
-        "typecheck",
-        platform,
-        build_config,
-        &resolved,
-        &typecheck_output_dir(&resolved, DEFAULT_GENERATOR_ROOT, platform, build_config),
-    );
-
-    let opts = TypecheckOptions::new(resolved, platform)
-        .with_build_config(build_config)
-        .with_extra_refs(extra_refs);
+    let opts = TypecheckOptions::new(inv.project_root.clone(), inv.platform)
+        .with_build_config(inv.config)
+        .with_extra_refs(inv.extra_refs.clone());
 
     match typecheck_run(&opts) {
         Ok(result) => {
@@ -230,10 +194,69 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     }
 }
 
-/// Parse `<platform> <config>` (both optional, defaulting to `ios editor`)
-/// followed by `--extra-refs <paths>`. Shared by `typecheck` and the
-/// `generate`/`build` driver. Callers that require both positionals enforce
-/// that themselves before calling.
+/// Parsed CLI invocation shared across `generate`, `typecheck`, `build`.
+///
+/// Positionals: `[<root>] [<platform>] [<config>]` — all optional in `parse`,
+/// `<platform>` and `<config>` required in `parse_strict` (used by
+/// `generate`). Flag: `--extra-refs <comma-separated DLL paths>`.
+///
+/// `project_root` is post-`resolve_project_root` (absolute, with realpath
+/// applied and the Unity-root climb performed). Subcommands use the same
+/// `Invocation` for the banner and for the work itself — no double-parsing.
+struct Invocation {
+    project_root: String,
+    platform: BuildPlatform,
+    config: BuildConfig,
+    extra_refs: Vec<DllRef>,
+}
+
+impl Invocation {
+    fn parse(args: &[String]) -> Self {
+        let (root, rest) = split_root_arg(args);
+        let (platform, config, extra_refs) = parse_variant_args(rest);
+        Self {
+            project_root: resolve_project_root(&root),
+            platform,
+            config,
+            extra_refs,
+        }
+    }
+
+    /// Like `parse` but exits with usage when `<platform>` or `<config>` is
+    /// absent. `generate` requires both — silently defaulting could ship the
+    /// wrong variant to MSBuild.
+    fn parse_strict(args: &[String], cmd: &str) -> Self {
+        let (_, rest) = split_root_arg(args);
+        if rest.len() < 2 {
+            die(&format!(
+                "{cmd} requires: [<unity-root>] <platform> <config> [options]"
+            ));
+        }
+        Self::parse(args)
+    }
+
+    fn output_dir(&self) -> String {
+        typecheck_output_dir(
+            &self.project_root,
+            DEFAULT_GENERATOR_ROOT,
+            self.platform,
+            self.config,
+        )
+    }
+
+    /// One-line startup banner (variant + resolved root + output dir). On
+    /// stderr so the `generate` stdout `.sln` path stays machine-parseable.
+    fn print_banner(&self, cmd: &str) {
+        eprintln!(
+            "{cmd} {} {} at {} → {}",
+            self.platform,
+            self.config,
+            self.project_root,
+            self.output_dir(),
+        );
+    }
+}
+
 fn parse_variant_args(rest: &[String]) -> (BuildPlatform, BuildConfig, Vec<DllRef>) {
     let platform = match rest.first() {
         Some(s) => BuildPlatform::parse(s).unwrap_or_else(|| {
@@ -276,11 +299,10 @@ fn parse_variant_args(rest: &[String]) -> (BuildPlatform, BuildConfig, Vec<DllRe
     (platform, build_config, extra_refs)
 }
 
-/// Split `<unity-root>` (optional) from the remaining positional args.
-/// The first arg is treated as `<unity-root>` UNLESS it is empty, starts
-/// with `--` (a flag), or parses as a `BuildPlatform` (`ios|android|osx`)
-/// — in which case `<unity-root>` defaults to `"."` and the original args
-/// become the rest.
+/// Split `<unity-root>` (optional) from the remaining positional args. The
+/// first arg is treated as `<unity-root>` UNLESS it starts with `--` or
+/// parses as a `BuildPlatform`, in which case `<unity-root>` defaults to "."
+/// and the original args become the rest.
 fn split_root_arg(args: &[String]) -> (String, &[String]) {
     match args.first() {
         Some(first)
@@ -290,25 +312,6 @@ fn split_root_arg(args: &[String]) -> (String, &[String]) {
         }
         _ => (".".to_string(), args),
     }
-}
-
-/// Shared one-line startup banner for `build` and `typecheck`. Variant +
-/// resolved project root + the exact output dir so a user grepping logs can
-/// see where artifacts landed without re-running with `USG_PROFILE`.
-fn print_invocation_banner(
-    cmd: &str,
-    platform: BuildPlatform,
-    config: BuildConfig,
-    project_root: &str,
-    output_dir: &str,
-) {
-    eprintln!(
-        "{cmd} {} {} at {} → {}",
-        platform.raw(),
-        config.raw(),
-        project_root,
-        output_dir,
-    );
 }
 
 fn die(msg: &str) -> ! {
@@ -368,4 +371,57 @@ OPTIONS:
   --extra-refs <paths>  Comma-separated absolute paths to additional DLLs
   -h, --help            Show help"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn defaults_to_ios_editor_when_no_positionals() {
+        let inv = Invocation::parse(&[]);
+        assert_eq!(inv.platform, BuildPlatform::Ios);
+        assert_eq!(inv.config, BuildConfig::Editor);
+        assert!(inv.extra_refs.is_empty());
+    }
+
+    #[test]
+    fn parses_explicit_platform_and_config() {
+        let inv = Invocation::parse(&s(&["/nope", "android", "dev"]));
+        assert_eq!(inv.platform, BuildPlatform::Android);
+        assert_eq!(inv.config, BuildConfig::Dev);
+    }
+
+    #[test]
+    fn first_arg_is_platform_when_it_parses_as_one() {
+        // Common case: `unity-solution-generator typecheck ios editor` — no
+        // explicit root, "ios" is the platform.
+        let inv = Invocation::parse(&s(&["ios", "prod"]));
+        assert_eq!(inv.platform, BuildPlatform::Ios);
+        assert_eq!(inv.config, BuildConfig::Prod);
+    }
+
+    #[test]
+    fn parses_extra_refs_after_positionals() {
+        let inv = Invocation::parse(&s(&[
+            "/nope", "ios", "editor", "--extra-refs", "/a.dll,/b.dll",
+        ]));
+        assert_eq!(inv.extra_refs.len(), 2);
+        assert!(inv.extra_refs[0].path.ends_with("/a.dll"));
+        assert!(inv.extra_refs[1].path.ends_with("/b.dll"));
+    }
+
+    #[test]
+    fn output_dir_lives_under_variant_obj_debug() {
+        let inv = Invocation::parse(&s(&["/nope", "android", "dev"]));
+        assert!(
+            inv.output_dir().ends_with("/Library/UnitySolutionGenerator/android-dev/obj/Debug"),
+            "unexpected output_dir: {}",
+            inv.output_dir(),
+        );
+    }
 }

@@ -50,8 +50,9 @@ profile: build
     echo "--- generate (warm cache) ---"
     "{{bin}}" generate . ios editor > /dev/null  # warm up
     hyperfine --warmup 3 '"{{bin}}" generate . ios editor'
-    echo "--- generate --root ---"
-    hyperfine --warmup 3 '"{{bin}}" generate . ios editor --root'
+    echo "--- typecheck (warm no-op) ---"
+    "{{bin}}" typecheck . > /dev/null  # warm up
+    hyperfine --warmup 3 --runs 30 '"{{bin}}" typecheck .'
     echo "--- lock (cold: nuke fingerprint each run) ---"
     hyperfine --warmup 1 --runs 5 \
       --prepare 'rm -f Library/UnitySolutionGenerator/lock-fingerprint' \

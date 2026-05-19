@@ -209,3 +209,16 @@ fn android_prod_excludes_ios_only() {
 
 // CLI binary surface tests live in `tests/cli_regression.rs` (same package
 // since the bin target is now in usg-core).
+
+#[test]
+fn display_round_trips_through_parse() {
+    use unity_solution_generator::{BuildConfig, BuildPlatform};
+    for p in [BuildPlatform::Ios, BuildPlatform::Android, BuildPlatform::Osx] {
+        assert_eq!(BuildPlatform::parse(&p.to_string()), Some(p));
+        assert_eq!(p.to_string(), p.raw());
+    }
+    for c in [BuildConfig::Editor, BuildConfig::Dev, BuildConfig::Prod] {
+        assert_eq!(BuildConfig::parse(&c.to_string()), Some(c));
+        assert_eq!(c.to_string(), c.raw());
+    }
+}

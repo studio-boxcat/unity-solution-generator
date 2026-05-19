@@ -344,3 +344,52 @@ fn max_input_mtime_picks_freshest_across_categories() {
 fn max_input_mtime_none_when_no_inputs() {
     assert!(tcx::max_input_mtime(&[], &[], &[]).is_none());
 }
+
+#[test]
+fn utd_false_when_source_newer_than_dll() {
+    // The "source touched after last emit" branch of is_up_to_date. Stamp +
+    // disk-mtime can be in agreement, but a fresh source still forces recompile.
+    use std::path::PathBuf;
+    let tmp = make_temp_root();
+    let dll = tmp.path().join("Foo.dll");
+    fs::write(&dll, b"x").unwrap();
+    let stamp = tmp.path().join("Foo.dll.usg-stamp");
+    tcx::record_stamp_for(dll.to_str().unwrap(), stamp.to_str().unwrap()).unwrap();
+
+    // Source written AFTER the DLL+stamp → newer mtime.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let src = tmp.path().join("Foo.cs");
+    fs::write(&src, b"class Foo {}\n").unwrap();
+
+    assert!(!tcx::is_up_to_date(
+        &[PathBuf::from(&src)],
+        &[],
+        &[],
+        dll.to_str().unwrap(),
+        stamp.to_str().unwrap(),
+    ));
+}
+
+#[test]
+fn utd_false_when_ref_newer_than_dll() {
+    // The "external DllRef touched after last emit" branch — e.g. Unity
+    // updated, advancing the engine DLL mtime under us.
+    use unity_solution_generator::DllRef;
+    let tmp = make_temp_root();
+    let dll = tmp.path().join("Foo.dll");
+    fs::write(&dll, b"x").unwrap();
+    let stamp = tmp.path().join("Foo.dll.usg-stamp");
+    tcx::record_stamp_for(dll.to_str().unwrap(), stamp.to_str().unwrap()).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let r = tmp.path().join("UnityEngine.dll");
+    fs::write(&r, b"engine-bytes").unwrap();
+
+    assert!(!tcx::is_up_to_date(
+        &[],
+        &[DllRef::new("UnityEngine", r.to_str().unwrap())],
+        &[],
+        dll.to_str().unwrap(),
+        stamp.to_str().unwrap(),
+    ));
+}

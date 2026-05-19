@@ -518,16 +518,18 @@ fn lock_fingerprint_sentinel_invalidates_on_appearance() {
 #[test]
 fn rsp_has_no_refonly() {
     use std::path::PathBuf;
-    let rsp = unity_solution_generator::__test_only::build_rsp(
-        "9.0",
-        &[],
-        &[],
-        &[],
-        &[],
-        &[PathBuf::from("/tmp/A.cs")],
-        "/tmp/out.dll",
-        false,
-    );
+    use unity_solution_generator::__test_only::{BuildRspInputs, build_rsp};
+    let sources = [PathBuf::from("/tmp/A.cs")];
+    let rsp = build_rsp(&BuildRspInputs {
+        lang_version: "9.0",
+        defines: &[],
+        refs: &[],
+        proj_refs: &[],
+        analyzers: &[],
+        sources: &sources,
+        out_dll: "/tmp/out.dll",
+        allow_unsafe: false,
+    });
     assert!(
         !rsp.lines().any(|l| l.trim() == "/refonly"),
         "rsp must not contain /refonly — it suppresses csc body diagnostics. rsp:\n{}",
