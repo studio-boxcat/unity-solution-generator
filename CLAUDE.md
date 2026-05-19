@@ -90,11 +90,11 @@ graph LR
     B --> T[typecheck]
     B --> X[build]
     C -->|+ asmdef scan| D[.csproj/.sln]
-    T -->|+ asmdef scan + csc.dll| E[diagnostics]
+    T -->|+ asmdef scan + csc.dll| E[diagnostics + .dll]
     X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
 
-`build` writes MSBuild artifacts under the same variant directory `generate` emits to: assemblies land in `obj/Debug/<asmdef>.dll`, with per-project copies of every reference DLL under `Temp/Bin/Debug/<asmdef>/`. Disk usage is significant (hundreds of MB on large projects) — `typecheck` is the lighter option when you only need diagnostics.
+`build` and `typecheck` share the same per-variant `obj/Debug/<asmdef>.dll` output path — `build` adds `.pdb` + MSBuild's incremental caches and copies into `Temp/Bin/Debug/<asmdef>/` (hundreds of MB on large projects). `typecheck` adds `<asmdef>.dll.usg-stamp` per emit; the stamp lets the next typecheck detect MSBuild overwrites and recompile. Use `typecheck` when you only need diagnostics.
 
 Mechanics — category-inference rules, source-ownership walk, on-disk layout, cache versioning, typecheck internals — live in [[architecture.md]].
 

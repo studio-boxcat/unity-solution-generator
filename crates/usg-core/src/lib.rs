@@ -41,6 +41,33 @@ pub use solution_generator::{
     BuildConfig, BuildPlatform, GenerateOptions, GenerateResult, SolutionGenerator,
 };
 pub use typecheck::{TypecheckOptions, TypecheckResult};
+
+use std::path::{Path, PathBuf};
+
+/// Directory holding per-asmdef script DLLs for the given build variant,
+/// under the default generator root (`Library/UnitySolutionGenerator`).
+///
+/// Consumed by external reflection tools (e.g. pspec bake-types) to locate
+/// compiled script assemblies after a `typecheck` or `build` run, without
+/// hardcoding the on-disk layout. The directory itself isn't created here —
+/// callers either invoke `typecheck`/`build` themselves or fail-loud if the
+/// path doesn't exist.
+pub fn script_dll_dir(
+    project_root: impl AsRef<Path>,
+    platform: BuildPlatform,
+    config: BuildConfig,
+) -> PathBuf {
+    let s = typecheck::typecheck_output_dir(
+        project_root
+            .as_ref()
+            .to_str()
+            .expect("project_root must be UTF-8"),
+        DEFAULT_GENERATOR_ROOT,
+        platform,
+        config,
+    );
+    PathBuf::from(s)
+}
 /// Test-only re-exports of internal helpers. Not part of the stable public API.
 #[doc(hidden)]
 pub mod __test_only {

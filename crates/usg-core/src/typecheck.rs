@@ -75,9 +75,12 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
     let included = compute_included_projects(&scan.asm_def_by_name, opts);
     let levels = topo_levels(&included, &scan.asm_def_by_name);
 
-    // Output dir: per-variant under generator root, gitignored alongside other caches.
-    let variant = format!("{}-{}", opts.platform.raw(), opts.build_config.raw());
-    let out_dir = format!("{}/{}/typecheck-{}", root, DEFAULT_GENERATOR_ROOT, variant);
+    purge_legacy_typecheck_dir(&root, DEFAULT_GENERATOR_ROOT, opts.platform, opts.build_config);
+
+    // Shares `<variant>/obj/Debug/` with `build`'s MSBuild output so consumers
+    // see fresh DLLs after a typecheck-only flow. Foreign writers are detected
+    // per-DLL via `.usg-stamp` sidecars — see `is_up_to_date`.
+    let out_dir = typecheck_output_dir(&root, DEFAULT_GENERATOR_ROOT, opts.platform, opts.build_config);
     fs::create_dir_all(&out_dir).map_err(|e| io_err(&out_dir, e))?;
 
     let csc_dll = find_csc_dll().ok_or_else(|| {
@@ -317,8 +320,9 @@ fn compile_project(
 
     let proj_refs = collect_project_refs(asm, included, out_dir);
     let out_dll = format!("{}/{}.dll", out_dir, name);
+    let stamp_path = stamp_path_for(&out_dll);
 
-    if is_up_to_date(&sources, common_refs, &proj_refs, &out_dll) {
+    if is_up_to_date(&sources, common_refs, &proj_refs, &out_dll, &stamp_path) {
         return ProjectOutcome::Skipped;
     }
 
@@ -354,17 +358,59 @@ fn compile_project(
 
     match invoke_csc(csc_dll, &rsp_path) {
         Ok(()) => {
+            // If csc's emit is byte-identical to the pre-compile DLL, roll
+            // mtime back so downstream UTD doesn't see a spurious cascade —
+            // but never below the freshest input. If we did, our own UTD
+            // would fail next run (source/ref mtime > our restored mtime) and
+            // we'd loop forever. The post-foreign-write recovery scenario
+            // hits this: upstream got a fresh mtime, our content is unchanged
+            // vs. the previous successful build, so prev_t < upstream.mtime.
             if let (Some(prev), Some(prev_t)) = (&prev_bytes, prev_mtime) {
                 if let Ok(new) = fs::read(&out_dll) {
                     if prev == &new {
-                        let _ = restore_mtime(&out_dll, prev_t);
+                        let target = max_input_mtime(&sources, common_refs, &proj_refs)
+                            .map_or(prev_t, |m| prev_t.max(m));
+                        let _ = restore_mtime(&out_dll, target);
                     }
                 }
+            }
+            if let Err(e) = record_stamp_for(&out_dll, &stamp_path) {
+                return ProjectOutcome::Io(io_err(&stamp_path, e));
             }
             ProjectOutcome::Recompiled
         }
         Err(stderr) => ProjectOutcome::Failed(stderr),
     }
+}
+
+/// Max mtime across every input the UTD predicate stats. Returned value is
+/// the floor below which `restore_mtime` must not go — otherwise the next
+/// UTD pass would see an input newer than out_dll and recompile forever.
+#[doc(hidden)] pub fn max_input_mtime(
+    sources: &[PathBuf],
+    refs: &[DllRef],
+    proj_refs: &[PathBuf],
+) -> Option<u128> {
+    let mut max: Option<u128> = None;
+    let mut bump = |t: u128| {
+        max = Some(max.map_or(t, |m| m.max(t)));
+    };
+    for s in sources {
+        if let Some(t) = mtime_nsec(s) {
+            bump(t);
+        }
+    }
+    for r in refs {
+        if let Some(t) = mtime_nsec(&r.path) {
+            bump(t);
+        }
+    }
+    for p in proj_refs {
+        if let Some(t) = mtime_nsec(p) {
+            bump(t);
+        }
+    }
+    max
 }
 
 // ── data collection ───────────────────────────────────────────────────────
@@ -474,7 +520,7 @@ fn mtime_nsec(p: impl AsRef<Path>) -> Option<u128> {
 /// Set `path`'s mtime to a previously-recorded `mtime_nsec` value.
 /// Used to roll back csc's freshly-emitted mtime when the bytes match the
 /// pre-compile bytes — see "content-hash UTD" in `run`.
-fn restore_mtime(path: &str, mtime_ns: u128) -> std::io::Result<()> {
+#[doc(hidden)] pub fn restore_mtime(path: &str, mtime_ns: u128) -> std::io::Result<()> {
     let secs = (mtime_ns / 1_000_000_000) as u64;
     let nanos = (mtime_ns % 1_000_000_000) as u32;
     let t = UNIX_EPOCH + Duration::new(secs, nanos);
@@ -483,15 +529,21 @@ fn restore_mtime(path: &str, mtime_ns: u128) -> std::io::Result<()> {
     Ok(())
 }
 
-fn is_up_to_date(
+#[doc(hidden)] pub fn is_up_to_date(
     sources: &[PathBuf],
     refs: &[DllRef],
     proj_refs: &[PathBuf],
     out_dll: &str,
+    stamp_path: &str,
 ) -> bool {
     let Some(out_mtime) = mtime_nsec(out_dll) else {
         return false;
     };
+    // Foreign-writer guard: a missing or stale stamp means something other
+    // than this code wrote the DLL (e.g. `dotnet build`) — recompile.
+    if read_stamp(stamp_path) != Some(out_mtime) {
+        return false;
+    }
     for s in sources {
         if mtime_nsec(s).map_or(true, |t| t > out_mtime) {
             return false;
@@ -510,6 +562,78 @@ fn is_up_to_date(
         }
     }
     true
+}
+
+// ── path layout + stamp sidecar ───────────────────────────────────────────
+
+/// Directory where `typecheck` writes per-asmdef `<name>.dll`, `<name>.rsp`,
+/// and `<name>.dll.usg-stamp`. Shares `<variant>/obj/Debug/` with `build`'s
+/// MSBuild output so external consumers see fresh DLLs after a typecheck-only
+/// flow; the stamp sidecar distinguishes our emits from foreign writers.
+pub fn typecheck_output_dir(
+    project_root: &str,
+    generator_root: &str,
+    platform: BuildPlatform,
+    config: BuildConfig,
+) -> String {
+    format!(
+        "{}/{}/{}-{}/obj/Debug",
+        project_root, generator_root, platform.raw(), config.raw(),
+    )
+}
+
+#[doc(hidden)] pub fn legacy_typecheck_dir(
+    project_root: &str,
+    generator_root: &str,
+    platform: BuildPlatform,
+    config: BuildConfig,
+) -> String {
+    format!(
+        "{}/{}/typecheck-{}-{}",
+        project_root, generator_root, platform.raw(), config.raw(),
+    )
+}
+
+/// One-time cleanup of pre-consolidation `typecheck-<variant>/` output.
+/// Idempotent: no-op when the dir doesn't exist.
+#[doc(hidden)] pub fn purge_legacy_typecheck_dir(
+    project_root: &str,
+    generator_root: &str,
+    platform: BuildPlatform,
+    config: BuildConfig,
+) {
+    let path = legacy_typecheck_dir(project_root, generator_root, platform, config);
+    if !Path::new(&path).is_dir() {
+        return;
+    }
+    // Non-fatal: leftover legacy dir is disk waste, not a correctness issue.
+    // `eprintln!` (not `tracing::warn!`) so it's visible without USG_PROFILE.
+    if let Err(e) = fs::remove_dir_all(&path) {
+        eprintln!("warning: failed to remove legacy typecheck dir {path}: {e}");
+    }
+}
+
+#[doc(hidden)] pub fn stamp_path_for(out_dll: &str) -> String {
+    format!("{}.usg-stamp", out_dll)
+}
+
+#[doc(hidden)] pub fn read_stamp(path: &str) -> Option<u128> {
+    let s = fs::read_to_string(path).ok()?;
+    s.trim().parse::<u128>().ok()
+}
+
+#[doc(hidden)] pub fn write_stamp(path: &str, mtime_ns: u128) -> std::io::Result<()> {
+    fs::write(path, mtime_ns.to_string())
+}
+
+/// Stamp `out_dll` with its current on-disk mtime. Call after every emit so
+/// the next UTD pass recognises us as the writer; absent or stale stamps
+/// (from foreign writers like `dotnet build`) force recompile.
+#[doc(hidden)] pub fn record_stamp_for(out_dll: &str, stamp_path: &str) -> std::io::Result<()> {
+    let t = mtime_nsec(out_dll).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, format!("missing dll: {}", out_dll))
+    })?;
+    write_stamp(stamp_path, t)
 }
 
 // ── csc invocation ────────────────────────────────────────────────────────
@@ -564,6 +688,21 @@ pub fn __test_only_build_rsp(
     allow_unsafe: bool,
 ) -> String {
     build_rsp(lang_version, defines, refs, proj_refs, analyzers, sources, out_dll, allow_unsafe)
+}
+
+/// Test-only re-exports of internal path/stamp/UTD helpers. Stable surface
+/// for `tests/typecheck_paths.rs`; not part of the library API.
+#[doc(hidden)]
+pub mod __test_only {
+    pub use super::{
+        is_up_to_date, legacy_typecheck_dir, max_input_mtime, purge_legacy_typecheck_dir,
+        read_stamp, record_stamp_for, restore_mtime, stamp_path_for, typecheck_output_dir,
+        write_stamp,
+    };
+
+    pub fn mtime_nsec(path: &str) -> Option<u128> {
+        super::mtime_nsec(path)
+    }
 }
 
 fn build_rsp(

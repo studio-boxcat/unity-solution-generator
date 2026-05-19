@@ -3,7 +3,7 @@ use std::process::{Command, ExitCode};
 use unity_solution_generator::{
     BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
     SolutionGenerator, TypecheckOptions, resolve_project_root,
-    typecheck::run as typecheck_run,
+    typecheck::{run as typecheck_run, typecheck_output_dir},
 };
 
 fn main() -> ExitCode {
@@ -96,6 +96,17 @@ fn run_build(args: &[String]) -> ExitCode {
             None => (args, &[]),
         };
 
+    let (project_root, rest) = split_root_arg(gen_args);
+    let (platform, config, _) = parse_variant_args(rest);
+    let resolved = resolve_project_root(&project_root);
+    print_invocation_banner(
+        "build",
+        platform,
+        config,
+        &resolved,
+        &typecheck_output_dir(&resolved, DEFAULT_GENERATOR_ROOT, platform, config),
+    );
+
     let sln_path = match generate_sln(gen_args, "build", true) {
         Ok(p) => p,
         Err(code) => return code,
@@ -173,6 +184,14 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     let (platform, build_config, extra_refs) = parse_variant_args(rest);
 
     let resolved = resolve_project_root(&project_root);
+    print_invocation_banner(
+        "typecheck",
+        platform,
+        build_config,
+        &resolved,
+        &typecheck_output_dir(&resolved, DEFAULT_GENERATOR_ROOT, platform, build_config),
+    );
+
     let opts = TypecheckOptions::new(resolved, platform)
         .with_build_config(build_config)
         .with_extra_refs(extra_refs);
@@ -271,6 +290,25 @@ fn split_root_arg(args: &[String]) -> (String, &[String]) {
         }
         _ => (".".to_string(), args),
     }
+}
+
+/// Shared one-line startup banner for `build` and `typecheck`. Variant +
+/// resolved project root + the exact output dir so a user grepping logs can
+/// see where artifacts landed without re-running with `USG_PROFILE`.
+fn print_invocation_banner(
+    cmd: &str,
+    platform: BuildPlatform,
+    config: BuildConfig,
+    project_root: &str,
+    output_dir: &str,
+) {
+    eprintln!(
+        "{cmd} {} {} at {} → {}",
+        platform.raw(),
+        config.raw(),
+        project_root,
+        output_dir,
+    );
 }
 
 fn die(msg: &str) -> ! {

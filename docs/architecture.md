@@ -65,7 +65,7 @@ graph LR
 
    Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/Contents/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `~/.cache/unity-solution-generator/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/.../PackageManager/Editor/*.tgz`). The latter two only fire for entries `packages-lock.json` names but PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
 2. **`generate`** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`; overridable via the Rust API's `with_output_dir`. The depth controls compile-pattern prefix — one `../` per path component back to project root.
-3. **`typecheck`** reads the lockfile + scan, builds csc args per asmdef, walks the dependency DAG level-by-level, invokes `dotnet exec csc.dll /shared` per dirty project. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds.
+3. **`typecheck`** reads the lockfile + scan, builds csc args per asmdef, walks the dependency DAG level-by-level, invokes `dotnet exec csc.dll /shared` per dirty project. Output lands in `<variant>/obj/Debug/<asmdef>.dll` — the same path `build` writes to — with a per-DLL `.usg-stamp` sidecar pinning ownership. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds; the stamp guards against silent skip after a `dotnet build` overwrite.
 4. **`build`** runs `generate`, then shells out to `dotnet build <variant>.sln`. Args after `--` are forwarded verbatim (defaults to `-v:q`). MSBuild writes assemblies to `obj/Debug/<asmdef>.dll` and per-project reference copies to `Temp/Bin/Debug/<asmdef>/` under the variant directory (`<OutputPath>` is hardcoded in the csproj template — solution_generator.rs:552).
 
 ## Public API
@@ -119,10 +119,11 @@ Library/UnitySolutionGenerator/
   lock-fingerprint                ← short-circuits `lock` when nothing changed
   .fingerprints/<options-hash>    ← short-circuits `generate` when nothing changed
   ios-editor/                     ← `generate` output: .csproj + .sln + Directory.Build.props
-    obj/Debug/<asmdef>.dll        ←   `build` output: MSBuild assemblies
+    obj/Debug/<asmdef>.dll        ←   `build` + `typecheck` shared output (see below)
+    obj/Debug/<asmdef>.dll.usg-stamp ← `typecheck` ownership marker (foreign-writer guard)
+    obj/Debug/<asmdef>.rsp        ←   `typecheck` csc response file
     Temp/Bin/Debug/<asmdef>/      ←   `build` output: per-project reference DLL copies
   android-prod/
-  typecheck-ios-editor/           ← `typecheck` output: csc .dlls + .rsp files
   …
 ```
 
@@ -145,7 +146,9 @@ Two `pub const u32` constants in `lib.rs`:
 | Constant | Files | Bump policy |
 |---|---|---|
 | `LOCKFILE_VERSION` | `csproj.lock` | rarely; user-visible, may be checked in |
-| `CACHE_VERSION` | `scan-cache`, `lock-fingerprint`, `.fingerprints/*`, `typecheck-*/` | freely — dev-local, gitignored |
+| `CACHE_VERSION` | `scan-cache`, `lock-fingerprint`, `.fingerprints/*` | freely — dev-local, gitignored |
+
+Typecheck DLLs no longer have wholesale invalidation tied to `CACHE_VERSION`; each carries its own `.usg-stamp` sidecar that pins per-emit ownership. Bumping `CACHE_VERSION` won't touch them. Use `rm -rf Library/UnitySolutionGenerator/<variant>/obj/Debug/` if a forced rebuild is needed.
 
 Each cache file carries a `# version: N` header. Mismatch → wholesale invalidate. No migration code path.
 
@@ -156,7 +159,9 @@ Bypasses MSBuild entirely. Per-asmdef args (refs from lockfile, sources from sca
 - **No `/refonly`.** csc 4.10 (.NET 8 SDK) silently skips body-binding diagnostics under `/refonly` — argument-conversion errors at call sites don't surface, even though docs claim otherwise. We emit a full library and rely on `/deterministic` for byte-stable outputs (see Content-hash UTD). Hit on `meow-tower/orgel-fix`: typecheck reported `ok` while Unity Editor flagged a real `CS1503`. Test `tests/e2e.rs:rsp_has_no_refonly` locks the regression.
 - **Native-DLL filter.** Unity's lockfile sometimes points at native plugins (e.g. `unity_sprite_author.dll`). Passing those via `/reference:` to csc fires `CS0009: PE image doesn't contain managed metadata`. We check the PE header's CLR Runtime Header data-directory entry (index 14) — non-zero RVA = managed. MSBuild's `ResolveAssemblyReferences` task does the same check.
 - **Cascade skip.** If an asmdef references an upstream that failed (or was itself cascade-skipped), the downstream compile would just spew `CS0006`. We track a `failed_set` between levels and surface a `"skipped (cascade): upstream 'X' failed"` message instead.
-- **Content-hash UTD.** csc with `/deterministic` produces byte-identical output for unchanged inputs, but the post-compile mtime advances anyway. We snapshot pre-compile bytes + mtime and restore the mtime via `std::fs::FileTimes::set_modified` when the new bytes match — downstream's mtime UTD then sees the upstream as unchanged and skips.
+- **Content-hash UTD.** csc with `/deterministic` produces byte-identical output for unchanged inputs, but the post-compile mtime advances anyway. We snapshot pre-compile bytes + mtime and restore the mtime via `std::fs::FileTimes::set_modified` when the new bytes match — downstream's mtime UTD then sees the upstream as unchanged and skips. The `.usg-stamp` sidecar (below) is updated to the restored mtime so the next UTD pass still trusts the DLL.
+- **Foreign-writer guard (`.usg-stamp`).** Output lives in `<variant>/obj/Debug/` alongside MSBuild's emits from `build`. Both `build` and `typecheck` default to `ios editor`, so a user running both subcommands targets the same `<name>.dll` path. Without a guard, a naive mtime UTD would silently SKIP after `dotnet build` wrote a fresh DLL — typecheck would rubber-stamp MSBuild's compile. The guard: every successful csc emit writes a per-DLL `<name>.dll.usg-stamp` containing the DLL's mtime (ns). UTD requires stamp present AND `stamp.mtime == disk.mtime`; foreign writers (MSBuild, manual `cp`, etc.) don't touch the stamp, so the next typecheck recompiles. Bounded blast radius: one downstream cascade per foreign-write event, not unbounded. Pattern borrowed from producer-tag sidecars in Bazel's action cache and Ninja's `.ninja_log`. Tests: `tests/typecheck_paths.rs`.
+- **Build/typecheck interleaving.** `build` writes MSBuild bytes + `.pdb` + `CoreCompileInputs.cache` + `<asm>.csproj.FileListAbsolute.txt` into the same dir; `typecheck` overwrites the `.dll` and (re)writes the stamp. The `.pdb` may go stale relative to typecheck's `.dll` (typecheck doesn't emit debug info), and MSBuild's `CoreCompileInputs.cache` may skip a no-op rebuild while the DLL is csc-bytes rather than MSBuild-bytes. Both are cosmetic — debugger gets stale PDB, build appears no-op when bytes shifted. For a clean MSBuild state run `dotnet build -t:Rebuild` or `rm -rf <variant>/obj/`.
 - **Parallel level dispatch.** The DAG is grouped into levels (Kahn's). Within a level all projects are independent and run concurrently via `rayon::par_iter`. Each worker spawns its own `dotnet exec csc.dll /shared`, all connecting to the same VBCSCompiler.
 - **Diagnostic filtering.** Failure output is post-filtered to drop `: warning ` and `: info ` lines. Bodies repeat across assemblies that share sources via asmref (e.g. `com.boxcat.libs` pulled into half a dozen projects); `info SP0001` lines from `DiagnosticSuppressor` are noise. Errors and the csc banner pass through. See `typecheck.rs:filter_diagnostics`.
 - **Lock-fingerprint missing-path sentinel.** `lock_cache::build_entries` records absent paths as `(p, 0)`; `is_valid` invalidates if such a path later appears. Without this, a fresh worktree where `Library/PackageCache/` doesn't exist at lock time produces an incomplete lockfile that Unity later populating PackageCache never invalidates. Test: `tests/e2e.rs:lock_fingerprint_sentinel_invalidates_on_appearance`.
