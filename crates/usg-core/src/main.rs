@@ -156,6 +156,14 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     let inv = Invocation::parse(args);
     inv.print_banner("typecheck");
 
+    // Refresh `.csproj`/`.sln` so Rider/IDE consumers see the current
+    // solution without a separate `generate` invocation. The fingerprint
+    // cache short-circuits this in ~ms on no-op runs; full cost only on
+    // actual changes. Same write path `build` uses internally.
+    if let Err(code) = generate_sln(&inv) {
+        return code;
+    }
+
     let opts = TypecheckOptions::new(inv.project_root.clone(), inv.platform)
         .with_build_config(inv.config)
         .with_extra_refs(inv.extra_refs.clone());

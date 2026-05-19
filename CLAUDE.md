@@ -66,7 +66,7 @@ Platform defines:
 
 ### Compile validation (`typecheck`)
 
-`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). Output is a deterministic library DLL per asmdef — byte-identical for unchanged inputs (cascade-skip relies on this), and never the artifact Unity ships (Unity rebuilds the solution itself). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
+`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. It also refreshes `.csproj`/`.sln` first (same path as `generate`, fingerprint-cached) so Rider/IDE always sees a current solution off a single command. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). The per-asmdef DLL output is deterministic and byte-identical for unchanged inputs (cascade-skip relies on this), and never the artifact Unity ships (Unity rebuilds the solution itself). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
 
 For full IL output (rarely needed since Unity rebuilds the solution itself), use `build`, which generates the `.sln` and shells out to `dotnet build`:
 
@@ -90,7 +90,7 @@ graph LR
     B --> T[typecheck]
     B --> X[build]
     C -->|+ asmdef scan| D[.csproj/.sln]
-    T -->|+ asmdef scan + csc.dll| E[diagnostics + .dll]
+    T -->|+ asmdef scan + csc.dll| E[.csproj/.sln + diagnostics + .dll]
     X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
 

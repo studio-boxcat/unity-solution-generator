@@ -57,7 +57,7 @@ graph LR
     B --> T[typecheck]
     B --> X[build]
     C -->|+ asmdef scan| D[.csproj/.sln]
-    T -->|+ asmdef scan + csc.dll| E[diagnostics + .dll]
+    T -->|+ asmdef scan + csc.dll| E[.csproj/.sln + diagnostics + .dll]
     X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
 
@@ -65,7 +65,7 @@ graph LR
 
    Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/Contents/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `~/.cache/unity-solution-generator/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/.../PackageManager/Editor/*.tgz`). The latter two only fire for entries `packages-lock.json` names but PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
 2. **`generate`** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`; overridable via the Rust API's `with_output_dir`. The depth controls compile-pattern prefix — one `../` per path component back to project root.
-3. **`typecheck`** reads the lockfile + scan, builds csc args per asmdef, walks the dependency DAG level-by-level, invokes `dotnet exec csc.dll /shared` per dirty project. Output lands in `<variant>/obj/Debug/<asmdef>.dll` — the same path `build` writes to — with a per-DLL `.usg-stamp` sidecar pinning ownership. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds; the stamp guards against silent skip after a `dotnet build` overwrite.
+3. **`typecheck`** refreshes `.csproj`/`.sln` (same write path as `generate`, fingerprint-cached so it's ~ms on no-op) so the IDE always sees a current solution, then builds csc args per asmdef, walks the dependency DAG level-by-level, and invokes `dotnet exec csc.dll /shared` per dirty project. DLLs land in `<variant>/obj/Debug/<asmdef>.dll` — the same path `build` writes to — with a per-DLL `.usg-stamp` sidecar pinning ownership. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds; the stamp guards against silent skip after a `dotnet build` overwrite.
 4. **`build`** runs `generate`, then shells out to `dotnet build <variant>.sln`. Args after `--` are forwarded verbatim (defaults to `-v:q`). MSBuild writes assemblies to `obj/Debug/<asmdef>.dll` and per-project reference copies to `Temp/Bin/Debug/<asmdef>/` under the variant directory (`<OutputPath>` is hardcoded in the csproj template — solution_generator.rs:552).
 
 ## Public API

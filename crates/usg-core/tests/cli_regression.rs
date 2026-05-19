@@ -147,3 +147,32 @@ fn generate_auto_runs_lock_when_lockfile_missing() {
 
 // `init` deprecated alias dropped in this checkpoint along with the test that
 // pinned it. `lock` is the only canonical name now.
+
+/// Pinned: `typecheck` refreshes the .csproj/.sln alongside diagnostics so
+/// Rider/IDE consumers see the current solution without a separate `generate`
+/// step. Pre-consolidation, only `generate` and `build` wrote the solution;
+/// a typecheck-only flow left the IDE stale.
+#[test]
+fn typecheck_refreshes_csproj_and_sln() {
+    let tmp = fixture();
+    let root = tmp.path();
+    let out = Command::new(bin())
+        .args(["typecheck", root.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    // Tolerate exit-status mismatch (the fixture has no real csc available)
+    // — what we're pinning is that the .csproj/.sln were written before any
+    // csc work happens, so IDEs see fresh files regardless.
+    let _ = out;
+    let variant_dir = root.join("Library/UnitySolutionGenerator/ios-editor");
+    assert!(
+        variant_dir.join("Lib.csproj").exists(),
+        ".csproj must exist after typecheck — did not consolidate with generate?",
+    );
+    let sln_name = format!("{}.sln", root.file_name().unwrap().to_string_lossy());
+    assert!(
+        variant_dir.join(&sln_name).exists(),
+        "{} must exist after typecheck — did not consolidate with generate?",
+        sln_name,
+    );
+}

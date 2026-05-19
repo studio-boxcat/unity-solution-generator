@@ -12,7 +12,7 @@ Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical m
 |---------|----------|-------|
 | `generate` (warm — fingerprint hit) | **2.1 ± 0.5 ms** | 1.6–5.6 |
 | `generate` (warm scan-cache, fingerprint missing) | ~5.6 ± 1.0 ms | 4.2–9.8 |
-| `typecheck` (warm no-op) | **40.7 ± 2.4 ms** | 37.2–46.5 |
+| `typecheck` (warm no-op, refreshes .csproj/.sln + diagnostics) | **36.6 ± 0.7 ms** | 35.3–38.2 |
 | `lock` (cold, fingerprint nuked each run) | **59.5 ± 3.4 ms** | 55.9–63.6 |
 | `lock` (warm — fingerprint hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
 | startup (`--help`) | ~2 ms | — |
