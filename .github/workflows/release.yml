@@ -48,7 +48,11 @@ jobs:
       # tests live in the dev loop.
 
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        # No --locked: Cargo.lock is gitignored for this library crate, so
+        # `cargo build --locked` (which refuses to write Cargo.lock) hard-fails
+        # in a clean checkout. Determinism is enforced via tag-pinned deps in
+        # `Cargo.toml` rather than the lockfile.
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         shell: bash
