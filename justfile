@@ -48,7 +48,8 @@ release VERSION:
     fi
     sed -i '' 's/^version = ".*"/version = "{{VERSION}}"/' "{{pkg}}/Cargo.toml"
     cargo update -p unity-solution-generator --manifest-path "{{pkg}}/Cargo.toml"
-    git add "{{pkg}}/Cargo.toml" "{{pkg}}/Cargo.lock"
+    # Cargo.lock is gitignored for this library crate; don't try to stage it.
+    git add "{{pkg}}/Cargo.toml"
     git commit -m "release: v{{VERSION}}"
     git tag "v{{VERSION}}"
     git push origin HEAD
