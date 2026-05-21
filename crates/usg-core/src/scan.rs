@@ -104,6 +104,81 @@ const TOPLEVEL_DIRS: &[&str] = &[
     "ProjectSettings",
 ];
 
+/// Sidecar file holding the last-known watchman sockname. Lives at
+/// `~/.cache/unity-solution-generator/watchman-sock`. Per-user (sockname is
+/// per-user-state in watchman's design).
+fn sockname_sidecar_path() -> Option<std::path::PathBuf> {
+    use crate::paths::host_cache_root_pub;
+    Some(std::path::PathBuf::from(host_cache_root_pub()?).join("unity-solution-generator").join("watchman-sock"))
+}
+
+/// One-time process setup. Resolves the Watchman socket path and stashes it
+/// in `WATCHMAN_SOCK` so subsequent `Connector::connect()` calls skip the
+/// per-call socket-discovery hop. Two-tier lookup:
+///   1. Cached sidecar file (~1 ms). Validated by `connect_or_retry` —
+///      a stale sockname (watchman restarted, sock path changed) trips
+///      retry below.
+///   2. `watchman get-sockname` subprocess (~120 ms). Result written to
+///      the sidecar.
+///
+/// Idempotent — no-op if `WATCHMAN_SOCK` is already set, or if neither
+/// lookup succeeds (the connector still works without it, just slower).
+///
+/// Why: the `watchman_client` crate's `Connector` spawns
+/// `watchman get-sockname` on every `connect()` unless `WATCHMAN_SOCK` is
+/// in env. A single CLI invocation issues multiple `since()` calls, so the
+/// 120 ms cost compounds without this cache.
+pub fn init_socket_env() {
+    if std::env::var_os("WATCHMAN_SOCK").is_some() {
+        return;
+    }
+    // Tier 1: sidecar.
+    if let Some(sidecar) = sockname_sidecar_path() {
+        if let Ok(s) = std::fs::read_to_string(&sidecar) {
+            let s = s.trim();
+            if !s.is_empty() && std::path::Path::new(s).exists() {
+                // SAFETY: top-of-main, single-threaded.
+                unsafe { std::env::set_var("WATCHMAN_SOCK", s); }
+                return;
+            }
+        }
+    }
+    // Tier 2: subprocess.
+    let Ok(out) = std::process::Command::new("watchman").arg("get-sockname").output() else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return;
+    };
+    let Some(sock) = v.get("sockname").and_then(|s| s.as_str()) else {
+        return;
+    };
+    // SAFETY: called before any threads are spawned (top of main()).
+    unsafe {
+        std::env::set_var("WATCHMAN_SOCK", sock);
+    }
+    // Best-effort sidecar write — failure just means next invocation pays the
+    // subprocess cost again.
+    if let Some(sidecar) = sockname_sidecar_path() {
+        if let Some(parent) = sidecar.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&sidecar, sock);
+    }
+}
+
+/// Called if a Watchman connect/query fails — the cached sockname may be
+/// stale (daemon restarted with a new sock). Wiping the sidecar forces the
+/// next `init_socket_env` to re-spawn `watchman get-sockname`.
+pub fn invalidate_sockname_cache() {
+    if let Some(sidecar) = sockname_sidecar_path() {
+        let _ = std::fs::remove_file(sidecar);
+    }
+}
+
 /// Query Watchman for everything that changed under `project_root` since
 /// `prev_clock`. Pass `None` for the first call on a project (returns
 /// `Fresh`); pass `Some(clock)` from a prior call for an incremental delta.
@@ -208,6 +283,9 @@ fn clock_to_string(clock: Clock) -> Result<String, ScanError> {
 fn map_connect_err(e: WatchmanError) -> ScanError {
     match e {
         WatchmanError::ConnectionDiscovery { .. } | WatchmanError::Connect { .. } => {
+            // Sidecar sockname may be stale (daemon restarted with new sock
+            // path). Nuke it so the next invocation re-runs `watchman get-sockname`.
+            invalidate_sockname_cache();
             ScanError::Unavailable
         }
         other => ScanError::Query(anyhow::Error::new(other)),

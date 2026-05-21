@@ -66,10 +66,23 @@ impl TypecheckResult {
 
 /// Run typecheck. Returns the per-project status; caller decides exit code.
 pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
-    let _span = tracing::info_span!("typecheck.run").entered();
     let root = resolve_real_path(&opts.project_root);
     let lockfile = LockfileIO::load_or_scan(&root, DEFAULT_GENERATOR_ROOT)?;
     let scan = ProjectScanner::scan(&root, DEFAULT_GENERATOR_ROOT)?;
+    run_with(opts, &lockfile, &scan)
+}
+
+/// Like [`run`] but accepts a pre-computed lockfile and scan. Used by the
+/// CLI driver to share these between `generate_sln` and `typecheck::run`
+/// in the same invocation — without this the warm-no-op path pays Watchman
+/// + asmdef-parse twice (~400 ms wasted on meow-tower).
+pub fn run_with(
+    opts: &TypecheckOptions,
+    lockfile: &Lockfile,
+    scan: &crate::project_scanner::ScanResult,
+) -> Result<TypecheckResult> {
+    let _span = tracing::info_span!("typecheck.run").entered();
+    let root = resolve_real_path(&opts.project_root);
 
     let included = compute_included_projects(&scan.asm_def_by_name, opts);
     let levels = topo_levels(&included, &scan.asm_def_by_name);
@@ -82,7 +95,7 @@ pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
     let out_dir = typecheck_output_dir(&root, DEFAULT_GENERATOR_ROOT, opts.platform, opts.build_config);
     fs::create_dir_all(&out_dir).map_err(|e| io_err(&out_dir, e))?;
 
-    let csc_dll = find_csc_dll().ok_or_else(|| {
+    let csc_dll = find_csc_dll_cached(&root).ok_or_else(|| {
         io_err(
             "csc.dll",
             std::io::Error::new(
@@ -632,6 +645,34 @@ pub fn typecheck_output_dir(
 }
 
 // ── csc invocation ────────────────────────────────────────────────────────
+
+/// Per-user cached path to `csc.dll`. Resolved once via the (~60 ms)
+/// `dotnet --list-sdks` subprocess; subsequent invocations read the sidecar
+/// and validate the path still exists. Cache lives under the project
+/// generator root because it's tied to the dev machine's installed SDK set —
+/// moving the project to a different machine should re-resolve.
+const CSC_DLL_CACHE_FILE: &str = "csc-dll-path";
+
+fn find_csc_dll_cached(project_root: &str) -> Option<String> {
+    let cache_path = crate::paths::join_path(
+        project_root,
+        &format!("{}/{}", DEFAULT_GENERATOR_ROOT, CSC_DLL_CACHE_FILE),
+    );
+    // Fast path: read cached path, verify it still exists. SDK upgrades that
+    // remove the previously-pinned csc.dll fall through to the slow path.
+    if let Ok(cached) = fs::read_to_string(&cache_path) {
+        let cached = cached.trim().to_string();
+        if !cached.is_empty() && Path::new(&cached).exists() {
+            return Some(cached);
+        }
+    }
+    let resolved = find_csc_dll()?;
+    // Best-effort cache write — a failure here just means the next invocation
+    // pays the subprocess cost again.
+    let _ = fs::create_dir_all(crate::paths::parent_directory(&cache_path));
+    let _ = crate::io::write_file_if_changed(&cache_path, &resolved);
+    Some(resolved)
+}
 
 fn find_csc_dll() -> Option<String> {
     // Parse `dotnet --list-sdks` output: "8.0.303 [/usr/local/share/dotnet/sdk]"

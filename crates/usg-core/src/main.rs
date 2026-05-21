@@ -1,13 +1,17 @@
 use std::process::{Command, ExitCode};
 
 use unity_solution_generator::{
-    BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
-    SolutionGenerator, TypecheckOptions, resolve_project_root,
-    typecheck::{run as typecheck_run, typecheck_output_dir},
+    BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, Lockfile,
+    LockfileIO, ProjectScanner, ScanResult, SolutionGenerator, TypecheckOptions,
+    resolve_project_root,
+    typecheck::{run_with as typecheck_run_with, typecheck_output_dir},
 };
 
 fn main() -> ExitCode {
     init_tracing();
+    // Cache the watchman socket path once so subsequent Connector::connect()
+    // calls skip the per-call `watchman get-sockname` subprocess (~120 ms each).
+    unity_solution_generator::scan::init_socket_env();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
@@ -53,8 +57,8 @@ fn run_build(args: &[String]) -> ExitCode {
     let inv = Invocation::parse(gen_args);
     inv.print_banner("build");
 
-    let sln_path = match generate_sln(&inv) {
-        Ok(p) => p,
+    let gen = match generate_sln(&inv) {
+        Ok(g) => g,
         Err(code) => return code,
     };
 
@@ -62,8 +66,8 @@ fn run_build(args: &[String]) -> ExitCode {
     let default_args = ["-v:q".to_string()];
     let dotnet_args: &[String] = if dotnet_args.is_empty() { &default_args } else { dotnet_args };
 
-    eprintln!("dotnet build {} {}", sln_path, dotnet_args.join(" "));
-    match Command::new("dotnet").arg("build").arg(&sln_path).args(dotnet_args).status() {
+    eprintln!("dotnet build {} {}", gen.sln_path, dotnet_args.join(" "));
+    match Command::new("dotnet").arg("build").arg(&gen.sln_path).args(dotnet_args).status() {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         Ok(s) => ExitCode::from(s.code().unwrap_or(1).clamp(1, 255) as u8),
         Err(e) => {
@@ -73,30 +77,78 @@ fn run_build(args: &[String]) -> ExitCode {
     }
 }
 
-/// Shared `generate`/`build` driver. Runs the generator, prints warnings to
-/// stderr, returns the `.sln` path on success or an `ExitCode` on failure.
-fn generate_sln(inv: &Invocation) -> Result<String, ExitCode> {
+/// Output of [`generate_sln`]: the sln path plus the lockfile and scan that
+/// produced it, so the caller can hand them to `typecheck::run_with` without
+/// re-querying Watchman.
+struct GeneratedSln {
+    sln_path: String,
+    lockfile: Lockfile,
+    scan: ScanResult,
+}
+
+/// Shared `typecheck`/`build` driver. Runs the generator, prints warnings to
+/// stderr, returns the `.sln` path + the reusable scan/lockfile on success
+/// or an `ExitCode` on failure.
+fn generate_sln(inv: &Invocation) -> Result<GeneratedSln, ExitCode> {
     let options = GenerateOptions::new(inv.project_root.clone(), inv.platform)
         .with_build_config(inv.config)
         .with_extra_refs(inv.extra_refs.clone());
 
-    // Always route through `scan_and_write`: it serves the cached lockfile on
-    // a Watchman-clock cache hit (~ms) and rescans on a miss. A bare `read`
-    // would use a stale lockfile (e.g. dangling refs to deleted files → MSB3245).
-    let lockfile = match LockfileIO::scan_and_write(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            return Err(ExitCode::from(1));
+    // Order matters: ProjectScanner first. When its scan-cache hits we know
+    // no project-relevant file changed, which means the lockfile is also
+    // clean (assuming Unity didn't change) — we can skip the lockfile's own
+    // Watchman query entirely. Saves ~10 ms on warm typecheck.
+    let (scan, scan_was_fresh) =
+        match ProjectScanner::scan_with_freshness(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return Err(ExitCode::from(1));
+            }
+        };
+
+    // Fast path: scan-cache hit + lockfile Unity-version still matches.
+    // Falls through to `scan_and_write` otherwise (covers missing lockfile,
+    // Unity-version bump, or scan-cache miss).
+    let lockfile = if scan_was_fresh {
+        match LockfileIO::load_if_unity_matches(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
+            Ok(Some(lf)) => lf,
+            Ok(None) => match LockfileIO::scan_and_write(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    return Err(ExitCode::from(1));
+                }
+            },
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return Err(ExitCode::from(1));
+            }
+        }
+    } else {
+        match LockfileIO::scan_and_write(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return Err(ExitCode::from(1));
+            }
         }
     };
 
-    match SolutionGenerator::new().generate_from_lockfile(&options, &lockfile) {
+    match SolutionGenerator::new().generate_from_lockfile_with_scan(
+        &options,
+        &lockfile,
+        scan.clone(),
+    ) {
         Ok(r) => {
             for w in r.warnings {
                 eprintln!("warning: {}", w);
             }
-            Ok(r.variant_sln_path)
+            Ok(GeneratedSln {
+                sln_path: r.variant_sln_path,
+                lockfile,
+                scan,
+            })
         }
         Err(e) => {
             eprintln!("error: {}", e);
@@ -112,16 +164,19 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     // Refresh `.csproj`/`.sln` so Rider/IDE consumers see the current
     // solution without a separate `generate` invocation. The Watchman clock
     // short-circuits this in ~ms on no-op runs; full cost only on actual
-    // changes. Same write path `build` uses internally.
-    if let Err(code) = generate_sln(&inv) {
-        return code;
-    }
+    // changes. Same write path `build` uses internally. We capture the
+    // lockfile + scan and thread them into `typecheck::run_with` so the
+    // typecheck phase doesn't re-query Watchman.
+    let gen = match generate_sln(&inv) {
+        Ok(g) => g,
+        Err(code) => return code,
+    };
 
     let opts = TypecheckOptions::new(inv.project_root.clone(), inv.platform)
         .with_build_config(inv.config)
         .with_extra_refs(inv.extra_refs.clone());
 
-    match typecheck_run(&opts) {
+    match typecheck_run_with(&opts, &gen.lockfile, &gen.scan) {
         Ok(result) => {
             if result.ok() {
                 eprintln!(

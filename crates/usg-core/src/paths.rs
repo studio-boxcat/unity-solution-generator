@@ -65,6 +65,13 @@ pub fn lockfile_path(project_root: &str, generator_root: &str) -> String {
 /// world-writable `/tmp` (or its Windows equivalent) would let any local user
 /// tamper with our compile inputs. The panic is consistent across platforms
 /// rather than silently downgrading to an unsafe location.
+/// Public wrapper around `host_cache_root` for callers outside this module
+/// (notably `scan::sockname_sidecar_path`). Returns `None` on the same panic
+/// conditions `host_cache_root` would hit, so callers can degrade gracefully.
+pub fn host_cache_root_pub() -> Option<String> {
+    std::panic::catch_unwind(host_cache_root).ok()
+}
+
 fn host_cache_root() -> String {
     if cfg!(target_os = "windows") {
         std::env::var("LOCALAPPDATA")

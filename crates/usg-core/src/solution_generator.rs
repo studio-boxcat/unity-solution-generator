@@ -426,14 +426,22 @@ impl SolutionGenerator {
         options: &GenerateOptions,
         lockfile: &Lockfile,
     ) -> Result<GenerateResult> {
+        let project_root = resolve_real_path(&options.project_root);
+        let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
+        self.generate_from_lockfile_with_scan(options, lockfile, scan)
+    }
+
+    /// Like [`generate_from_lockfile`] but accepts a pre-computed
+    /// [`ScanResult`] — used by the CLI to share a single Watchman query
+    /// between `generate_sln` and `typecheck::run` in the same invocation.
+    pub fn generate_from_lockfile_with_scan(
+        &self,
+        options: &GenerateOptions,
+        lockfile: &Lockfile,
+        scan: ScanResult,
+    ) -> Result<GenerateResult> {
         let _span = tracing::info_span!("generate.from_lockfile").entered();
         let project_root = resolve_real_path(&options.project_root);
-
-        // No separate generate-output fingerprint cache: Watchman-backed
-        // ProjectScanner::scan is fast on cache-hit, render is microseconds,
-        // and write_file_if_changed skips bytes-identical writes (so a warm
-        // generate doesn't touch disk mtimes or rewrite csproj content).
-        let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
 
         let mut projects: Vec<ProjectInfo> = Vec::new();
         let mut all_names: HashSet<String> = HashSet::new();
