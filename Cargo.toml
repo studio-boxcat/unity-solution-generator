@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/usg-core"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 # 1.89 stabilized std::fs::File::{lock, try_lock, unlock} which package_cache.rs
 # uses for cross-platform advisory locking (replaces libc::flock).
