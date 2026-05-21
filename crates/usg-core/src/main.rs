@@ -14,15 +14,15 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Surface: `typecheck` (refresh .csproj/.sln + csc validation, used by
+    // meow-tower's Hot Reload pre-flight) and `build` (refresh + `dotnet
+    // build`). The standalone `lock` / `generate` subcommands were removed
+    // in v0.3.0 — every subcommand auto-locks via `LockfileIO::scan_and_write`
+    // on cache miss, and `typecheck`/`build` both refresh the .csproj/.sln
+    // via `generate_sln`. FFI hosts (BoxcatBridge) keep using
+    // `unity_solution_generator::generate(...)` directly — that Rust API is
+    // unchanged.
     match args.first().map(String::as_str) {
-        Some("lock") => {
-            args.remove(0);
-            run_lock(&args)
-        }
-        Some("generate") => {
-            args.remove(0);
-            run_generate(&args)
-        }
         Some("typecheck") => {
             args.remove(0);
             run_typecheck(&args)
@@ -33,58 +33,11 @@ fn main() -> ExitCode {
         }
         Some(other) => {
             die(&format!(
-                "Unknown command '{}'. Use 'lock', 'generate', 'typecheck', or 'build'.",
+                "Unknown command '{}'. Use 'typecheck' or 'build'.",
                 other
             ));
         }
         None => unreachable!(),
-    }
-}
-
-fn run_lock(args: &[String]) -> ExitCode {
-    // `lock` only needs <root>; platform/config/extra-refs are irrelevant.
-    // Default to "." so `resolve_project_root` climbs from CWD to the nearest
-    // ancestor with `ProjectSettings/ProjectVersion.txt`.
-    let unity_root = args
-        .first()
-        .filter(|a| !a.starts_with("--"))
-        .map(String::as_str)
-        .unwrap_or(".");
-    let resolved = resolve_project_root(unity_root);
-    match LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT) {
-        Ok(lockfile) => {
-            println!("Locked csproj.lock:");
-            println!(
-                "  Unity {} ({})",
-                lockfile.unity_version, lockfile.unity_path
-            );
-            println!(
-                "  {} DLL references, {} analyzers",
-                lockfile.total_ref_count(),
-                lockfile.analyzers.len()
-            );
-            println!(
-                "  {} defines, {} scripting defines",
-                lockfile.defines.len(),
-                lockfile.defines_scripting.len()
-            );
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("error: {}", e);
-            ExitCode::from(1)
-        }
-    }
-}
-
-fn run_generate(args: &[String]) -> ExitCode {
-    let inv = Invocation::parse_strict(args, "generate");
-    match generate_sln(&inv) {
-        Ok(sln_path) => {
-            println!("{}", sln_path);
-            ExitCode::SUCCESS
-        }
-        Err(code) => code,
     }
 }
 
@@ -202,11 +155,10 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     }
 }
 
-/// Parsed CLI invocation shared across `generate`, `typecheck`, `build`.
+/// Parsed CLI invocation shared across `typecheck` and `build`.
 ///
-/// Positionals: `[<root>] [<platform>] [<config>]` — all optional in `parse`,
-/// `<platform>` and `<config>` required in `parse_strict` (used by
-/// `generate`). Flag: `--extra-refs <comma-separated DLL paths>`.
+/// Positionals: `[<root>] [<platform>] [<config>]` — all optional, defaulting
+/// to climb-from-CWD / `ios` / `editor`. Flag: `--extra-refs <comma-separated DLL paths>`.
 ///
 /// `project_root` is post-`resolve_project_root` (absolute, with realpath
 /// applied and the Unity-root climb performed). Subcommands use the same
@@ -228,19 +180,6 @@ impl Invocation {
             config,
             extra_refs,
         }
-    }
-
-    /// Like `parse` but exits with usage when `<platform>` or `<config>` is
-    /// absent. `generate` requires both — silently defaulting could ship the
-    /// wrong variant to MSBuild.
-    fn parse_strict(args: &[String], cmd: &str) -> Self {
-        let (_, rest) = split_root_arg(args);
-        if rest.len() < 2 {
-            die(&format!(
-                "{cmd} requires: [<unity-root>] <platform> <config> [options]"
-            ));
-        }
-        Self::parse(args)
     }
 
     fn output_dir(&self) -> String {
@@ -352,23 +291,24 @@ fn init_tracing() {
 fn print_usage() {
     println!(
         "USAGE:
-  unity-solution-generator lock      [<unity-root>]
-  unity-solution-generator generate  [<unity-root>] <platform> <config> [options]
   unity-solution-generator typecheck [<unity-root>] [<platform>] [<config>] [options]
   unity-solution-generator build     [<unity-root>] [<platform>] [<config>] [options] [-- <dotnet-build-args>...]
 
   When <unity-root> is omitted, climbs from the current directory to the
   nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
-  `typecheck` and `build` also default platform=ios, config=editor.
+  Both default platform=ios, config=editor.
 
 COMMANDS:
-  lock                  Scan Unity installation and project to generate csproj.lock
-  generate              Regenerate .csproj/.sln for a platform+config variant
-  typecheck             Validate compile via direct csc.dll invocation
-                        (no MSBuild). Used by Hot Reload pre-flight in
-                        meow-tower's justfile.
-  build                 Run `dotnet build` on the generated .sln. Args after
-                        `--` are forwarded verbatim (defaults to `-v:q`).
+  typecheck             Refresh .csproj/.sln then validate compile via direct
+                        csc.dll invocation (no MSBuild). Used by Hot Reload
+                        pre-flight in meow-tower's justfile.
+  build                 Refresh .csproj/.sln then run `dotnet build`. Args
+                        after `--` are forwarded verbatim (defaults to `-v:q`).
+
+  Both subcommands implicitly scan + write `csproj.lock` on cache miss; no
+  separate `lock` command. Generating .csproj/.sln without invoking the
+  compiler is reachable via the library API (`SolutionGenerator`) — meow-tower's
+  BoxcatBridge FFI uses that path. See `docs/library-api.md`.
 
 ARGUMENTS:
   unity-root            Unity project root (defaults to climbing from CWD)

@@ -24,13 +24,12 @@ Release.
 ## CLI
 
 ```bash
-unity-solution-generator lock .                            # scan + write lockfile
-unity-solution-generator generate . ios editor             # default output → Library/UnitySolutionGenerator/<platform>-<config>/
-unity-solution-generator typecheck .                       # compile-check via csc.dll (defaults: ios editor)
+unity-solution-generator typecheck .                       # refresh .csproj/.sln + compile-check via csc.dll
+unity-solution-generator build .                           # refresh + `dotnet build`
 ```
 
 Positional: `<command> <unity-root> <platform> <config>`.
-Platform: `ios | android | osx | windows`. Config: `prod | dev | editor`.
+Platform: `ios | android | osx | windows`. Config: `prod | dev | editor`. Both subcommands default to `ios editor` and auto-lock on cache miss — no separate `lock` or `generate` subcommands.
 
 ## Library
 
@@ -49,7 +48,7 @@ unity_solution_generator::generate(
 )?;
 ```
 
-For lower-level control see `ProjectScanner`, `LockfileScanner`, `SolutionGenerator`.
+For lower-level control (render without invoking the compiler — what meow-tower's BoxcatBridge FFI uses) see `SolutionGenerator::generate_from_lockfile`, `ProjectScanner`, and `LockfileScanner`. The CLI is intentionally minimal — `typecheck` and `build` only.
 
 ## License
 

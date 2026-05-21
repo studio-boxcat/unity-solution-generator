@@ -69,25 +69,28 @@ The crate publishes to crates.io as `unity-solution-generator`. Cdylib hosting (
 
 ```mermaid
 graph LR
-    A[lock] -->|scan Unity + Watchman project| B[csproj.lock]
-    A --> CLK[.lock-watchman-clock]
-    B --> C[generate]
-    B --> T[typecheck]
-    B --> X[build]
-    C -->|+ asmdef scan via Watchman| D[.csproj/.sln]
-    T -->|+ asmdef scan + csc.dll| E[.csproj/.sln + diagnostics + .dll]
-    X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
+    inv[CLI invocation] -->|auto-lock on cache miss| L[lockfile.rs::scan_and_write]
+    L --> B[csproj.lock]
+    L --> CLK[.lock-watchman-clock]
+    B --> R[solution_generator::generate_from_lockfile]
+    R --> D[.csproj/.sln]
+    D --> T[typecheck]
+    D --> X[build]
+    T -->|+ asmdef scan + csc.dll| E[diagnostics + .dll]
+    X -->|+ dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
 
-1. **`lock`** scans the Unity installation + project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` for the Unity version, resolves the install path via `paths::unity_install_root(version)`, walks `Managed/`, `NetStandard/`, `PlaybackEngines/<P>` directly (one-shot fs walk per editor version), then queries Watchman for `.dll`/`.asmdef` paths under `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock` + `.lock-watchman-clock` sidecar.
+Pipeline stages (all internal — no standalone `lock` or `generate` CLI surface; the library API exposes the building blocks for FFI hosts):
+
+1. **Lockfile auto-refresh** (`LockfileIO::scan_and_write`) — runs at the top of every subcommand. Reads `ProjectSettings/ProjectVersion.txt` for the Unity version, resolves the install path via `paths::unity_install_root(version)`, walks `Managed/`, `NetStandard/`, `PlaybackEngines/<P>` directly (one-shot fs walk per editor version), then queries Watchman for `.dll`/`.asmdef` paths under `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock` + `.lock-watchman-clock` sidecar. Cache-hit path skips both walks via the unity-version equality + Watchman delta check.
 
    Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/<data>/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `<usg_cache>/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/<data>/Resources/PackageManager/Editor/*.tgz`). The latter two only fire for `packages-lock.json` entries PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
 
-2. **`generate`** reads the lockfile, scans for `.cs` directories (via Watchman), resolves ownership through `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`; overridable via `GenerateOptions::with_output_dir`. The depth controls compile-pattern prefix — one `../` per path component back to project root. Bytes-identical writes are no-ops (`write_file_if_changed` checks content equality before `atomic_write_bytes`).
+2. **Solution refresh** (`solution_generator::generate_from_lockfile`) — reads the lockfile, scans for `.cs` directories (via Watchman), resolves ownership through `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`. Bytes-identical writes are no-ops (`write_file_if_changed` checks content equality before `atomic_write_bytes`).
 
-3. **`typecheck`** refreshes `.csproj`/`.sln` (same write path as `generate`) so the IDE always sees a current solution, then builds csc args per asmdef, walks the dependency DAG level-by-level, and invokes `dotnet exec csc.dll /shared` per dirty project. DLLs land in `<variant>/obj/Debug/<asmdef>.dll` — the same path `build` writes to — with a per-DLL `.usg-stamp` sidecar pinning ownership. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds; the stamp guards against silent skip after a `dotnet build` overwrite.
+3. **`typecheck`** runs stages 1+2, then builds csc args per asmdef, walks the dependency DAG level-by-level, and invokes `dotnet exec csc.dll /shared` per dirty project. DLLs land in `<variant>/obj/Debug/<asmdef>.dll` — the same path `build` writes to — with a per-DLL `.usg-stamp` sidecar pinning ownership. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds; the stamp guards against silent skip after a `dotnet build` overwrite.
 
-4. **`build`** runs `generate`, then shells out to `dotnet build <variant>.sln`. Args after `--` are forwarded verbatim (defaults to `-v:q`).
+4. **`build`** runs stages 1+2, then shells out to `dotnet build <variant>.sln`. Args after `--` are forwarded verbatim (defaults to `-v:q`).
 
 ## Public API
 
@@ -95,12 +98,10 @@ graph LR
 
 | Subcommand | Args |
 |---|---|
-| `lock` | `[<root>]` |
-| `generate` | `[<root>] <platform> <config> [--extra-refs <paths>]` |
 | `typecheck` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>]` (defaults: `ios editor`) |
 | `build` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>] [-- <dotnet-build-args>...]` (defaults: `ios editor`) |
 
-`<root>` is optional — when omitted the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`. `<platform>` accepts `ios | android | osx | windows`.
+`<root>` is optional — when omitted the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`. `<platform>` accepts `ios | android | osx | windows`. Both subcommands implicitly call `LockfileIO::scan_and_write` (auto-lock on cache miss) and `generate_sln` (refresh `.csproj`/`.sln`) before doing their compile-check / `dotnet build` work — so there's no standalone `lock` or `generate` CLI surface. "Render without compiling" is the library API's job; see [[library-api.md]].
 
 ### Rust API
 

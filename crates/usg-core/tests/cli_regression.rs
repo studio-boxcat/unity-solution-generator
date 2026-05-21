@@ -1,12 +1,16 @@
 //! CLI binary surface regression tests. These pin invariants the architecture
 //! overhaul (see [[architecture.md]]) must preserve:
 //!
-//! - **stdout = sln path** on `generate` success — used as
-//!   `dotnet build "$(unity-solution-generator generate ...)"` in scripts.
 //! - **exit codes** — 0 on success, non-zero on failure (consumers rely on these).
-//! - **lockfile auto-creation** — Rider's FFI calls `generate()` without
-//!   running `lock` first; the same shape must work via the CLI path too.
 //! - **`--help` exits 0** — keeps `dotnet build`-style scripting safe.
+//! - **`typecheck` refreshes .csproj/.sln** — Rider/IDE consumers see fresh
+//!   solution files via a single subcommand, no separate generate step.
+//!
+//! Standalone `lock` and `generate` subcommands were removed in v0.3.0 — every
+//! subcommand auto-locks and refreshes via `LockfileIO::scan_and_write` +
+//! `generate_sln` internally. The library API (`SolutionGenerator::generate_from_lockfile`,
+//! `unity_solution_generator::generate(...)`) covers the "render-only" use
+//! case for FFI hosts like meow-tower's BoxcatBridge.
 
 use std::path::Path;
 use std::process::Command;
@@ -44,15 +48,13 @@ fn help_exits_zero_and_lists_subcommands() {
     let out = Command::new(bin()).arg("--help").output().expect("spawn");
     assert!(out.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("lock"), "help missing 'lock'");
-    assert!(stdout.contains("generate"), "help missing 'generate'");
+    assert!(stdout.contains("typecheck"), "help missing 'typecheck'");
+    assert!(stdout.contains("build"), "help missing 'build'");
 }
 
 #[test]
 fn no_args_exits_zero_and_prints_usage() {
     // Matches current behavior: bare invocation prints help, exits 0.
-    // If this changes (some CLIs exit nonzero on no-args), update both this
-    // test and meow-tower's CI gates.
     let out = Command::new(bin()).output().expect("spawn");
     assert!(out.status.success(), "no-args should match --help (exit 0)");
 }
@@ -63,98 +65,25 @@ fn unknown_subcommand_exits_nonzero() {
     assert!(!out.status.success(), "unknown subcommand should fail");
 }
 
-/// Pinned: `generate` writes the sln path on stdout.
-/// Consumers script `dotnet build "$(unity-solution-generator generate ...)"`.
 #[test]
-fn generate_emits_sln_path_to_stdout() {
-    let tmp = fixture();
-    let root = tmp.path();
-    let out = Command::new(bin())
-        .args(["generate", root.to_str().unwrap(), "ios", "editor"])
-        .output()
-        .expect("spawn");
-    assert!(
-        out.status.success(),
-        "generate failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let sln_line = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .expect("stdout empty")
-        .to_string();
-    assert!(
-        sln_line.ends_with(".sln"),
-        "expected .sln path on stdout, got {:?}",
-        sln_line
-    );
-}
-
-#[test]
-fn generate_invalid_platform_exits_nonzero() {
-    let tmp = fixture();
-    let out = Command::new(bin())
-        .args(["generate", tmp.path().to_str().unwrap(), "freebsd", "editor"])
-        .output()
-        .expect("spawn");
-    assert!(!out.status.success(), "invalid platform should fail");
-}
-
-#[test]
-fn generate_invalid_config_exits_nonzero() {
-    let tmp = fixture();
-    let out = Command::new(bin())
-        .args(["generate", tmp.path().to_str().unwrap(), "ios", "release"])
-        .output()
-        .expect("spawn");
-    assert!(!out.status.success(), "invalid config should fail");
-}
-
-/// Pinned: `generate` succeeds even without a pre-existing lockfile by
-/// running lock implicitly. Rider's FFI relies on this so a fresh checkout
-/// "just works" on first regen.
-///
-/// We skip this test if the host lacks a real Unity install, since the
-/// implicit lock needs to scan one. Detection: env override or default path.
-#[test]
-fn generate_auto_runs_lock_when_lockfile_missing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // Point ProjectVersion at a Unity install that exists in this dev env.
-    // If no Unity is installed, the lock will fail with a clear error and the
-    // test falls through (we assert AT LEAST that `generate` doesn't panic
-    // and either succeeds or returns a non-zero exit cleanly).
-    write(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n");
-    write(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
-    write(root, "Assets/A/Code.cs", "class Code {}\n");
-
-    let out = Command::new(bin())
-        .args(["generate", root.to_str().unwrap(), "ios", "editor"])
-        .output()
-        .expect("spawn");
-
-    // Either succeeds (Unity install found and scanned), or fails with a
-    // diagnosable error message — both are acceptable. What we're pinning
-    // is that the binary doesn't crash and that stderr is informative when
-    // it does fail.
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+fn removed_subcommands_exit_nonzero() {
+    // `lock` and `generate` were removed in v0.3.0. The CLI must reject them
+    // explicitly rather than silently no-op — a stray script that called them
+    // pre-removal should fail loudly so the operator updates.
+    for cmd in ["lock", "generate"] {
+        let out = Command::new(bin()).arg(cmd).output().expect("spawn");
         assert!(
-            stderr.contains("Unity") || stderr.contains("lockfile") || stderr.contains("error"),
-            "implicit lock failed without a diagnosable stderr message: {}",
-            stderr
+            !out.status.success(),
+            "removed subcommand '{}' must exit nonzero",
+            cmd
         );
     }
 }
 
-// `init` deprecated alias dropped in this checkpoint along with the test that
-// pinned it. `lock` is the only canonical name now.
-
 /// Pinned: `typecheck` refreshes the .csproj/.sln alongside diagnostics so
-/// Rider/IDE consumers see the current solution without a separate `generate`
-/// step. Pre-consolidation, only `generate` and `build` wrote the solution;
-/// a typecheck-only flow left the IDE stale.
+/// Rider/IDE consumers see the current solution without a separate refresh
+/// step. Pre-consolidation, only the (removed) `generate` and `build` wrote
+/// the solution; a typecheck-only flow left the IDE stale.
 #[test]
 fn typecheck_refreshes_csproj_and_sln() {
     let tmp = fixture();

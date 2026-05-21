@@ -34,17 +34,19 @@ just publish                  # cargo publish to crates.io (run after `just rele
 
 ## CLI
 
+Two subcommands. Both default platform=ios, config=editor. Both auto-lock + refresh `.csproj`/`.sln` internally — no separate `lock` or `generate` subcommands.
+
 ```bash
-unity-solution-generator lock .                             # scan + write lockfile
-unity-solution-generator generate . ios editor              # default: Library/UnitySolutionGenerator/ios-editor/
-unity-solution-generator generate . ios editor \
+unity-solution-generator typecheck .                        # refresh .csproj/.sln + compile-check via direct csc.dll (no MSBuild)
+unity-solution-generator typecheck . ios editor \
   --extra-refs "/path/to/Extra.dll,/path/to/Other.dll"     # additional DLL references
-unity-solution-generator typecheck .                        # compile-check (defaults: ios editor); direct csc.dll, no MSBuild
-unity-solution-generator build .                            # generate + `dotnet build` (defaults: ios editor, -v:q)
+unity-solution-generator build .                            # refresh + `dotnet build` (defaults: ios editor, -v:q)
 unity-solution-generator build . ios prod -- -m --no-restore -v:n  # forward args after `--` to dotnet build
 ```
 
 Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx` | `windows`. Config: `prod` | `dev` | `editor`.
+
+Pure "render without compiling" is reachable via the **library API** (`SolutionGenerator::generate_from_lockfile`) — meow-tower's BoxcatBridge FFI uses that path, not the CLI.
 
 | Option | Description |
 |--------|-------------|
@@ -86,17 +88,15 @@ Rust API reference: [[library-api.md]]. The C ABI (for Unity `[DllImport]`) is h
 
 ## How it works
 
-Subcommands share a scan + lockfile:
+Both subcommands share the scan + lockfile machinery:
 
 ```mermaid
 graph LR
-    A[lock] -->|scan Unity + project| B[csproj.lock]
-    B --> C[generate]
+    inv[CLI invocation] -->|auto-lock if stale| B[csproj.lock]
     B --> T[typecheck]
     B --> X[build]
-    C -->|+ asmdef scan| D[.csproj/.sln]
     T -->|+ asmdef scan + csc.dll| E[.csproj/.sln + diagnostics + .dll]
-    X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
+    X -->|+ dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
 
 `build` and `typecheck` share the same per-variant `obj/Debug/<asmdef>.dll` output path — `build` adds `.pdb` + MSBuild's incremental caches and copies into `Temp/Bin/Debug/<asmdef>/` (hundreds of MB on large projects). `typecheck` adds `<asmdef>.dll.usg-stamp` per emit; the stamp lets the next typecheck detect MSBuild overwrites and recompile. Use `typecheck` when you only need diagnostics.
@@ -114,12 +114,8 @@ Quick refs:
 
 ## Unity project setup
 
-```bash
-unity-solution-generator lock .
-```
-
-Every `generate` / `typecheck` / `build` invocation validates the lockfile by:
+No explicit setup step. First invocation of `typecheck` or `build` writes the lockfile + clock sidecar; subsequent invocations validate via:
 1. Comparing `lockfile.unity-version` against the current `ProjectSettings/ProjectVersion.txt`.
 2. Querying Watchman with the previous `.lock-watchman-clock` cursor — if any project-relevant path (`.cs`/`.asmdef`/`.asmref`/`.dll`/manifest) changed, the lockfile is rescanned.
 
-On a cache hit the check costs ~ms; manual `lock` is only needed when you want to force-rescan without running a subcommand.
+On a cache hit the check costs ~ms. To force a rescan, delete `Library/UnitySolutionGenerator/.lock-watchman-clock`.

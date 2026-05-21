@@ -63,35 +63,26 @@ test:
 profile: build
     #!/usr/bin/env bash
     cd "$MEOW_CLIENT"
-    echo "--- generate (warm cache) ---"
-    "{{bin}}" generate . ios editor > /dev/null  # warm up
-    hyperfine --warmup 3 '"{{bin}}" generate . ios editor'
     echo "--- typecheck (warm no-op) ---"
     "{{bin}}" typecheck . > /dev/null  # warm up
     hyperfine --warmup 3 --runs 30 '"{{bin}}" typecheck .'
-    echo "--- lock (cold: nuke clock sidecar each run) ---"
+    echo "--- typecheck (cold: nuke clock sidecar each run) ---"
     hyperfine --warmup 1 --runs 5 \
       --prepare 'rm -f Library/UnitySolutionGenerator/.lock-watchman-clock' \
-      '"{{bin}}" lock .'
-    echo "--- lock (warm: clock-sidecar cache hit) ---"
-    "{{bin}}" lock . > /dev/null  # ensure sidecar exists
-    hyperfine --warmup 3 '"{{bin}}" lock .'
+      '"{{bin}}" typecheck .'
     echo "--- startup ---"
     hyperfine --warmup 5 '"{{bin}}" --help'
 
-# Per-section breakdown for one run of generate + lock against meow-tower
+# Per-section breakdown for one run of typecheck against meow-tower
 profile-spans: build
     #!/usr/bin/env bash
     cd "$MEOW_CLIENT"
-    echo "--- USG_PROFILE=1 generate ---"
-    USG_PROFILE=1 "{{bin}}" generate . ios editor > /dev/null
-    echo
-    echo "--- USG_PROFILE=1 lock (cold) ---"
+    echo "--- USG_PROFILE=1 typecheck (cold) ---"
     rm -f Library/UnitySolutionGenerator/.lock-watchman-clock
-    USG_PROFILE=1 "{{bin}}" lock . > /dev/null
+    USG_PROFILE=1 "{{bin}}" typecheck . > /dev/null
     echo
-    echo "--- USG_PROFILE=1 lock (warm) ---"
-    USG_PROFILE=1 "{{bin}}" lock . > /dev/null
+    echo "--- USG_PROFILE=1 typecheck (warm) ---"
+    USG_PROFILE=1 "{{bin}}" typecheck . > /dev/null
 
 # Criterion microbenchmarks (statistical, with warmup + outlier detection).
 # Pass `RECIPE` to filter, e.g. `just bench scan`. Add `-- --quick` for fast runs.
