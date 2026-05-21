@@ -6,6 +6,8 @@ Rust CLI and library that regenerates `.csproj` and `.sln` files for Unity proje
 
 Single crate at `crates/usg-core/` (lib + companion binary `unity-solution-generator`), published to crates.io as `unity-solution-generator`. FFI/cdylib lives outside this repo — meow-tower's `BoxcatBridge` consumes the rlib and exposes a `bxc_usg_generate` C ABI.
 
+**Required runtime dep:** [Watchman](https://facebook.github.io/watchman/). Project filesystem scanning is delegated to the daemon; no fallback. Install: `brew install watchman` / `choco install watchman` / per-distro package. MSRV: Rust 1.89 (for `std::fs::File::{lock, try_lock, unlock}`).
+
 ## Build
 
 ```bash
@@ -28,7 +30,7 @@ just publish                  # cargo publish to crates.io (run after `just rele
 | Coworkers (no Rust toolchain) | GH Releases prebuilt binary | provisioned independently |
 | meow-tower's `BoxcatBridge` | crates.io rlib | `cargo` resolves transitively |
 
-`just release <version>` cuts the GH Release: bumps `Cargo.toml`, commits, tags `v<version>`, pushes. The `.github/workflows/release.yml` workflow builds on `macos-14` (arm64) and uploads the binary as a release asset.
+`just release <version>` cuts the GH Release: bumps `Cargo.toml`, commits, tags `v<version>`, pushes. The `.github/workflows/release.yml` workflow runs a matrix build (`macos-14` arm64 + `windows-2022` x64) and uploads both binaries as release assets.
 
 ## CLI
 
@@ -42,7 +44,7 @@ unity-solution-generator build .                            # generate + `dotnet
 unity-solution-generator build . ios prod -- -m --no-restore -v:n  # forward args after `--` to dotnet build
 ```
 
-Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx`. Config: `prod` | `dev` | `editor`.
+Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx` | `windows`. Config: `prod` | `dev` | `editor`.
 
 | Option | Description |
 |--------|-------------|
@@ -54,19 +56,22 @@ Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` |
 |--------|----------|---------------------------------------------|
 | `prod` | runtime only | platform defines only |
 | `dev` | runtime only | platform + `DEBUG;TRACE;UNITY_ASSERTIONS` |
-| `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_OSX;DEBUG;TRACE;UNITY_ASSERTIONS` |
+| `editor` | all | platform + `UNITY_EDITOR;UNITY_EDITOR_64;UNITY_EDITOR_<HOST>;DEBUG;TRACE;UNITY_ASSERTIONS` |
 
-Platform defines:
+`UNITY_EDITOR_<HOST>` is `UNITY_EDITOR_OSX` / `UNITY_EDITOR_WIN` / `UNITY_EDITOR_LINUX` depending on where `usg` runs (`cfg!(target_os)`).
+
+Platform defines (target — independent of host):
 
 | Platform | Defines |
 |----------|---------|
 | `ios` | `UNITY_IOS;UNITY_IPHONE` |
 | `android` | `UNITY_ANDROID` |
 | `osx` | `UNITY_STANDALONE;UNITY_STANDALONE_OSX` |
+| `windows` | `UNITY_STANDALONE;UNITY_STANDALONE_WIN` |
 
 ### Compile validation (`typecheck`)
 
-`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. It also refreshes `.csproj`/`.sln` first (same path as `generate`, fingerprint-cached) so Rider/IDE always sees a current solution off a single command. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). The per-asmdef DLL output is deterministic and byte-identical for unchanged inputs (cascade-skip relies on this), and never the artifact Unity ships (Unity rebuilds the solution itself). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
+`unity-solution-generator typecheck` validates that the project compiles by invoking `csc.dll` directly per asmdef — no MSBuild involved. It also refreshes `.csproj`/`.sln` first (same path as `generate`, Watchman-clock-cached) so Rider/IDE always sees a current solution off a single command. Platform and config default to `ios editor`; pass alternatives explicitly (`typecheck android dev` etc.). The per-asmdef DLL output is deterministic and byte-identical for unchanged inputs (cascade-skip relies on this), and never the artifact Unity ships (Unity rebuilds the solution itself). Mechanics in [[architecture.md]]; benchmarks in [[benchmark.md]].
 
 For full IL output (rarely needed since Unity rebuilds the solution itself), use `build`, which generates the `.sln` and shells out to `dotnet build`:
 
@@ -77,7 +82,7 @@ unity-solution-generator build . ios prod -- -m --no-restore -v:q  # forward arg
 
 ## Library API
 
-C ABI (for Unity `[DllImport]`) and Rust API (`usg-core` crate) reference: see [[library-api.md]].
+Rust API reference: [[library-api.md]]. The C ABI (for Unity `[DllImport]`) is hosted downstream in meow-tower's BoxcatBridge — not in this crate.
 
 ## How it works
 
@@ -113,4 +118,8 @@ Quick refs:
 unity-solution-generator lock .
 ```
 
-Every `generate` / `typecheck` / `build` invocation validates the `lock-fingerprint` and rescans if anything contributing to the lockfile changed (files added/removed, Unity install moved, edited asmdefs, populated `Library/PackageCache/`). On a fingerprint hit the check costs ~ms; manual `lock` is only needed when you want to force-rescan without running a subcommand.
+Every `generate` / `typecheck` / `build` invocation validates the lockfile by:
+1. Comparing `lockfile.unity-version` against the current `ProjectSettings/ProjectVersion.txt`.
+2. Querying Watchman with the previous `.lock-watchman-clock` cursor — if any project-relevant path (`.cs`/`.asmdef`/`.asmref`/`.dll`/manifest) changed, the lockfile is rescanned.
+
+On a cache hit the check costs ~ms; manual `lock` is only needed when you want to force-rescan without running a subcommand.

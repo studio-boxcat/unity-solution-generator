@@ -7,11 +7,41 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use tempfile::TempDir;
 
-pub fn make_temp_root() -> TempDir {
-    tempfile::tempdir().expect("tempdir")
+/// RAII wrapper around `tempfile::TempDir` that releases the Watchman watch
+/// on drop. Required because Watchman doesn't auto-release on directory
+/// deletion — the FSEvents stream lingers until idle-reap (default 5 days)
+/// and the system-wide FSEvents quota (~1024 streams on macOS) exhausts
+/// after enough test runs. See [`watchman troubleshooting`].
+///
+/// Drop order is field-declaration order: this struct drops first (watch-del),
+/// then the inner `TempDir` (rmdir). That ordering is required — running
+/// `watch-del` against an already-deleted path can leave Watchman with a
+/// wedged FSEvents stream.
+///
+/// [`watchman troubleshooting`]: https://facebook.github.io/watchman/docs/troubleshooting#fsevents
+pub struct WatchedTempDir(TempDir);
+
+impl WatchedTempDir {
+    pub fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for WatchedTempDir {
+    fn drop(&mut self) {
+        let _ = Command::new("watchman")
+            .arg("watch-del")
+            .arg(self.0.path())
+            .output();
+    }
+}
+
+pub fn make_temp_root() -> WatchedTempDir {
+    WatchedTempDir(tempfile::tempdir().expect("tempdir"))
 }
 
 pub fn write_file(root: &Path, rel: &str, content: &str) {

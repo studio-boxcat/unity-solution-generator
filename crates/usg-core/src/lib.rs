@@ -5,28 +5,23 @@
 /// Version of the user-visible `csproj.lock` format. Bump only on intentional
 /// schema changes; `csproj.lock` may be checked in, so a bump means consumers
 /// re-lock against possibly different Unity installs. See [[architecture.md]].
-pub const LOCKFILE_VERSION: u32 = 1;
+///
+/// v2: added `refs.playback.windows` section (Windows build target support).
+pub const LOCKFILE_VERSION: u32 = 2;
 
-/// Version of the dev-local cache files (`scan-cache`, `lock-fingerprint`,
-/// `.fingerprints/<hash>`). Bumping invalidates ALL three caches wholesale —
-/// no migrations. These files are gitignored under `Library/`, so cold-rebuild
-/// on bump is harmless. Cargo / Bazel idiom.
-pub const CACHE_VERSION: u32 = 1;
 
 pub mod defines;
 pub mod error;
-pub(crate) mod generate_cache;
 pub mod io;
-pub(crate) mod lock_cache;
 pub mod lockfile;
 pub mod lockfile_scanner;
 pub(crate) mod package_cache;
 pub mod paths;
 pub mod profile;
 pub mod project_scanner;
+pub mod scan;
 pub mod solution_generator;
 pub mod typecheck;
-pub(crate) mod walk;
 pub mod xml;
 
 pub use defines::{generate_version_defines, parse_scripting_defines};
@@ -71,14 +66,13 @@ pub fn script_dll_dir(
 /// Test-only re-exports of internal helpers. Not part of the stable public API.
 #[doc(hidden)]
 pub mod __test_only {
-    pub use crate::lock_cache::{build_entries, is_valid};
     pub use crate::typecheck::{BuildRspInputs, __test_only_build_rsp as build_rsp};
 }
 
 /// High-level convenience: parse string args + run the full generate pipeline.
 ///
 /// Used by the CLI and by external FFI hosts (see meow-tower's BoxcatBridge).
-/// `platform` accepts `ios|android|osx`; `config` accepts `prod|dev|editor`.
+/// `platform` accepts `ios|android|osx|windows`; `config` accepts `prod|dev|editor`.
 /// `extra_refs` is a comma-separated list of DLL paths (see `DllRef::parse_list`).
 /// Loads or scans the lockfile as needed.
 pub fn generate(
@@ -90,7 +84,7 @@ pub fn generate(
 ) -> Result<()> {
     let build_platform = BuildPlatform::parse(platform).ok_or_else(|| {
         GeneratorError::Other(format!(
-            "Unknown platform '{platform}'. Use 'ios', 'android', or 'osx'."
+            "Unknown platform '{platform}'. Use 'ios', 'android', 'osx', or 'windows'."
         ))
     })?;
     let build_config = BuildConfig::parse(config).ok_or_else(|| {

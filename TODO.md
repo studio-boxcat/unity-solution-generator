@@ -1,5 +1,7 @@
 # TODO
 
+> **Related:** [[CLAUDE.md]], [[architecture.md]], [[library-api.md]], [[benchmark.md]]
+
 ## Deferred
 
 (none — all open items from the typecheck overhaul session are closed.)

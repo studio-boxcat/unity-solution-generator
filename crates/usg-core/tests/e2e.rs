@@ -1,6 +1,6 @@
 //! End-to-end scenario tests covering: idempotency, multi-variant generation,
-//! native-plugin filtering, asmdef versionDefines manifest filtering,
-//! lock fingerprint short-circuit, and duplicate-asmdef error reporting.
+//! native-plugin filtering, asmdef versionDefines manifest filtering, the
+//! Watchman-clock cache short-circuit, and duplicate-asmdef error reporting.
 
 mod common;
 
@@ -108,21 +108,12 @@ fn multi_variant_from_same_lockfile_share_scan_cache() {
 
 #[test]
 fn native_plugin_dirs_skipped() {
-    // ProjectScanner skips native-plugin dir names like x86_64, ARM64, .framework, .bundle.
-    // (Note: applies to .dll/.asmdef walk inside lockfile_scanner, not the .cs walk —
-    // this test confirms the ProjectScanner-side .cs walk *does* still see the leaves
-    // because cs files aren't normally in native-plugin dirs anyway.)
-    // What we verify here: a `Foo.framework` directory inside Assets does NOT get its
-    // .cs files included if scanned by lockfile_scanner. We simulate by inspecting
-    // ProjectScanner output, which uses ignore::WalkBuilder without the native-plugin filter
-    // — so .cs files in those dirs DO get included. The native-plugin filter only applies
-    // to the lockfile-scanner DLL/asmdef walk. We still smoke-test the path.
-    //
-    // Concrete check: place a .asmdef inside x86_64/ and confirm it isn't picked up
-    // when LockfileScanner runs a project walk (we can't run the full LockfileScanner
-    // without a real Unity install, so we verify the helper directly via behavior:
-    // create a fake non-Unity project and call ProjectScanner — which doesn't apply
-    // the native-plugin filter — to confirm the filter is *only* in the lockfile path).
+    // Native-plugin dirs (`x86_64`, `ARM64`, `*.framework`, `*.bundle`) are
+    // filtered from the lockfile-scanner DLL/asmdef walk via
+    // `lockfile_scanner::has_skipped_component`. The project-scanner `.cs`
+    // walk does NOT apply that filter — `.cs` files inside `x86_64/` are
+    // unusual but valid Unity content. This test confirms the asymmetry:
+    // ProjectScanner picks up both files, regardless of the `x86_64` parent.
     let tmp = make_temp_root();
     let root = tmp.path();
     write_file(root, "Assets/Plugin/x86_64/Code.cs", "class Native {}\n");
@@ -366,17 +357,19 @@ fn no_lockfile_no_templates_falls_back_via_cli_path() {
 }
 
 #[test]
-fn generate_fingerprint_short_circuits_render() {
-    // After a successful generate, the next call with the same options must
-    // skip render+write entirely (validated via mtime preservation on the csproj).
-    // Touching the lockfile invalidates and forces a regenerate.
+fn generate_short_circuits_when_inputs_unchanged() {
+    // After a successful generate, the next call with the same options + same
+    // lockfile must skip render+write entirely. Verified via mtime preservation
+    // on the csproj (atomic_write_if_changed no-ops on byte-identical content,
+    // so a successful skip leaves the file mtime untouched). Touching the
+    // lockfile invalidates and forces a regenerate.
     let tmp = make_temp_root();
     let root = tmp.path();
     let lf = small_lockfile();
     write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/A/Code.cs", "class Code {}\n");
 
-    // Provide a real csproj.lock so the fingerprint can record its mtime.
+    // Provide a real csproj.lock so the generate path has something to read.
     let lockfile_path = root.join("Library/UnitySolutionGenerator/csproj.lock");
     std::fs::create_dir_all(lockfile_path.parent().unwrap()).unwrap();
     LockfileIO::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
@@ -394,16 +387,16 @@ fn generate_fingerprint_short_circuits_render() {
     let mtime_second = std::fs::metadata(&csproj_path).unwrap().modified().unwrap();
     assert_eq!(
         mtime_first, mtime_second,
-        "fingerprint hit must not rewrite csproj"
+        "byte-identical re-render must not touch csproj mtime"
     );
     // Cached result still includes correct paths.
     assert!(r2.variant_csprojs.iter().any(|s| s.ends_with("Lib.csproj")));
 
     // Stronger invalidation check: change the lockfile *content* (a new
     // static define) and confirm the new define ends up in the rendered
-    // Directory.Build.props after regenerate. This proves the fingerprint
-    // really did invalidate and the second run actually re-rendered, not
-    // just that we didn't crash.
+    // Directory.Build.props after regenerate. This proves the changed
+    // lockfile actually drove a re-render rather than the first run's bytes
+    // sticking around.
     std::thread::sleep(std::time::Duration::from_millis(20));
     let mut lf2 = lf.clone();
     lf2.defines.push("MY_NEW_DEFINE".to_string());
@@ -414,14 +407,15 @@ fn generate_fingerprint_short_circuits_render() {
     let props = read_file(root, "tpl/ios-editor/Directory.Build.props");
     assert!(
         props.contains("MY_NEW_DEFINE"),
-        "lockfile change must invalidate fingerprint and re-render props"
+        "lockfile change must drive a re-render of Directory.Build.props"
     );
 }
 
 #[test]
-fn generate_fingerprint_invalidates_when_csproj_deleted() {
-    // If the user nukes the variant dir, the fingerprint must NOT short-circuit
-    // (output files no longer exist).
+fn generate_rebuilds_after_variant_dir_wipe() {
+    // If the user nukes the variant dir, the next generate must rebuild the
+    // csproj — write_file_if_changed reads the existing file to compare; a
+    // missing destination always counts as "changed".
     let tmp = make_temp_root();
     let root = tmp.path();
     let lf = small_lockfile();
@@ -439,69 +433,59 @@ fn generate_fingerprint_invalidates_when_csproj_deleted() {
     std::fs::remove_dir_all(root.join("tpl/ios-editor")).unwrap();
     assert!(!root.join("tpl/ios-editor/Lib.csproj").exists());
 
-    // Next generate must rebuild the csproj despite the fingerprint existing.
+    // Next generate must rebuild the csproj despite the scan-cache existing.
     g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert!(root.join("tpl/ios-editor/Lib.csproj").exists());
 }
 
-#[test]
-fn lock_fingerprint_short_circuits_rescan() {
-    // We can't test scan_and_write end-to-end without a real Unity install. But we
-    // *can* test the cache primitives directly.
-    let tmp = make_temp_root();
-    let root = tmp.path();
-    write_file(root, "Assets/A/Code.cs", "x");
-
-    // Build a fingerprint from a single relative path; verify is_valid round-trips.
-    let entries = unity_solution_generator::__test_only::build_entries(
-        root.to_str().unwrap(),
-        root.to_str().unwrap(),
-        &["Assets/A/Code.cs".to_string()],
-        &[],
-    );
-    assert!(!entries.is_empty());
-    assert!(unity_solution_generator::__test_only::is_valid(&entries));
-
-    // Touching a contributing dir must invalidate.
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    write_file(root, "Assets/A/Other.cs", "y");
-    assert!(!unity_solution_generator::__test_only::is_valid(&entries));
-}
-
-/// Regression: lockfile must invalidate when a missing input later appears.
+/// Regression: lockfile invalidation must catch a `Library/PackageCache/`
+/// directory that *appears* after lock. `wt go orgel-fix` produced a fresh
+/// worktree where `Library/PackageCache/` didn't exist at lock time; after
+/// Unity populated it, the lockfile must be considered stale.
 ///
-/// `wt go orgel-fix` produced a fresh worktree where `Library/PackageCache/`
-/// didn't exist at lock time. The original `build_entries` silently dropped
-/// missing paths, so Unity later populating `PackageCache` never invalidated
-/// the (incomplete) lockfile. The fix records `(p, 0)` for missing entries
-/// and treats appearance as invalidation.
+/// Pre-Watchman the cache used an mtime sentinel (`(p, 0)` for missing paths,
+/// invalidated on appearance). Post-Watchman this falls out for free: the
+/// `since(prev_clock)` query returns Touched paths under `Library/PackageCache/`,
+/// `hint_is_relevant` flags any `.dll` or `.asmdef` inside, and the lockfile
+/// cache hit fails. The test verifies the integrated invalidation against a
+/// real Watchman daemon.
 #[test]
-fn lock_fingerprint_sentinel_invalidates_on_appearance() {
+fn watchman_delta_catches_packagecache_appearance() {
+    use unity_solution_generator::scan::{Delta, since};
     let tmp = make_temp_root();
     let root = tmp.path();
-    let absent = root.join("Library/PackageCache");
+    std::fs::create_dir_all(root.join("Assets")).unwrap();
+    std::fs::create_dir_all(root.join("Packages")).unwrap();
+    std::fs::create_dir_all(root.join("ProjectSettings")).unwrap();
+    write_file(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n");
+    write_file(root, "Assets/A/Code.cs", "class A{}\n");
 
-    // build_entries should record `Library/PackageCache` as missing — see
-    // `lock_cache::build_entries` (it's seeded unconditionally at the abs root).
-    let entries = unity_solution_generator::__test_only::build_entries(
-        root.to_str().unwrap(),
-        root.to_str().unwrap(),
-        &[],
-        &[],
-    );
-    let absent_str = absent.to_string_lossy().to_string();
-    let recorded = entries.iter().find(|(p, _)| p == &absent_str);
+    // Seed the watch.
+    let Delta::Fresh { new_clock, .. } = since(root, None).expect("watchman daemon required")
+    else {
+        panic!("first since() should be Fresh");
+    };
+
+    // Library/PackageCache appears post-lock (Unity populating it on first
+    // open) and dumps a package DLL inside.
+    std::fs::create_dir_all(root.join("Library/PackageCache/com.x@1.0.0")).unwrap();
+    write_file(root, "Library/PackageCache/com.x@1.0.0/X.dll", "stub");
+
+    let delta = since(root, Some(&new_clock)).expect("watchman daemon required");
+    let Delta::Touched { paths, .. } = delta else {
+        panic!("expected Touched on package appearance");
+    };
     assert!(
-        recorded.is_some_and(|(_, m)| *m == 0),
-        "missing path must be recorded with mtime=0 sentinel; got {:?}",
-        recorded
+        paths.iter().any(|p| p.ends_with("X.dll")),
+        "Library/PackageCache appearance must be observed; got {paths:?}",
     );
-    assert!(unity_solution_generator::__test_only::is_valid(&entries));
-
-    // Path appears → fingerprint invalidates.
-    std::fs::create_dir_all(&absent).unwrap();
-    assert!(!unity_solution_generator::__test_only::is_valid(&entries));
+    assert!(
+        paths
+            .iter()
+            .any(|p| unity_solution_generator::scan::hint_is_relevant(p)),
+        "appearance of `.dll` under PackageCache must be deemed relevant",
+    );
 }
 
 /// Regression: typecheck must surface method-body diagnostics (CS1503 etc.).

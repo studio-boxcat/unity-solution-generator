@@ -1,33 +1,39 @@
 //! Lockfile scanner: walks the Unity installation + project to materialise
 //! every DLL reference, analyzer, and define needed for a `.csproj`.
+//!
+//! Backends:
+//! - **Unity install** — direct `std::fs::read_dir` + recursion. Never goes
+//!   through Watchman because the install never changes within an editor
+//!   version (multi-GB write-once tree; Watchman's cold-crawl cost is
+//!   measured in minutes on Windows). Cached by `unity-version` string
+//!   equality on subsequent invocations.
+//! - **Project tree** — [`crate::scan`] (Watchman). The same query that
+//!   powers `project_scanner` also enumerates `.dll`/`.asmdef` paths under
+//!   `Assets/`, `Packages/`, and `Library/PackageCache/`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use ignore::{WalkBuilder, WalkState};
 use walkdir::WalkDir;
 
 use crate::defines::{DEFAULT_FEATURE_DEFINES, generate_version_defines, parse_scripting_defines};
 use crate::error::{LockfileError, Result};
 use crate::io::{file_exists, list_directory, read_file};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
-use crate::paths::{join_path, resolve_real_path};
+use crate::paths::{join_path, resolve_real_path, unity_data_subpath, unity_install_root};
 use crate::project_scanner::parse_version_defines;
+use crate::scan::{ScanError, since};
 
 pub struct LockfileScanner;
 
 /// Output of [`LockfileScanner::scan_with_artifacts`]: the lockfile plus the
-/// concrete `.dll`/`.asmdef` paths that contributed to it. The caller (lock-cache)
-/// uses the path list to build a fingerprint of contributing directories.
+/// Watchman clock at the moment the project scan completed. Callers persist
+/// the clock for delta-based invalidation on subsequent invocations.
 pub struct ScannedLockfile {
     pub lockfile: Lockfile,
-    /// Paths relative to `project_root`, of every project-side `.dll` and `.asmdef`
-    /// that the scan ingested.
-    pub contributing_paths_relative: Vec<String>,
-    /// Absolute paths outside `project_root` that the scan ingested (Unity
-    /// `BuiltInPackages/`, the per-user tarball-extract cache). Watched by
-    /// `lock-fingerprint` so post-Unity-install changes invalidate the lockfile.
-    pub contributing_external_absolute: Vec<String>,
+    /// Opaque Watchman clock cursor captured during the project enumeration.
+    /// Pass back as `prev_clock` on the next `since()` to detect deltas.
+    pub watchman_clock: String,
 }
 
 impl LockfileScanner {
@@ -38,8 +44,13 @@ impl LockfileScanner {
     pub fn scan_with_artifacts(project_root: &str) -> Result<ScannedLockfile> {
         let _span = tracing::info_span!("lockfile_scanner.scan").entered();
         let (version, unity_path) = resolve_unity_path(project_root)?;
-        let app_contents = join_path(&unity_path, "Unity.app/Contents");
         let _unity_span = tracing::info_span!("lockfile_scanner.unity_install").entered();
+
+        // Bundle-content prefix. macOS bundles via `Unity.app/Contents`;
+        // Windows/Linux flatten under `Editor/Data`. All `Managed/*`,
+        // `NetStandard/*`, `Tools/*` paths sit under this subpath.
+        let data_sub = unity_data_subpath();
+        let app_contents = join_path(&unity_path, data_sub);
 
         let managed_engine_dir = join_path(&app_contents, "Managed/UnityEngine");
         let mut engine_refs: Vec<DllRef> = Vec::new();
@@ -54,10 +65,7 @@ impl LockfileScanner {
             if !(name.starts_with("UnityEngine") || name.starts_with("UnityEditor")) {
                 continue;
             }
-            let path = format!(
-                "$(UnityPath)/Unity.app/Contents/Managed/UnityEngine/{}",
-                dll
-            );
+            let path = format!("$(UnityPath)/{}/Managed/UnityEngine/{}", data_sub, dll);
             if name.starts_with("UnityEditor") {
                 editor_refs.push(DllRef::new(name, path));
             } else {
@@ -70,13 +78,13 @@ impl LockfileScanner {
         if file_exists(&graphs_dll) {
             editor_refs.push(DllRef::new(
                 "UnityEditor.Graphs",
-                "$(UnityPath)/Unity.app/Contents/Managed/UnityEditor.Graphs.dll",
+                format!("$(UnityPath)/{}/Managed/UnityEditor.Graphs.dll", data_sub),
             ));
         }
 
         let netstd_base = join_path(&app_contents, "NetStandard");
         let mut netstd_refs: Vec<DllRef> = Vec::new();
-        walk_files(&netstd_base, &netstd_base, &[".dll"], false, |rel, name| {
+        walk_files(&netstd_base, &netstd_base, &[".dll"], |rel, name| {
             let n = &name[..name.len() - 4];
             // Drop the WCF family. `System.Private.ServiceModel.dll` declares a
             // dep on `System.Reflection.DispatchProxy` v4.0.6.0, but Unity only
@@ -90,24 +98,50 @@ impl LockfileScanner {
             }
             netstd_refs.push(DllRef::new(
                 n,
-                format!("$(UnityPath)/Unity.app/Contents/NetStandard/{}", rel),
+                format!("$(UnityPath)/{}/NetStandard/{}", data_sub, rel),
             ));
         });
         netstd_refs.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let playback_base = join_path(&unity_path, "PlaybackEngines");
+        // PlaybackEngines layout: macOS keeps iOSSupport/AndroidPlayer at the
+        // editor-root level (outside the `.app` bundle for code-signing), but
+        // tucks MacStandaloneSupport under `Contents/`. Windows/Linux put
+        // everything under `Editor/Data/PlaybackEngines/`. The `playback_base`
+        // here resolves to whichever applies on the host.
+        let playback_base = if cfg!(target_os = "macos") {
+            join_path(&unity_path, "PlaybackEngines")
+        } else {
+            join_path(&app_contents, "PlaybackEngines")
+        };
+        let playback_ref_prefix = if cfg!(target_os = "macos") {
+            "PlaybackEngines".to_string()
+        } else {
+            format!("{}/PlaybackEngines", data_sub)
+        };
         let ios_refs = scan_playback_dlls(
             &join_path(&playback_base, "iOSSupport"),
-            "PlaybackEngines/iOSSupport",
+            &format!("{}/iOSSupport", playback_ref_prefix),
         );
         let android_refs = scan_playback_dlls(
             &join_path(&playback_base, "AndroidPlayer"),
-            "PlaybackEngines/AndroidPlayer",
+            &format!("{}/AndroidPlayer", playback_ref_prefix),
         );
-        let standalone_dir = join_path(&app_contents, "PlaybackEngines/MacStandaloneSupport");
-        let standalone_refs = scan_playback_dlls(
-            &standalone_dir,
-            "Unity.app/Contents/PlaybackEngines/MacStandaloneSupport",
+        // Mac standalone is the macOS exception: lives under Contents on mac,
+        // under Editor/Data/PlaybackEngines on non-mac. Use the unified base.
+        let standalone_base = if cfg!(target_os = "macos") {
+            join_path(&app_contents, "PlaybackEngines/MacStandaloneSupport")
+        } else {
+            join_path(&playback_base, "MacStandaloneSupport")
+        };
+        let standalone_prefix = if cfg!(target_os = "macos") {
+            format!("{}/PlaybackEngines/MacStandaloneSupport", data_sub)
+        } else {
+            format!("{}/MacStandaloneSupport", playback_ref_prefix)
+        };
+        let standalone_refs = scan_playback_dlls(&standalone_base, &standalone_prefix);
+        let windows_refs = scan_playback_dlls(
+            &join_path(&playback_base, "WindowsStandaloneSupport"),
+            &format!("{}/WindowsStandaloneSupport", playback_ref_prefix),
         );
 
         let source_gen_dir = join_path(&app_contents, "Tools/Unity.SourceGenerators");
@@ -119,29 +153,52 @@ impl LockfileScanner {
         sg_dlls.sort();
         for dll in sg_dlls {
             analyzers.push(format!(
-                "$(UnityPath)/Unity.app/Contents/Tools/Unity.SourceGenerators/{}",
-                dll
+                "$(UnityPath)/{}/Tools/Unity.SourceGenerators/{}",
+                data_sub, dll
             ));
         }
 
-        // Deduplicate by assembly name (first wins across Assets > Packages > PackageCache).
-        // We walk each root in parallel (via `ignore`), collect the per-root hits into a
-        // `Vec<(rel_path, file_name)>`, then iterate sequentially across roots in order
-        // to preserve "first wins" semantics. The hot cost is reading `Library/PackageCache`,
-        // which is heavily parallelisable.
+        // Project-side enumeration via Watchman. The same query that powers
+        // project_scanner returns all `.dll` and `.asmdef` paths under
+        // `Assets/`, `Packages/`, and `Library/PackageCache/`. We treat the
+        // first call here as the seed (it returns `Fresh` with the full
+        // enumeration); incremental delta handling is the project_scanner's
+        // job. Both share the same Watchman watch.
+        //
+        // Dedupe by assembly name preserves the historical "first wins" rule
+        // across roots. The Watchman response order isn't guaranteed
+        // root-by-root, so we partition then iterate in the canonical order.
         drop(_unity_span);
         let _proj_span = tracing::info_span!("lockfile_scanner.project_walk").entered();
+
+        let (all_paths, watchman_clock) = enumerate_project_paths(project_root)?;
+        let mut by_root: [Vec<&str>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for p in &all_paths {
+            let n = path_filename(p);
+            if !(n.ends_with(".dll") || n.ends_with(".asmdef")) {
+                continue;
+            }
+            if has_skipped_component(p) {
+                continue;
+            }
+            if p.starts_with("Assets/") {
+                by_root[0].push(p.as_str());
+            } else if p.starts_with("Packages/") {
+                by_root[1].push(p.as_str());
+            } else if p.starts_with("Library/PackageCache/") {
+                by_root[2].push(p.as_str());
+            }
+        }
+
         let mut project_refs: Vec<DllRef> = Vec::new();
         let mut seen_project_dlls: BTreeSet<String> = BTreeSet::new();
         let mut seen_analyzers: BTreeSet<String> = BTreeSet::new();
         let mut asmdef_paths: Vec<String> = Vec::new();
-        let mut contributing: Vec<String> = Vec::new();
-        let mut contributing_external: Vec<String> = Vec::new();
-        for root in ["Assets", "Packages", "Library/PackageCache"] {
-            let root_dir = join_path(project_root, root);
-            let hits = parallel_walk_dlls_and_asmdefs(&root_dir, project_root);
-            for (rel, file_name) in hits {
-                contributing.push(rel.clone());
+        for hits in &mut by_root {
+            hits.sort();
+            for rel in hits.iter() {
+                let rel = (*rel).to_string();
+                let file_name = path_filename(&rel);
                 if file_name.ends_with(".dll") {
                     let name = &file_name[..file_name.len() - 4];
                     let path = format!("$(ProjectRoot)/{}", rel);
@@ -176,13 +233,11 @@ impl LockfileScanner {
             );
         }
         // Each fallback source roots its walk at the per-package directory and
-        // emits ref paths using a single placeholder + prefix. Keeping `rel`
-        // relative to the package dir (not the install/cache root) means the
-        // emitted ref looks like `$(VAR)/<package-prefix>/<rel>` regardless of
-        // source — no asymmetry between BuiltInPackages and the tgz cache.
+        // emits ref paths using a single placeholder + prefix. Walks the
+        // fallback dirs directly (these are outside any Watchman root and are
+        // small per-package trees — no Watchman cost benefit).
         let mut ingest = |pkg_dir: &str, ref_prefix: &str| {
-            contributing_external.push(pkg_dir.to_string());
-            for (rel, file_name) in parallel_walk_dlls_and_asmdefs(pkg_dir, pkg_dir) {
+            for (rel, file_name) in fs_walk_dlls_and_asmdefs(pkg_dir, pkg_dir) {
                 if file_name.ends_with(".dll") {
                     let name = &file_name[..file_name.len() - 4];
                     let path = format!("{}/{}", ref_prefix, rel);
@@ -198,16 +253,18 @@ impl LockfileScanner {
                 }
             }
         };
+        // BuiltInPackages lives under the bundle-content subpath on every host
+        // (macOS Contents/Resources, Windows/Linux Editor/Data/Resources).
+        let builtin_base = format!(
+            "{}/{}/Resources/PackageManager/BuiltInPackages",
+            unity_path, data_sub
+        );
+        let builtin_prefix_base =
+            format!("$(UnityPath)/{}/Resources/PackageManager/BuiltInPackages", data_sub);
         for entry in &missing_packages {
-            let builtin = format!(
-                "{}/Unity.app/Contents/Resources/PackageManager/BuiltInPackages/{}",
-                unity_path, entry.name
-            );
+            let builtin = format!("{}/{}", builtin_base, entry.name);
             if Path::new(&builtin).exists() {
-                let prefix = format!(
-                    "$(UnityPath)/Unity.app/Contents/Resources/PackageManager/BuiltInPackages/{}",
-                    entry.name
-                );
+                let prefix = format!("{}/{}", builtin_prefix_base, entry.name);
                 ingest(&builtin, &prefix);
                 continue;
             }
@@ -245,6 +302,7 @@ impl LockfileScanner {
         refs.insert(RefCategory::PlaybackIos, ios_refs);
         refs.insert(RefCategory::PlaybackAndroid, android_refs);
         refs.insert(RefCategory::PlaybackStandalone, standalone_refs);
+        refs.insert(RefCategory::PlaybackWindows, windows_refs);
         refs.insert(RefCategory::Project, project_refs);
 
         let lockfile = Lockfile {
@@ -258,36 +316,16 @@ impl LockfileScanner {
         };
         Ok(ScannedLockfile {
             lockfile,
-            contributing_paths_relative: contributing,
-            contributing_external_absolute: contributing_external,
+            watchman_clock,
         })
     }
 }
 
 fn resolve_unity_path(project_root: &str) -> Result<(String, String)> {
-    let version_file = join_path(project_root, "ProjectSettings/ProjectVersion.txt");
-    if !file_exists(&version_file) {
-        return Err(LockfileError::NoProjectVersion(project_root.to_string()).into());
-    }
-    let content = read_file(&version_file)?;
-    let Some(colon) = content.find(':') else {
+    let Some(version) = crate::paths::read_unity_version(project_root) else {
         return Err(LockfileError::NoProjectVersion(project_root.to_string()).into());
     };
-    let bytes = content.as_bytes();
-    let mut i = colon + 1;
-    while i < bytes.len() && bytes[i] == b' ' {
-        i += 1;
-    }
-    let mut end = i;
-    while end < bytes.len() && bytes[end] != b'\n' && bytes[end] != b'\r' {
-        end += 1;
-    }
-    let version = content[i..end].to_string();
-    if version.is_empty() {
-        return Err(LockfileError::NoProjectVersion(project_root.to_string()).into());
-    }
-
-    let unity_path = format!("/Applications/Unity/Hub/Editor/{}", version);
+    let unity_path = unity_install_root(&version);
     if !Path::new(&unity_path).exists() {
         return Err(LockfileError::UnityNotFound(unity_path).into());
     }
@@ -295,13 +333,11 @@ fn resolve_unity_path(project_root: &str) -> Result<(String, String)> {
 }
 
 /// Recursively walk `directory` (using walkdir), invoking `handler(relative_to_base, file_name)`
-/// for each file with a matching extension. Skips dotfiles, tilde-suffixed entries, and
-/// (optionally) native-plugin subdirs.
+/// for each file with a matching extension. Skips dotfiles and tilde-suffixed entries.
 fn walk_files(
     directory: &str,
     base_path: &str,
     extensions: &[&str],
-    skip_native_plugin_dirs: bool,
     mut handler: impl FnMut(&str, &str),
 ) {
     if !Path::new(directory).exists() {
@@ -313,13 +349,7 @@ fn walk_files(
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            if name.starts_with('.') || name.ends_with('~') {
-                return false;
-            }
-            if e.file_type().is_dir() && skip_native_plugin_dirs && is_native_plugin_dir(&name) {
-                return false;
-            }
-            true
+            !(name.starts_with('.') || name.ends_with('~'))
         });
     for entry in iter {
         let Ok(entry) = entry else {
@@ -342,60 +372,86 @@ fn walk_files(
     }
 }
 
-/// Walk `directory` in parallel using `ignore::WalkBuilder::build_parallel` and return
-/// every file ending in `.dll` or `.asmdef`, as `(relative_to_strip_base, file_name)`.
-/// Skips dotfiles, tilde-suffixed entries, and native-plugin directories.
-fn parallel_walk_dlls_and_asmdefs(directory: &str, strip_base: &str) -> Vec<(String, String)> {
+/// Enumerate project-tree paths via Watchman. Returns the full file list under
+/// `Assets/`, `Packages/`, `Library/PackageCache/`, `ProjectSettings/` filtered
+/// by the scan query's suffix list, plus the Watchman clock cursor at the
+/// time of the query (callers persist it for incremental invalidation).
+///
+/// This shares the same Watchman watch as `project_scanner` — the daemon
+/// dedupes watches per project, so two callers in one CLI invocation cost no
+/// more than one cold-crawl on the first call.
+fn enumerate_project_paths(project_root: &str) -> Result<(Vec<String>, String)> {
+    let _s = tracing::info_span!("lockfile_scanner.watchman_query").entered();
+    let delta = since(Path::new(project_root), None).map_err(scan_to_generator)?;
+    Ok(delta.into_paths_and_clock())
+}
+
+/// Map `scan::ScanError` into the crate-level error, preserving the
+/// "watchman unavailable" hint so callers can print a focused install message.
+fn scan_to_generator(e: ScanError) -> crate::error::GeneratorError {
+    match e {
+        ScanError::Unavailable => {
+            crate::error::GeneratorError::ScanUnavailable(e.to_string())
+        }
+        ScanError::Query(_) => crate::error::GeneratorError::Other(e.to_string()),
+    }
+}
+
+/// Recursively walk `directory` and return every `.dll` / `.asmdef` as
+/// `(relative_to_strip_base, file_name)`. Skips dotfiles, tilde-suffixed
+/// entries, and native-plugin dirs. Used only for the BuiltInPackages /
+/// tgz-extract fallback paths — those are tiny (single-package subtrees)
+/// and outside any Watchman root.
+fn fs_walk_dlls_and_asmdefs(directory: &str, strip_base: &str) -> Vec<(String, String)> {
     if !Path::new(directory).exists() {
         return Vec::new();
     }
-    // Component-aware prefix strip — see project_scanner.rs for rationale.
-    let project_root_path = Path::new(strip_base);
-    let mut builder = WalkBuilder::new(directory);
-    builder
-        .standard_filters(false)
-        .hidden(false)
-        .ignore(false)
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .parents(false)
-        .follow_links(false);
-
-    let mut hits = crate::walk::parallel_walk(builder, |local: &mut Vec<(String, String)>, entry| {
-        let name = entry.file_name().to_string_lossy();
-        if name.starts_with('.') || name.ends_with('~') {
-            return WalkState::Skip;
-        }
-        let Some(ft) = entry.file_type() else {
-            return WalkState::Continue;
-        };
-        if ft.is_dir() {
-            if is_native_plugin_dir(&name) {
-                return WalkState::Skip;
+    let strip_path = Path::new(strip_base);
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for entry in WalkDir::new(directory)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            if name.starts_with('.') || name.ends_with('~') {
+                return false;
             }
-            return WalkState::Continue;
+            if e.file_type().is_dir() && is_native_plugin_dir(&name) {
+                return false;
+            }
+            true
+        })
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
         }
-        if !ft.is_file() {
-            return WalkState::Continue;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.ends_with(".dll") || name.ends_with(".asmdef")) {
+            continue;
         }
-        let n: &str = name.as_ref();
-        if !(n.ends_with(".dll") || n.ends_with(".asmdef")) {
-            return WalkState::Continue;
-        }
-        let Ok(rel) = entry.path().strip_prefix(project_root_path) else {
-            return WalkState::Continue;
+        let Ok(rel) = entry.path().strip_prefix(strip_path) else {
+            continue;
         };
-        let Some(rel_str) = rel.to_str() else {
-            return WalkState::Continue;
-        };
-        local.push((rel_str.to_string(), n.to_string()));
-        WalkState::Continue
-    });
-    // Stable order across the roots so the "first wins" dedupe pass is deterministic
-    // even though the parallel walker fans out non-deterministically per thread.
+        let Some(rel_str) = rel.to_str() else { continue };
+        hits.push((rel_str.to_string(), name));
+    }
     hits.sort();
     hits
+}
+
+/// Return the basename of a forward-slash path. Watchman emits project-relative
+/// forward-slash paths, so a simple rsplit suffices.
+fn path_filename(p: &str) -> &str {
+    p.rsplit('/').next().unwrap_or(p)
+}
+
+/// Skip path predicate: any component starts with `.` or ends with `~`, or any
+/// component is a native-plugin platform dir (e.g. `x86_64`, `arm64-v8a`).
+fn has_skipped_component(p: &str) -> bool {
+    p.split('/').any(|c| {
+        c.starts_with('.') || c.ends_with('~') || is_native_plugin_dir(c)
+    })
 }
 
 /// Package entry that `Library/PackageCache/` is expected to cover but doesn't.

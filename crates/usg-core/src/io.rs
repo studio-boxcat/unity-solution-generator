@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -19,7 +19,25 @@ fn read_bytes(path: &str) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Crash-safe write: stage to a sibling temp file, fsync, then rename onto the
+/// destination atomically. Concurrent readers see either the prior contents or
+/// the new contents — never a partial write. Survives EXDEV (cross-device
+/// rename) by falling back to copy + delete inside `tempfile::persist`.
+pub fn atomic_write_bytes(path: &str, bytes: &[u8]) -> Result<()> {
+    let p = Path::new(path);
+    let parent = p.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| io_err(path, e))?;
+    tmp.write_all(bytes).map_err(|e| io_err(path, e))?;
+    // fsync the file before rename — a power loss between rename and the
+    // implicit close would otherwise leave the inode pointing at an empty
+    // block on some filesystems (ext4 with data=ordered, NTFS lazy-write).
+    tmp.as_file().sync_all().map_err(|e| io_err(path, e))?;
+    tmp.persist(p).map_err(|e| io_err(path, e.error))?;
+    Ok(())
+}
+
 /// Returns true if the file was written, false if it was already byte-identical.
+/// Writes go through `atomic_write_bytes` so a crash can't corrupt the file.
 pub fn write_file_if_changed(path: &str, content: &str) -> Result<bool> {
     let bytes = content.as_bytes();
     if let Ok(existing) = read_bytes(path) {
@@ -27,13 +45,7 @@ pub fn write_file_if_changed(path: &str, content: &str) -> Result<bool> {
             return Ok(false);
         }
     }
-    let mut f = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|e| io_err(path, e))?;
-    f.write_all(bytes).map_err(|e| io_err(path, e))?;
+    atomic_write_bytes(path, bytes)?;
     Ok(true)
 }
 
@@ -45,31 +57,6 @@ pub fn file_exists(path: &str) -> bool {
     Path::new(path).exists()
 }
 
-pub fn is_dir(path: &str) -> bool {
-    std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
-}
-
-/// Look for a `# version: N` line near the top of a cache file and return
-/// `true` if it parses to exactly `expected`. Older caches without the line,
-/// caches with a newer/older `N`, and malformed lines all return `false` so
-/// the caller can silently regenerate. Stops scanning at the first non-comment
-/// line to keep the cost bounded.
-pub fn has_matching_version(content: &str, expected: u32) -> bool {
-    for line in content.split('\n') {
-        if line.is_empty() {
-            continue;
-        }
-        if !line.starts_with('#') {
-            // Reached cache body without finding a version line.
-            return false;
-        }
-        if let Some(rest) = line.strip_prefix("# version:") {
-            return rest.trim().parse::<u32>().ok() == Some(expected);
-        }
-    }
-    false
-}
-
 /// Plain `readdir` returning names (excluding `.` and `..`). Order undefined.
 pub fn list_directory(path: &str) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(path) else {
@@ -77,4 +64,44 @@ pub fn list_directory(path: &str) -> Vec<String> {
     };
     rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn atomic_write_creates_new_file() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("hello.txt");
+        atomic_write_bytes(p.to_str().unwrap(), b"world").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"world");
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_atomically() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("hello.txt");
+        std::fs::write(&p, b"old").unwrap();
+        atomic_write_bytes(p.to_str().unwrap(), b"new").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"new");
+        // No temp file should leak in the parent dir
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "leaked tempfile: {:?}", entries);
+    }
+
+    #[test]
+    fn write_file_if_changed_idempotent() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("hello.txt");
+        let path_s = p.to_str().unwrap();
+        assert!(write_file_if_changed(path_s, "x").unwrap());
+        assert!(!write_file_if_changed(path_s, "x").unwrap()); // unchanged
+        assert!(write_file_if_changed(path_s, "y").unwrap());
+    }
 }

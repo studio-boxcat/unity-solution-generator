@@ -5,14 +5,30 @@ members = ["crates/usg-core"]
 [workspace.package]
 version = "0.1.2"
 edition = "2021"
-rust-version = "1.80"
+# 1.89 stabilized std::fs::File::{lock, try_lock, unlock} which package_cache.rs
+# uses for cross-platform advisory locking (replaces libc::flock).
+rust-version = "1.89"
 
 [workspace.dependencies]
 walkdir = "2"
-ignore = "0.4"
 rayon = "1.10"
-libc = "0.2"
 serde_json = "1"
+# Windows-safe canonicalize: `std::fs::canonicalize` returns `\\?\` UNC paths on
+# Windows that break downstream string-path operations. `dunce::canonicalize`
+# strips that prefix transparently and is a no-op on Unix.
+dunce = "1"
+# Atomic file writes via NamedTempFile::persist (replaces hand-rolled rename).
+tempfile = "3"
+# Watchman client (BSER wire protocol). Required for all project scanning.
+watchman_client = "0.9"
+# tokio drives watchman_client's async API via a per-call current-thread runtime
+# (sync facade pattern from `unity-assetdb`). Minimal features only — we do not
+# expose any tokio types in the public API.
+tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "time"] }
+# Context-chained errors for the Watchman wire layer. Scoped to `scan.rs` only.
+anyhow = "1"
+# Typed error enums; used by `scan.rs` for `WatchmanError` and friends.
+thiserror = "2"
 
 # `panic = "unwind"` (the default) is required by FFI hosts that wrap calls
 # in `catch_unwind` (e.g. meow-tower's BoxcatBridge). Don't set "abort" here.

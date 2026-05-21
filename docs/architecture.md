@@ -2,7 +2,7 @@
 
 > **Related:** [[CLAUDE.md]], [[library-api.md]], [[benchmark.md]], [[TODO.md]]
 
-How the tool is shaped, why, and what each piece does. Sized for a 3.6 k-LOC project with four caller sites — none of those four are CI, none are external repos beyond `meow-tower` + `meow-tower-porting`.
+How the tool is shaped, why, and what each piece does. Sized for a ~3.5 k-LOC project with four caller sites — none are CI, none are external repos beyond `meow-tower` + `meow-tower-porting`.
 
 ## Use cases
 
@@ -17,6 +17,22 @@ Audit found exactly **four caller sites** total. The design is sized for these a
 
 No CI, no other repos, no other tools.
 
+## Build targets + hosts
+
+| Concept | Variants |
+|---|---|
+| Build target (`BuildPlatform`) | `ios` &#124; `android` &#124; `osx` &#124; `windows` |
+| Build config (`BuildConfig`) | `editor` &#124; `dev` &#124; `prod` |
+| Host (where `usg` runs) | macOS arm64, Windows x64, Linux (untested in CI) |
+
+`BuildPlatform` is the *Unity target*; the host is detected via `cfg!(target_os)` at run time. Host-specific logic is scoped to:
+- Unity install root discovery (`paths::unity_install_root`)
+- Unity bundle-content subpath (`paths::unity_data_subpath` — `Unity.app/Contents` on macOS, `Editor/Data` on Windows/Linux)
+- `UNITY_EDITOR_*` define suffix when targeting `editor` config
+- `usg_cache_dir` parent (`%LOCALAPPDATA%` / `~/Library/Caches` / `~/.cache`)
+
+Override Unity install discovery via `$UNITY_INSTALL_ROOT` for non-Hub installs.
+
 ## Layout
 
 ```
@@ -24,49 +40,54 @@ crates/
   usg-core/                 lib + companion binary (cargo `[lib]` + `[[bin]]`)
     Cargo.toml              [lib] + [[bin]] unity-solution-generator
     src/
-      lib.rs                pub API + LOCKFILE_VERSION + CACHE_VERSION constants
+      lib.rs                pub API + LOCKFILE_VERSION + CACHE_VERSION
       main.rs               arg parse + subcommand dispatch
       lockfile.rs           Lockfile, DllRef, RefCategory, LockfileIO
+                            (Watchman clock sidecar invalidation)
       project_scanner.rs    project-side scan; AsmDefRecord, ProjectCategory
-      lockfile_scanner.rs   Unity-install + project DLL/asmdef scan
+                            (Watchman-driven enumeration + clock cursor cache)
+      lockfile_scanner.rs   Unity-install (fs walk, one-shot per version)
+                            + project DLL/asmdef discovery (Watchman)
+      scan.rs               Watchman wire layer (sync facade over async)
       solution_generator.rs render + write csproj/sln/Directory.Build.props
       typecheck.rs          DAG walk + csc invocations
-      walk.rs               shared parallel-walk helper
-      lock_cache.rs         lock-fingerprint cache; reads CACHE_VERSION
-      generate_cache.rs     generate-fingerprint cache; reads CACHE_VERSION
-      package_cache.rs      on-demand tarball extraction (Editor/*.tgz → ~/.cache)
+      package_cache.rs      on-demand tarball extraction (Editor/*.tgz);
+                            cross-platform flock via std::fs::File::lock (1.89+)
       defines.rs            version + scripting defines
-      paths.rs              path utilities
-      io.rs                 read/write helpers + version-header validator
+      paths.rs              cross-platform path helpers; dunce::canonicalize
+                            (Windows-safe); per-host install/data subpaths
+      io.rs                 atomic_write via tempfile::NamedTempFile::persist
       profile.rs            tracing macros
       xml.rs                escape + deterministic GUID (pinned invariant)
       error.rs              GeneratorError + LockfileError + io_err helper
-    tests/                  e2e + integration + cli_regression
+    tests/                  e2e + integration + cli_regression + typecheck_paths
 ```
 
-The crate publishes to crates.io as `unity-solution-generator`. Cdylib hosting
-(C ABI for Unity `[DllImport]`) lives downstream in meow-tower's BoxcatBridge —
-this repo has no FFI.
+The crate publishes to crates.io as `unity-solution-generator`. Cdylib hosting (C ABI for Unity `[DllImport]`) lives downstream in meow-tower's BoxcatBridge — this repo has no FFI.
 
 ## Top-level flow
 
 ```mermaid
 graph LR
-    A[lock] -->|scan Unity + project| B[csproj.lock]
+    A[lock] -->|scan Unity + Watchman project| B[csproj.lock]
+    A --> CLK[.lock-watchman-clock]
     B --> C[generate]
     B --> T[typecheck]
     B --> X[build]
-    C -->|+ asmdef scan| D[.csproj/.sln]
+    C -->|+ asmdef scan via Watchman| D[.csproj/.sln]
     T -->|+ asmdef scan + csc.dll| E[.csproj/.sln + diagnostics + .dll]
     X -->|generate + dotnet build| F[obj/Debug + Temp/Bin/Debug DLLs]
 ```
 
-1. **`lock`** scans the Unity installation + project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` to find the Unity install path; walks `Managed/`, `NetStandard/`, `PlaybackEngines/`, `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock`.
+1. **`lock`** scans the Unity installation + project to discover DLL references, analyzers, and preprocessor defines. Reads `ProjectSettings/ProjectVersion.txt` for the Unity version, resolves the install path via `paths::unity_install_root(version)`, walks `Managed/`, `NetStandard/`, `PlaybackEngines/<P>` directly (one-shot fs walk per editor version), then queries Watchman for `.dll`/`.asmdef` paths under `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock` + `.lock-watchman-clock` sidecar.
 
-   Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/Contents/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `~/.cache/unity-solution-generator/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/.../PackageManager/Editor/*.tgz`). The latter two only fire for entries `packages-lock.json` names but PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
-2. **`generate`** reads the lockfile, scans for `.cs` directories, resolves ownership via `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`; overridable via the Rust API's `with_output_dir`. The depth controls compile-pattern prefix — one `../` per path component back to project root.
-3. **`typecheck`** refreshes `.csproj`/`.sln` (same write path as `generate`, fingerprint-cached so it's ~ms on no-op) so the IDE always sees a current solution, then builds csc args per asmdef, walks the dependency DAG level-by-level, and invokes `dotnet exec csc.dll /shared` per dirty project. DLLs land in `<variant>/obj/Debug/<asmdef>.dll` — the same path `build` writes to — with a per-DLL `.usg-stamp` sidecar pinning ownership. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds; the stamp guards against silent skip after a `dotnet build` overwrite.
-4. **`build`** runs `generate`, then shells out to `dotnet build <variant>.sln`. Args after `--` are forwarded verbatim (defaults to `-v:q`). MSBuild writes assemblies to `obj/Debug/<asmdef>.dll` and per-project reference copies to `Temp/Bin/Debug/<asmdef>/` under the variant directory (`<OutputPath>` is hardcoded in the csproj template — solution_generator.rs:552).
+   Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/<data>/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `<usg_cache>/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/<data>/Resources/PackageManager/Editor/*.tgz`). The latter two only fire for `packages-lock.json` entries PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
+
+2. **`generate`** reads the lockfile, scans for `.cs` directories (via Watchman), resolves ownership through `asmdef`/`asmref` assembly roots, renders `.csproj` + `.sln` + `Directory.Build.props` for one platform+config variant. Output dir defaults to `Library/UnitySolutionGenerator/<variant>/`; overridable via `GenerateOptions::with_output_dir`. The depth controls compile-pattern prefix — one `../` per path component back to project root. Bytes-identical writes are no-ops (`write_file_if_changed` checks content equality before `atomic_write_bytes`).
+
+3. **`typecheck`** refreshes `.csproj`/`.sln` (same write path as `generate`) so the IDE always sees a current solution, then builds csc args per asmdef, walks the dependency DAG level-by-level, and invokes `dotnet exec csc.dll /shared` per dirty project. DLLs land in `<variant>/obj/Debug/<asmdef>.dll` — the same path `build` writes to — with a per-DLL `.usg-stamp` sidecar pinning ownership. mtime UTD short-circuits when nothing changed; content-hash UTD prevents spurious cascade rebuilds; the stamp guards against silent skip after a `dotnet build` overwrite.
+
+4. **`build`** runs `generate`, then shells out to `dotnet build <variant>.sln`. Args after `--` are forwarded verbatim (defaults to `-v:q`).
 
 ## Public API
 
@@ -79,17 +100,41 @@ graph LR
 | `typecheck` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>]` (defaults: `ios editor`) |
 | `build` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>] [-- <dotnet-build-args>...]` (defaults: `ios editor`) |
 
-`<root>` is optional — when omitted, the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`.
+`<root>` is optional — when omitted the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`. `<platform>` accepts `ios | android | osx | windows`.
 
 ### Rust API
 
-This crate has no cdylib. Editor callers use meow-tower's `BoxcatBridge`, which
-crates.io-deps this crate and exposes a `bxc_usg_generate` / `bxc_last_error`
-C ABI matching `unity_solution_generator::generate`'s parameter shape.
+This crate has no cdylib. Editor callers use meow-tower's `BoxcatBridge`, which crates.io-deps this crate and exposes a `bxc_usg_generate` / `bxc_last_error` C ABI matching `unity_solution_generator::generate`'s parameter shape.
 
 **Single-threaded contract.** Cache files aren't reentrant-safe. Rider naturally serializes via Unity's main asset-import thread.
 
 Full reference: [[library-api.md]].
+
+## Scanning model
+
+```mermaid
+flowchart LR
+  inv[CLI invocation] --> ulf[Load lockfile]
+  ulf --> uchk{lockfile.unity-version<br/>== ProjectVersion.txt?<br/>+ .lock-watchman-clock<br/>delta is irrelevant?}
+  uchk -->|both yes| skipu[Reuse lockfile as-is]
+  uchk -->|either no| uscan[Unity install fs walk<br/>+ Watchman project query] --> writelf[Write lockfile<br/>+ clock sidecar]
+  skipu --> proj
+  writelf --> proj
+  proj[scan::since<br/>None] --> derive[Re-derive asmdef records<br/>via rayon JSON parse]
+  derive --> gen[generate / typecheck]
+```
+
+**Project tree (Watchman, required dependency):**
+- Watchman roots at the project. Query scoped to `Assets/`, `Packages/`, `Library/PackageCache/`, `ProjectSettings/` via the `DirName` expression.
+- Suffix-filtered to `cs`, `asmdef`, `asmref`, `dll`, `json`, `asset`, `txt`.
+- No on-disk scan-cache. Each `ProjectScanner::scan` issues one `since(None)` query and re-parses asmdef JSONs in parallel via `rayon`. The per-asmdef parse is microseconds; eliminating the cache trades ~ms of warm-path time for ~200 fewer LOC and one fewer invalidation surface.
+- Lockfile-level invalidation IS cached, via the `.lock-watchman-clock` sidecar — `LockfileIO::scan_and_write` queries `since(prev_clock)` and short-circuits when no project-relevant path was touched.
+
+**Unity install (one-shot, not watched):**
+- Walked once per editor version using `std::fs::read_dir` recursion (via `walkdir` for the NetStandard subtree). Result is cached *inside* the lockfile (the refs sections themselves are the cache).
+- Invalidation: `lockfile.unity_version != ProjectVersion.txt` content → rescan.
+
+The Unity Editor install is intentionally NOT watched: it's a multi-GB write-once-per-version tree, and Watchman's cold-crawl on Windows can hit minutes (Metro #959). Versioning by string equality is correct and cheap.
 
 ## Category inference
 
@@ -106,7 +151,7 @@ Platform-specific runtime assemblies (e.g. `includePlatforms: ["iOS", "Editor"]`
 
 ## Source ownership
 
-For each directory containing `.cs` files, the scanner walks upward to the nearest `asmdef` or `asmref` assembly root. Unresolved directories fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.). Directories ending with `~` or starting with `.` are excluded.
+For each directory containing `.cs` files, the scanner walks upward to the nearest `asmdef` or `asmref` assembly root. Unresolved directories fall back to Unity's legacy assembly rules (`Assembly-CSharp`, `Assembly-CSharp-Editor`, etc.). Path components ending with `~` or starting with `.` are excluded.
 
 ## On-disk layout
 
@@ -115,79 +160,89 @@ All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored
 ```
 Library/UnitySolutionGenerator/
   csproj.lock                     ← lockfile (user-visible, may be checked in)
-  scan-cache                      ← cached filesystem scan (mtime-validated)
-  lock-fingerprint                ← short-circuits `lock` when nothing changed
-  .fingerprints/<options-hash>    ← short-circuits `generate` when nothing changed
+  .lock-watchman-clock            ← opaque Watchman clock for lockfile invalidation
   ios-editor/                     ← `generate` output: .csproj + .sln + Directory.Build.props
     obj/Debug/<asmdef>.dll        ←   `build` + `typecheck` shared output (see below)
-    obj/Debug/<asmdef>.dll.usg-stamp ← `typecheck` ownership marker (foreign-writer guard)
+    obj/Debug/<asmdef>.dll.usg-stamp ← `typecheck` ownership marker
     obj/Debug/<asmdef>.rsp        ←   `typecheck` csc response file
     Temp/Bin/Debug/<asmdef>/      ←   `build` output: per-project reference DLL copies
   android-prod/
+  windows-editor/
   …
 ```
 
-Per-user cache lives outside the project:
+Per-user cache lives outside the project. Host-specific roots:
+
+| Host | Root |
+|---|---|
+| macOS | `$XDG_CACHE_HOME` &#124; `~/Library/Caches/` |
+| Linux | `$XDG_CACHE_HOME` &#124; `~/.cache/` |
+| Windows | `%LOCALAPPDATA%` &#124; `%USERPROFILE%\AppData\Local\` |
 
 ```
-~/.cache/unity-solution-generator/<unity-version>/
+<host-cache>/unity-solution-generator/<unity-version>/
   <package-name>/
     <extracted .tgz contents>
     .complete                     ← marker; absence = mid-extract or crashed
-  .lock.<package-name>            ← O_CREAT|O_EXCL extraction lock
+  .lock.<package-name>            ← std::fs::File::lock advisory lock
 ```
 
-Honors `XDG_CACHE_HOME`. Shared across worktrees (extraction is one-time per Unity version per package). Resolved at typecheck/generate time via the `$(UsgCache)` MSBuild placeholder.
+Resolved at typecheck/generate time via the `$(UsgCache)` MSBuild placeholder.
 
 ## Cache versioning
 
-Two `pub const u32` constants in `lib.rs`:
+One `pub const u32` constant in `lib.rs`:
 
 | Constant | Files | Bump policy |
 |---|---|---|
 | `LOCKFILE_VERSION` | `csproj.lock` | rarely; user-visible, may be checked in |
-| `CACHE_VERSION` | `scan-cache`, `lock-fingerprint`, `.fingerprints/*` | freely — dev-local, gitignored |
 
-Typecheck DLLs no longer have wholesale invalidation tied to `CACHE_VERSION`; each carries its own `.usg-stamp` sidecar that pins per-emit ownership. Bumping `CACHE_VERSION` won't touch them. Use `rm -rf Library/UnitySolutionGenerator/<variant>/obj/Debug/` if a forced rebuild is needed.
+`LOCKFILE_VERSION = 2` reflects the addition of `[refs.playback.windows]` for Windows build-target support. Older `v1` lockfiles re-scan cold on first read. No migration code path — Unity-version equality + Watchman delta drive the rescan automatically.
 
-Each cache file carries a `# version: N` header. Mismatch → wholesale invalidate. No migration code path.
+Typecheck DLLs carry their own `.usg-stamp` sidecar that pins per-emit ownership; foreign writers (e.g. `dotnet build`) trip the next typecheck into a recompile. Use `rm -rf Library/UnitySolutionGenerator/<variant>/obj/Debug/` for a forced rebuild.
+
+The Watchman clock sidecar (`.lock-watchman-clock`) is unversioned by design — Watchman tokens are opaque, and an unrecognised cursor surfaces as `Delta::Fresh` which itself drives a clean rescan.
 
 ## `typecheck` deeper
 
 Bypasses MSBuild entirely. Per-asmdef args (refs from lockfile, sources from scan, defines from platform+config) are written to `<name>.rsp` and consumed via `dotnet exec /path/to/csc.dll /shared /noconfig @<name>.rsp`.
 
-- **No `/refonly`.** csc 4.10 (.NET 8 SDK) silently skips body-binding diagnostics under `/refonly` — argument-conversion errors at call sites don't surface, even though docs claim otherwise. We emit a full library and rely on `/deterministic` for byte-stable outputs (see Content-hash UTD). Hit on `meow-tower/orgel-fix`: typecheck reported `ok` while Unity Editor flagged a real `CS1503`. Test `tests/e2e.rs:rsp_has_no_refonly` locks the regression.
-- **Native-DLL filter.** Unity's lockfile sometimes points at native plugins (e.g. `unity_sprite_author.dll`). Passing those via `/reference:` to csc fires `CS0009: PE image doesn't contain managed metadata`. We check the PE header's CLR Runtime Header data-directory entry (index 14) — non-zero RVA = managed. MSBuild's `ResolveAssemblyReferences` task does the same check.
-- **Cascade skip.** If an asmdef references an upstream that failed (or was itself cascade-skipped), the downstream compile would just spew `CS0006`. We track a `failed_set` between levels and surface a `"skipped (cascade): upstream 'X' failed"` message instead.
-- **Content-hash UTD.** csc with `/deterministic` produces byte-identical output for unchanged inputs, but the post-compile mtime advances anyway. We snapshot pre-compile bytes + mtime and restore the mtime via `std::fs::FileTimes::set_modified` when the new bytes match — downstream's mtime UTD then sees the upstream as unchanged and skips. The `.usg-stamp` sidecar (below) is updated to the restored mtime so the next UTD pass still trusts the DLL.
-- **Foreign-writer guard (`.usg-stamp`).** Output lives in `<variant>/obj/Debug/` alongside MSBuild's emits from `build`. Both `build` and `typecheck` default to `ios editor`, so a user running both subcommands targets the same `<name>.dll` path. Without a guard, a naive mtime UTD would silently SKIP after `dotnet build` wrote a fresh DLL — typecheck would rubber-stamp MSBuild's compile. The guard: every successful csc emit writes a per-DLL `<name>.dll.usg-stamp` containing the DLL's mtime (ns). UTD requires stamp present AND `stamp.mtime == disk.mtime`; foreign writers (MSBuild, manual `cp`, etc.) don't touch the stamp, so the next typecheck recompiles. Bounded blast radius: one downstream cascade per foreign-write event, not unbounded. Pattern borrowed from producer-tag sidecars in Bazel's action cache and Ninja's `.ninja_log`. Tests: `tests/typecheck_paths.rs`.
-- **Build/typecheck interleaving.** `build` writes MSBuild bytes + `.pdb` + `CoreCompileInputs.cache` + `<asm>.csproj.FileListAbsolute.txt` into the same dir; `typecheck` overwrites the `.dll` and (re)writes the stamp. The `.pdb` may go stale relative to typecheck's `.dll` (typecheck doesn't emit debug info), and MSBuild's `CoreCompileInputs.cache` may skip a no-op rebuild while the DLL is csc-bytes rather than MSBuild-bytes. Both are cosmetic — debugger gets stale PDB, build appears no-op when bytes shifted. For a clean MSBuild state run `dotnet build -t:Rebuild` or `rm -rf <variant>/obj/`.
+- **No `/refonly`.** csc 4.10 (.NET 8 SDK) silently skips body-binding diagnostics under `/refonly` — argument-conversion errors at call sites don't surface. We emit a full library and rely on `/deterministic` for byte-stable outputs (see Content-hash UTD). Hit on `meow-tower/orgel-fix`: typecheck reported `ok` while Unity Editor flagged a real `CS1503`. Test `tests/e2e.rs::rsp_has_no_refonly` locks the regression.
+- **Native-DLL filter.** Unity's lockfile sometimes points at native plugins. Passing those via `/reference:` to csc fires `CS0009`. We check the PE header's CLR Runtime Header data-directory entry (index 14) — non-zero RVA = managed. MSBuild's `ResolveAssemblyReferences` task does the same check.
+- **Cascade skip.** If an asmdef references an upstream that failed, the downstream compile would just spew `CS0006`. We track a `failed_set` between levels and surface a `"skipped (cascade): upstream 'X' failed"` message instead.
+- **Content-hash UTD.** csc with `/deterministic` produces byte-identical output for unchanged inputs, but the post-compile mtime advances anyway. We snapshot pre-compile bytes + mtime and restore the mtime via `std::fs::FileTimes::set_modified` when the new bytes match — downstream's mtime UTD then sees the upstream as unchanged and skips.
+- **Foreign-writer guard (`.usg-stamp`).** Output lives in `<variant>/obj/Debug/` alongside MSBuild's emits from `build`. The guard: every successful csc emit writes a per-DLL `<name>.dll.usg-stamp` containing the DLL's mtime (ns). UTD requires stamp present AND `stamp.mtime == disk.mtime`; foreign writers don't touch the stamp, so the next typecheck recompiles. Pattern borrowed from producer-tag sidecars in Bazel's action cache and Ninja's `.ninja_log`. Tests: `tests/typecheck_paths.rs`.
 - **Parallel level dispatch.** The DAG is grouped into levels (Kahn's). Within a level all projects are independent and run concurrently via `rayon::par_iter`. Each worker spawns its own `dotnet exec csc.dll /shared`, all connecting to the same VBCSCompiler.
-- **Diagnostic filtering.** Failure output is post-filtered to drop `: warning ` and `: info ` lines. Bodies repeat across assemblies that share sources via asmref (e.g. `com.boxcat.libs` pulled into half a dozen projects); `info SP0001` lines from `DiagnosticSuppressor` are noise. Errors and the csc banner pass through. See `typecheck.rs:filter_diagnostics`.
-- **Lock-fingerprint missing-path sentinel.** `lock_cache::build_entries` records absent paths as `(p, 0)`; `is_valid` invalidates if such a path later appears. Without this, a fresh worktree where `Library/PackageCache/` doesn't exist at lock time produces an incomplete lockfile that Unity later populating PackageCache never invalidates. Test: `tests/e2e.rs:lock_fingerprint_sentinel_invalidates_on_appearance`.
+- **Cross-platform mtime.** `std::fs::Metadata::modified()` everywhere — no `#[cfg(unix)] MetadataExt` branches. Resolution is fs-dependent (APFS/ext4: ns; NTFS: 100-ns ticks) and sufficient for our predicates.
 
-## Pitfalls (avoided by design)
+## Pitfalls
 
-- **Plugin/registry / abstract `Backend` trait** — one consumer; no abstraction.
-- **Option-bag struct creep** — `GenerateOptions` is 5 fields. Splits before adding a 6th.
-- **Persistent worker / daemon** — at this scale, JIT amortization doesn't justify protocol burden. We use `csc /shared` (which routes through VBCSCompiler) but don't host one ourselves.
-- **Cache version drift** — single `CACHE_VERSION` invalidates all dev-local caches together; separate `LOCKFILE_VERSION` for the user-visible lockfile.
+- **Don't watch the Unity install.** Multi-GB write-once trees are a known Watchman cold-crawl trap. Cache by version-string equality.
+- **`Library/PackageCache/` first-watch can take seconds.** Surfaced via the `scan.first_watch_or_resolve` tracing span. On meow-tower this is typically <2 s; on a fresh worktree where Unity is mid-populating the cache, expect longer.
+- **`Delta::Fresh` happens.** Daemon restart, watch reaped (default `idle_reap_age_seconds = 432000` = 5 days), journal loss. Re-derive path must always work without a prior clock.
+- **`watchman_client` Windows builds break on tokio bumps** ([#1217](https://github.com/facebook/watchman/issues/1217)). Pin watchman_client + tokio in `Cargo.toml`.
+- **Don't store paths with backslashes in any persisted file.** The lockfile must stay greppable/diffable across hosts; ref paths use forward slashes regardless of host OS.
+- **`std::fs::canonicalize` returns `\\?\` UNC paths on Windows.** Use `dunce::canonicalize` everywhere we canonicalize.
+- **`PlaybackEngines` location is asymmetric on macOS.** `iOSSupport`/`AndroidPlayer` live at the editor-root level; `MacStandaloneSupport` lives under `Unity.app/Contents/`. On Windows/Linux everything is under `Editor/Data/PlaybackEngines/`. Centralised in `lockfile_scanner` via the `playback_base` / `playback_ref_prefix` host-conditional pair.
 
 ## Non-goals
 
 - General "build any C# solution" tool — Unity-specific assumptions are load-bearing (asmdef layout, lockfile pointing at Unity install).
-- Persistent worker / daemon process *we* run.
+- Watchman as an *optional* dep with a filesystem-walk fallback. Watchman is required; the daemon must be reachable or `lock`/`generate`/`typecheck`/`build` hard-fail with an install prompt.
+- Persistent worker / daemon process we run.
 - Multi-platform build matrix in one CLI invocation (caller's loop).
 - Replacement for `dotnet build` in `--emit` mode.
 - Content-hash UTD for `.cs` source files (mtime is sufficient at our scale).
 
-## Prior art
+## Background / prior art
 
+- **`unity-assetdb`** — sibling repo by the same author, battle-tested the patterns this crate borrows: sync facade over async tokio, opaque Watchman clock tokens, `std::fs::File::lock` (Rust 1.89+) for cross-platform flock, `tempfile::NamedTempFile::persist` for atomic writes, path normalization at the write boundary.
 - **`com.unity.ide.rider`** ([needle-mirror](https://github.com/needle-mirror/com.unity.ide.rider)) — flat library, single `SyncSolution` entry point. Confirms the shape.
 - **Bee** ([Unity blog](https://blog.unity.com/engine-platform/accelerating-player-builds-with-incremental-build-pipeline)) — separates *describe graph* (pure data) from *execute graph* (workers/scheduling). At our scale, kept as one `run` function with a hashable inputs struct.
 - **Cargo** ([Cargo Targets](https://doc.rust-lang.org/cargo/reference/cargo-targets.html), [RFC 3477](https://rust-lang.github.io/rfcs/3477-cargo-check-lang-policy.html)) — single binary with subcommands; `cargo check` was a subcommand from day one.
 - **Roslyn Compiler Server** ([Compiler Server.md](https://github.com/dotnet/roslyn/blob/main/docs/compilers/Compiler%20Server.md)) — VBCSCompiler IPC. We use `csc /shared` which connects transparently.
-- **Cargo + Bazel** ([many caches of Bazel](https://blog.engflow.com/2024/05/13/the-many-caches-of-bazel/)) — wholesale cache invalidation via single version constant. No migrations.
+- **Khan, *Incremental processing with Watchman*** ([blog](https://blog.waleedkhan.name/incremental-watchman/)) — the `since`-clock-cursor pattern is the canonical way to use Watchman from a one-shot CLI.
+- **Pulumi's *Why we did not use Watchman*** ([blog](https://www.pulumi.com/blog/pulumi-watch-mode-with-rust/)) — honest pushback on Watchman as a CLI dep. We accept the packaging-friction tradeoff because Watchman is a real win on the project tree (hundreds of thousands of `.cs` files on meow-tower).
 
 ## Profiling
 
@@ -195,6 +250,6 @@ Spans use [`tracing`](https://docs.rs/tracing/). Default off — zero runtime co
 
 - `USG_PROFILE=1 unity-solution-generator <cmd>` — info-level spans, one stderr line per span close with `time.busy`.
 - `USG_PROFILE=full` — includes lower-level child spans.
-- `USG_LOG=unity_solution_generator::project_scanner=debug` — drop-in `EnvFilter` directives.
+- `USG_LOG=unity_solution_generator::scan=debug` — drop-in `EnvFilter` directives.
 
 Wall-clock benchmarks against meow-tower live in [[benchmark.md]].

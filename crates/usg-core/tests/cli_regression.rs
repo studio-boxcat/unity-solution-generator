@@ -11,6 +11,9 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+use common::WatchedTempDir;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_unity-solution-generator")
 }
@@ -23,8 +26,8 @@ fn write(root: &Path, rel: &str, content: &str) {
 
 /// A minimal Unity-shaped fixture with a pre-baked lockfile so we don't need
 /// a real Unity install for CLI smoke tests.
-fn fixture() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
+fn fixture() -> WatchedTempDir {
+    let tmp = common::make_temp_root();
     let root = tmp.path();
     write(root, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.2.7f2\n");
     write(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
@@ -92,7 +95,7 @@ fn generate_emits_sln_path_to_stdout() {
 fn generate_invalid_platform_exits_nonzero() {
     let tmp = fixture();
     let out = Command::new(bin())
-        .args(["generate", tmp.path().to_str().unwrap(), "windows", "editor"])
+        .args(["generate", tmp.path().to_str().unwrap(), "freebsd", "editor"])
         .output()
         .expect("spawn");
     assert!(!out.status.success(), "invalid platform should fail");

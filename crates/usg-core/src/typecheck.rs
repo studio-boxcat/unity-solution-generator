@@ -9,7 +9,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, FileTimes};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
@@ -18,7 +17,7 @@ use rayon::prelude::*;
 
 use crate::error::{GeneratorError, Result, io_err};
 use crate::lockfile::{DllRef, Lockfile, LockfileIO, RefCategory};
-use crate::paths::{DEFAULT_GENERATOR_ROOT, resolve_real_path};
+use crate::paths::{DEFAULT_GENERATOR_ROOT, mtime_nanos_for, resolve_real_path};
 use crate::project_scanner::{AsmDefRecord, ProjectCategory, ProjectScanner};
 use crate::solution_generator::{BuildConfig, BuildPlatform};
 
@@ -459,9 +458,9 @@ fn collect_defines(lockfile: &Lockfile, platform: BuildPlatform, config: BuildCo
     out.extend(lockfile.defines_scripting.iter().cloned());
     out.extend(platform.platform_defines().iter().map(|s| s.to_string()));
     if config == BuildConfig::Editor {
-        for d in ["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_OSX"] {
-            out.push(d.to_string());
-        }
+        out.push("UNITY_EDITOR".to_string());
+        out.push("UNITY_EDITOR_64".to_string());
+        out.push(crate::solution_generator::editor_host_define().to_string());
     }
     if matches!(config, BuildConfig::Editor | BuildConfig::Dev) {
         for d in ["DEBUG", "TRACE", "UNITY_ASSERTIONS"] {
@@ -483,10 +482,9 @@ fn collect_refs(
         cats.push(RefCategory::Editor);
     }
     cats.push(RefCategory::PlaybackStandalone);
-    match platform {
-        BuildPlatform::Ios => cats.push(RefCategory::PlaybackIos),
-        BuildPlatform::Android => cats.push(RefCategory::PlaybackAndroid),
-        BuildPlatform::Osx => {}
+    let target_cat = platform.playback_ref_category();
+    if target_cat != RefCategory::PlaybackStandalone {
+        cats.push(target_cat);
     }
     cats.push(RefCategory::Project);
     cats.push(RefCategory::Netstandard);
@@ -511,10 +509,7 @@ fn collect_refs(
 // ── up-to-date check ──────────────────────────────────────────────────────
 
 fn mtime_nsec(p: impl AsRef<Path>) -> Option<u128> {
-    let m = fs::metadata(p.as_ref()).ok()?;
-    let secs = m.mtime() as u128;
-    let nsecs = m.mtime_nsec() as u128;
-    Some(secs * 1_000_000_000 + nsecs)
+    mtime_nanos_for(p.as_ref())
 }
 
 /// Set `path`'s mtime to a previously-recorded `mtime_nsec` value.

@@ -17,25 +17,38 @@ pub enum BuildPlatform {
     Ios,
     Android,
     Osx,
+    Windows,
 }
 
 impl BuildPlatform {
+    /// All variants in canonical order. Iterating this is the supported way to
+    /// walk the variant set; matches in this file are exhaustive so adding a
+    /// variant fails to compile until everywhere is updated.
+    pub const ALL: &'static [BuildPlatform] = &[
+        BuildPlatform::Ios,
+        BuildPlatform::Android,
+        BuildPlatform::Osx,
+        BuildPlatform::Windows,
+    ];
+
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "ios" => BuildPlatform::Ios,
             "android" => BuildPlatform::Android,
             "osx" => BuildPlatform::Osx,
+            "windows" => BuildPlatform::Windows,
             _ => return None,
         })
     }
 
-    /// CLI / config string ("ios", "android", "osx"). Round-trip with `parse`.
+    /// CLI / config string. Round-trip with `parse`.
     /// Equivalent to `Display::fmt`; kept as a pub fn for explicit-API callers.
     pub fn raw(self) -> &'static str {
         match self {
             BuildPlatform::Ios => "ios",
             BuildPlatform::Android => "android",
             BuildPlatform::Osx => "osx",
+            BuildPlatform::Windows => "windows",
         }
     }
 
@@ -45,6 +58,7 @@ impl BuildPlatform {
             BuildPlatform::Ios => "iOS",
             BuildPlatform::Android => "Android",
             BuildPlatform::Osx => "macOSStandalone",
+            BuildPlatform::Windows => "WindowsStandalone",
         }
     }
 
@@ -53,6 +67,19 @@ impl BuildPlatform {
             BuildPlatform::Ios => &["UNITY_IOS", "UNITY_IPHONE"],
             BuildPlatform::Android => &["UNITY_ANDROID"],
             BuildPlatform::Osx => &["UNITY_STANDALONE", "UNITY_STANDALONE_OSX"],
+            BuildPlatform::Windows => &["UNITY_STANDALONE", "UNITY_STANDALONE_WIN"],
+        }
+    }
+
+    /// PlaybackEngines subdir under the Unity install. `None` for standalone-mac
+    /// — that variant uses the shared `PlaybackStandalone` ref category populated
+    /// once per install rather than a target-specific subdir.
+    pub fn playback_ref_category(self) -> RefCategory {
+        match self {
+            BuildPlatform::Ios => RefCategory::PlaybackIos,
+            BuildPlatform::Android => RefCategory::PlaybackAndroid,
+            BuildPlatform::Osx => RefCategory::PlaybackStandalone,
+            BuildPlatform::Windows => RefCategory::PlaybackWindows,
         }
     }
 }
@@ -97,7 +124,21 @@ impl std::fmt::Display for BuildConfig {
     }
 }
 
-const EDITOR_DEFINES: &[&str] = &["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_OSX"];
+/// Editor defines that are platform-target-independent. The host-OS suffix
+/// (`UNITY_EDITOR_OSX` / `UNITY_EDITOR_WIN` / `UNITY_EDITOR_LINUX`) is added
+/// at render time based on `cfg!(target_os)`.
+const EDITOR_DEFINES_BASE: &[&str] = &["UNITY_EDITOR", "UNITY_EDITOR_64"];
+
+pub(crate) fn editor_host_define() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "UNITY_EDITOR_WIN"
+    } else if cfg!(target_os = "linux") {
+        "UNITY_EDITOR_LINUX"
+    } else {
+        "UNITY_EDITOR_OSX"
+    }
+}
+
 const DEBUG_DEFINES: &[&str] = &["DEBUG", "TRACE", "UNITY_ASSERTIONS"];
 
 #[derive(Debug, Clone)]
@@ -388,17 +429,10 @@ impl SolutionGenerator {
         let _span = tracing::info_span!("generate.from_lockfile").entered();
         let project_root = resolve_real_path(&options.project_root);
 
-        // Fast path: a previous successful generate with these exact options
-        // already left a fingerprint, the lockfile + scan-cache haven't changed,
-        // and every variant output file is still on disk. Reconstruct the
-        // GenerateResult and skip render+write entirely.
-        if let Some(cached) = {
-            let _s = tracing::info_span!("generate.fingerprint_check").entered();
-            crate::generate_cache::try_load_valid(&project_root, options)
-        } {
-            return Ok(cached);
-        }
-
+        // No separate generate-output fingerprint cache: Watchman-backed
+        // ProjectScanner::scan is fast on cache-hit, render is microseconds,
+        // and write_file_if_changed skips bytes-identical writes (so a warm
+        // generate doesn't touch disk mtimes or rewrite csproj content).
         let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
 
         let mut projects: Vec<ProjectInfo> = Vec::new();
@@ -477,7 +511,6 @@ impl SolutionGenerator {
             out
         })?;
 
-        crate::generate_cache::write_after_generate(&project_root, options, &result);
         Ok(result)
     }
 
@@ -607,11 +640,14 @@ fn collect_references_block(
     if is_editor {
         cats.push(RefCategory::Editor);
     }
+    // PlaybackStandalone holds engine DLLs shared across the desktop targets
+    // (and historically referenced for non-desktop too). Target-specific
+    // additions come from `playback_ref_category()`; if the target IS standalone
+    // already we'd double-add, so de-dup via the seen-set below.
     cats.push(RefCategory::PlaybackStandalone);
-    match platform {
-        BuildPlatform::Ios => cats.push(RefCategory::PlaybackIos),
-        BuildPlatform::Android => cats.push(RefCategory::PlaybackAndroid),
-        BuildPlatform::Osx => {}
+    let target_cat = platform.playback_ref_category();
+    if target_cat != RefCategory::PlaybackStandalone {
+        cats.push(target_cat);
     }
     cats.push(RefCategory::Project);
     cats.push(RefCategory::Netstandard);
@@ -651,7 +687,8 @@ pub fn render_directory_build_props(
 ) -> String {
     let mut dynamic: Vec<&str> = platform.platform_defines().to_vec();
     if build_config == BuildConfig::Editor {
-        dynamic.extend_from_slice(EDITOR_DEFINES);
+        dynamic.extend_from_slice(EDITOR_DEFINES_BASE);
+        dynamic.push(editor_host_define());
     }
     if matches!(build_config, BuildConfig::Editor | BuildConfig::Dev) {
         dynamic.extend_from_slice(DEBUG_DEFINES);
@@ -706,4 +743,72 @@ fn render_sln(projects: &[ProjectInfo]) -> String {
     lines.push("EndGlobal".into());
     lines.push(String::new());
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_round_trips() {
+        assert_eq!(BuildPlatform::parse("windows"), Some(BuildPlatform::Windows));
+        assert_eq!(BuildPlatform::Windows.raw(), "windows");
+        assert_eq!(BuildPlatform::Windows.to_string(), "windows");
+    }
+
+    #[test]
+    fn windows_platform_metadata() {
+        let p = BuildPlatform::Windows;
+        assert_eq!(p.unity_platform_name(), "WindowsStandalone");
+        assert_eq!(p.platform_defines(), &["UNITY_STANDALONE", "UNITY_STANDALONE_WIN"]);
+        assert_eq!(p.playback_ref_category(), RefCategory::PlaybackWindows);
+    }
+
+    #[test]
+    fn playback_ref_category_per_target() {
+        assert_eq!(BuildPlatform::Ios.playback_ref_category(), RefCategory::PlaybackIos);
+        assert_eq!(BuildPlatform::Android.playback_ref_category(), RefCategory::PlaybackAndroid);
+        assert_eq!(BuildPlatform::Osx.playback_ref_category(), RefCategory::PlaybackStandalone);
+        assert_eq!(BuildPlatform::Windows.playback_ref_category(), RefCategory::PlaybackWindows);
+    }
+
+    #[test]
+    fn all_covers_every_variant() {
+        // If a new variant is added, `playback_ref_category`'s exhaustive match
+        // forces it to be addressed and this length check forces ALL to be
+        // updated. (The match alone won't fire — ALL is a const array literal.)
+        assert_eq!(BuildPlatform::ALL.len(), 4);
+    }
+
+    #[test]
+    fn editor_host_define_matches_target_os() {
+        // On the running host, the define must end with the OS suffix that
+        // the build machine has — that's the only one consumers can sensibly
+        // wire `#if UNITY_EDITOR_*` against.
+        let d = editor_host_define();
+        let host_suffix = if cfg!(target_os = "windows") {
+            "WIN"
+        } else if cfg!(target_os = "linux") {
+            "LINUX"
+        } else {
+            "OSX"
+        };
+        assert!(d.ends_with(host_suffix), "got {d}, expected suffix {host_suffix}");
+    }
+
+    #[test]
+    fn windows_target_editor_emits_host_suffix() {
+        let props = render_directory_build_props(
+            "/tmp/proj",
+            None,
+            None,
+            BuildPlatform::Windows,
+            BuildConfig::Editor,
+            &[],
+        );
+        assert!(props.contains("UNITY_STANDALONE_WIN"));
+        // The editor-host suffix is whichever OS is running this test.
+        let suffix = editor_host_define();
+        assert!(props.contains(suffix), "missing host suffix {suffix} in {props}");
+    }
 }

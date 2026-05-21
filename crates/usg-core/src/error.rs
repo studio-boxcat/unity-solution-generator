@@ -8,6 +8,10 @@ pub enum GeneratorError {
     Io { path: String, source: io::Error },
     Lockfile(LockfileError),
     DuplicateAsmDefName(String),
+    /// Watchman daemon unreachable. Carries the original "install watchman"
+    /// hint so the FFI host (BoxcatBridge) can surface it verbatim instead of
+    /// string-matching on `Other`.
+    ScanUnavailable(String),
     Other(String),
 }
 
@@ -24,6 +28,7 @@ impl fmt::Display for GeneratorError {
             GeneratorError::Io { path, source } => write!(f, "{}: {}", source, path),
             GeneratorError::Lockfile(e) => write!(f, "{}", e),
             GeneratorError::DuplicateAsmDefName(n) => write!(f, "Duplicate asmdef name: '{}'", n),
+            GeneratorError::ScanUnavailable(msg) => write!(f, "{}", msg),
             GeneratorError::Other(msg) => write!(f, "{}", msg),
         }
     }

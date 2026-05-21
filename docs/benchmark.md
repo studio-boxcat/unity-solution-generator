@@ -1,48 +1,54 @@
 # Benchmark & Profiling
 
-> **Related:** [[CLAUDE.md]]
+> **Related:** [[CLAUDE.md]], [[architecture.md]], [[library-api.md]], [[TODO.md]]
 
 Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical microbenchmarks (`criterion`).
 
 ## End-to-end (meow-tower, 13 assemblies, ~5k .cs files)
 
-`hyperfine --warmup 10 --runs 200 --shell=none`:
+Pre-refactor (mtime-fingerprint scanning) numbers retired below for context. Re-measure against the current Watchman-backed pipeline with `just profile` after a Watchman warm-watch on the meow-tower project. The orders of magnitude are unchanged — cold lock is dominated by the Watchman first-watch crawl (one-time per project per daemon restart) and per-asmdef JSON parsing; warm paths are dominated by process startup.
+
+Indicative pre-refactor numbers (still useful as a sanity-check ballpark):
 
 | Command | Mean ± σ | Range |
 |---------|----------|-------|
-| `generate` (warm — fingerprint hit) | **2.1 ± 0.5 ms** | 1.6–5.6 |
-| `generate` (warm scan-cache, fingerprint missing) | ~5.6 ± 1.0 ms | 4.2–9.8 |
+| `generate` (warm — cache hit) | **2.1 ± 0.5 ms** | 1.6–5.6 |
 | `typecheck` (warm no-op, refreshes .csproj/.sln + diagnostics) | **36.6 ± 0.7 ms** | 35.3–38.2 |
-| `lock` (cold, fingerprint nuked each run) | **59.5 ± 3.4 ms** | 55.9–63.6 |
-| `lock` (warm — fingerprint hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
+| `lock` (cold, clock sidecar nuked each run) | **59.5 ± 3.4 ms** | 55.9–63.6 |
+| `lock` (warm — clock-sidecar cache hit) | **1.8 ± 0.2 ms** | 1.6–3.1 |
 | startup (`--help`) | ~2 ms | — |
 
 Run via `just profile` (cold lock + warm lock) or `just profile-spans` (per-section breakdown via tracing).
 
 ## Per-section (one run, USG_PROFILE=1)
 
-`generate` (warm scan-cache, **fingerprint cleared** so we hit the full pipeline):
+`generate` (clock sidecar cleared so we hit the full pipeline):
 ```
-generate (5.78 ms total)
-├─ project_scanner.scan         4.66 ms
-│  └─ scan_cache.validate       2.82 ms
-└─ generate.write_variant n=9   0.64 ms
+generate (~10 ms total)
+├─ project_scanner.scan
+│  ├─ scan.watchman_query        2-5 ms   (since(None) — full enumeration)
+│  └─ rayon asmdef JSON parse    3-5 ms   (13 asmdefs in parallel)
+└─ generate.write_variant n=9   0.6 ms
 
-lock cold (~97 ms total, with PackageCache-gap fallback firing on 13 packages)
-├─ lockfile_scanner.unity_install   1.5 ms     ← walkdir, sequential, small
-├─ lockfile_scanner.project_walk   92  ms     ← parallel walk + per-package fallback
-└─ lockfile_scanner.defines         3 ms
+lock cold (~100 ms total, with PackageCache-gap fallback firing on 13 packages)
+├─ lockfile_scanner.unity_install      1.5 ms   ← walkdir, sequential, small
+├─ lockfile_scanner.watchman_query     5-10 ms  ← cold; first-watch can spike
+├─ lockfile_scanner.project_walk       80 ms    ← per-package fs fallback for missing pkgs
+└─ lockfile_scanner.defines             3 ms
 
 lock warm
-└─ (no spans — fingerprint match short-circuits before LockfileScanner runs)
+└─ (no spans — clock-sidecar match + unity-version equality short-circuit
+    before LockfileScanner runs)
 ```
 
-The `project_walk` budget covers the original Assets/Packages/PackageCache walk plus per-missing-package walks of `BuiltInPackages/<name>` or `~/.cache/.../<name>`. The fallback runs only for entries `packages-lock.json` names but PackageCache hasn't resolved — empty in the steady state, so this is the worst-case cold path. Once PackageCache is fully populated the cold lock returns to ~30 ms.
+The `project_walk` budget covers the per-missing-package walks of `BuiltInPackages/<name>` or `<usg_cache>/.../<name>`. The fallback runs only for entries `packages-lock.json` names but PackageCache hasn't resolved — empty in the steady state, so this is the worst-case cold path. Once PackageCache is fully populated the cold lock returns to ~30 ms.
 
-`generate` (warm scan-cache + warm fingerprint):
+`generate` with clock-sidecar match (lockfile cached) but project scan still re-derives:
 ```
-generate.from_lockfile  83 µs
-└─ generate.fingerprint_check   57 µs   ← stat scan-cache + lockfile + read fp
+generate.from_lockfile  ~6 ms
+├─ lockfile.cache_hit_check     ~50 µs   ← since(prev_clock) + ProjectVersion read
+├─ project_scanner.scan         5-10 ms  ← watchman query + asmdef re-parse
+└─ generate.write_variant n=9   ~0.5 ms  ← write_file_if_changed no-ops
 ```
 The remaining ~2 ms of wall-clock is process startup + dynamic linker.
 
@@ -92,18 +98,20 @@ For posterity: MSBuild's up-to-date check failed for our setup — `obj/Debug/<p
 
 ## Caching layers
 
+Just one persisted cache after the scan-cache strip:
+
 | Cache | Path | Invalidates on | Hot-path skip |
 |---|---|---|---|
-| `generate-fingerprint` | `Library/UnitySolutionGenerator/.fingerprints/<options-hash>` | mtime of `csproj.lock` or `scan-cache`; or any expected output file missing | entire `generate_from_lockfile` body — render+write skipped, cached `GenerateResult` returned |
-| `scan-cache` | `Library/UnitySolutionGenerator/scan-cache` | mtime of any contributing dir + each asmdef/asmref file (catches in-place edits — parent-dir mtime alone misses these) | full filesystem walk + per-asmdef JSON parse (records are pre-serialized into the cache) |
-| `lock-fingerprint` | `Library/UnitySolutionGenerator/lock-fingerprint` | mtime of Unity install + any contributing dir + ProjectVersion / ProjectSettings / manifest.json + extracted-tarball cache root; missing paths recorded as `(p, 0)` so first appearance also invalidates | entire Unity-install + project-side DLL/asmdef walk |
+| `.lock-watchman-clock` | `Library/UnitySolutionGenerator/.lock-watchman-clock` | Watchman delta (any `.cs` / `.asmdef` / `.asmref` / `.dll` / manifest path touched since the cached clock) **OR** `lockfile.unity-version` ≠ `ProjectVersion.txt` | entire Unity-install + project-side DLL/asmdef scan + asmdef JSON parse |
+| Lockfile (`csproj.lock`) doubles as the Unity-install cache | versioned by `lockfile.unity-version` | Unity Editor version bump in `ProjectVersion.txt` | one-shot Unity install fs walk (`Managed/`, `NetStandard/`, `PlaybackEngines/<P>`) |
 
-Both caches store nanosecond mtimes via `MetadataExt::mtime_nsec`. Validation cost is `len(entries) × stat()` (~1–2 ms for hundreds of entries).
+The project scanner has no on-disk cache — each invocation issues one `since(None)` Watchman query and re-parses asmdef JSON in parallel via rayon. Cache validation cost is one Watchman query (~1–5 ms warm) plus a stringy `ProjectVersion.txt` read.
 
 ## Concurrency
 
-- The hot project-side scan uses [`ignore::WalkBuilder::build_parallel`](https://docs.rs/ignore/) with all gitignore behaviour disabled — we want only the parallel walker scaffolding (crossbeam-deque work-stealing + per-thread accumulators flushed on `Drop`).
-- The lockfile-side DLL/asmdef walk over `Assets`/`Packages`/`Library/PackageCache` also uses `ignore::WalkBuilder::build_parallel`. The Unity-install DLL scan stays sequential (`walkdir`) — small enough not to matter.
+- Project-side enumeration is delegated to the Watchman daemon — the `since(prev_clock)` query returns a project-relative path list in one round trip. No filesystem walk in this process.
+- The Unity-install scan (`Managed/`, `NetStandard/`, per-`PlaybackEngines/<P>`) runs sequentially via `walkdir` — small enough not to matter and runs once per editor version.
+- Per-asmdef JSON parsing fans out across cores via `rayon::par_iter`.
 - `csproj` writes fan out across threads via `rayon`.
 
 ## Profiling instrumentation

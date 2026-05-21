@@ -19,13 +19,13 @@
 //! `package.json`'s `"name"` field — filename-parsing would be fragile because
 //! package names contain `-` (e.g. `com.unity.nuget.newtonsoft-json-3.2.1.tgz`).
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::io::{create_dir_all, list_directory};
-use crate::paths::{join_path, usg_cache_dir};
+use crate::paths::{join_path, unity_data_subpath, usg_cache_dir};
 
 /// Marker written last to a package's cache dir; absence means a half-baked
 /// extraction (crashed worker or in-progress peer).
@@ -58,7 +58,7 @@ pub fn ensure_extracted_for_package(
 
     let editor_dir = join_path(
         unity_path,
-        "Unity.app/Contents/Resources/PackageManager/Editor",
+        &format!("{}/Resources/PackageManager/Editor", unity_data_subpath()),
     );
     if !Path::new(&editor_dir).exists() {
         return None;
@@ -125,41 +125,35 @@ fn extract_one(tgz_path: &str, cache_root: &str) -> io::Result<()> {
 }
 
 enum LockOutcome {
-    Acquired(LockGuard),
+    /// Held exclusive advisory lock on the lockfile; auto-released when dropped.
+    Acquired(File),
+    /// Peer beat us to a complete extraction during the wait.
     PeerCompleted,
 }
 
-/// RAII lock-file guard — removes the lock file on drop.
-struct LockGuard {
-    path: PathBuf,
-}
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
+/// Acquire an exclusive advisory lock on a per-package lockfile via stable
+/// `std::fs::File::try_lock` (Rust 1.89+). On Unix this maps to `flock(LOCK_EX)`;
+/// on Windows to `LockFileEx`. The lock is released automatically when the
+/// returned `File` drops — no leaked lock files, no recovery dance after a
+/// crashed worker. The lockfile itself stays on disk and is reused next time.
+///
+/// Polls every 100 ms while the lock is contended, checking the
+/// `complete_marker` between attempts so a peer that publishes-then-releases
+/// short-circuits us instead of forcing redundant re-extraction. Times out
+/// after `PEER_WAIT` (60 s) — extractions of Unity's bundled tarballs run
+/// ~1 s each, so a 60 s wait is generous.
 fn acquire_lock(lock_path: &Path, complete_marker: &Path) -> io::Result<LockOutcome> {
-    // No takeover after timeout: if both peers raced past the deadline they'd
-    // both `remove_file` then both win the next `create_new`, then both run
-    // extraction concurrently — one would `remove_dir_all(target)` while the
-    // other is mid-`unpack`. Hard-fail instead; a stale lock requires manual
-    // cleanup (rm `.lock.<name>` under the cache dir). Extraction takes ~1 s
-    // for the bundled tarballs so the timeout is generous.
+    let f = File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
     let deadline = Instant::now() + PEER_WAIT;
     loop {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lock_path)
-        {
-            Ok(_) => {
-                return Ok(LockOutcome::Acquired(LockGuard {
-                    path: lock_path.to_path_buf(),
-                }));
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+        match f.try_lock() {
+            Ok(()) => return Ok(LockOutcome::Acquired(f)),
+            Err(std::fs::TryLockError::WouldBlock) => {
                 if complete_marker.exists() {
                     return Ok(LockOutcome::PeerCompleted);
                 }
@@ -167,7 +161,7 @@ fn acquire_lock(lock_path: &Path, complete_marker: &Path) -> io::Result<LockOutc
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!(
-                            "package_cache: peer holding {} did not finish within {:?}; remove the file manually if stale",
+                            "package_cache: peer holding {} did not finish within {:?}",
                             lock_path.display(),
                             PEER_WAIT
                         ),
@@ -175,7 +169,7 @@ fn acquire_lock(lock_path: &Path, complete_marker: &Path) -> io::Result<LockOutc
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => return Err(e),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
     }
 }

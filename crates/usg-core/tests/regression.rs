@@ -213,7 +213,7 @@ fn android_prod_excludes_ios_only() {
 #[test]
 fn display_round_trips_through_parse() {
     use unity_solution_generator::{BuildConfig, BuildPlatform};
-    for p in [BuildPlatform::Ios, BuildPlatform::Android, BuildPlatform::Osx] {
+    for &p in BuildPlatform::ALL {
         assert_eq!(BuildPlatform::parse(&p.to_string()), Some(p));
         assert_eq!(p.to_string(), p.raw());
     }

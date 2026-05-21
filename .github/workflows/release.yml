@@ -1,6 +1,7 @@
-# Builds the CLI binary on macOS arm64 and attaches it to a GitHub Release.
-# Triggered by pushing a `v*` tag (e.g. `v0.1.1`). The tag must match the
-# version in `Cargo.toml` — `just release <version>` handles bump+tag+push.
+# Builds the CLI binary on macOS arm64 + Windows x64 and attaches it to a
+# GitHub Release. Triggered by pushing a `v*` tag (e.g. `v0.1.1`). The tag must
+# match the version in `Cargo.toml` — `just release <version>` handles
+# bump+tag+push.
 name: release
 
 on:
@@ -8,28 +9,77 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write  # needed to create the release + upload assets
+  contents: write  # create the release + upload assets
 
 jobs:
   build:
-    runs-on: macos-14  # arm64
+    name: build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14            # arm64
+            target: aarch64-apple-darwin
+            artifact: unity-solution-generator-macos-arm64
+            bin_suffix: ''
+          # Pinned to windows-2022 rather than windows-latest until the Rust
+          # stack-overflow regression on the May-2026 image is fixed; see
+          # https://github.com/actions/runner-images/issues/13629
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            artifact: unity-solution-generator-windows-x64.exe
+            bin_suffix: .exe
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: taiki-e/install-action@v2
         with:
           tool: just
 
-      - name: Build release binary
-        run: just build
+      # Watchman is a runtime dep only — not needed to compile. Users install
+      # it themselves following the README. We don't run tests in this
+      # workflow (test runner needs a Unity install + Watchman daemon); CI
+      # tests live in the dev loop.
 
-      - name: Create release + upload binary
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/unity-solution-generator${{ matrix.bin_suffix }}" \
+             "dist/${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release + upload binaries
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            dist/unity-solution-generator
+            dist/*

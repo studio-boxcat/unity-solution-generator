@@ -9,15 +9,30 @@ default:
 
 # Build release binary
 build:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo build --manifest-path "{{pkg}}/Cargo.toml" --release
     mkdir -p "{{pkg}}/dist"
-    cp "{{pkg}}/target/release/unity-solution-generator" "{{bin}}"
-    codesign -s - -f "{{bin}}"  # adhoc-sign so hardened runtime tools accept the binary
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+      cp "{{pkg}}/target/release/unity-solution-generator.exe" "{{bin}}.exe"
+    else
+      cp "{{pkg}}/target/release/unity-solution-generator" "{{bin}}"
+      # adhoc-sign on macOS so hardened-runtime consumers accept the binary;
+      # no-op on Linux (codesign not present → skip silently).
+      command -v codesign >/dev/null && codesign -s - -f "{{bin}}" || true
+    fi
 
 # Install to ~/.local/bin (build from source — requires Rust toolchain)
 install: build
-    mkdir -p ~/.local/bin
-    ln -sf "{{bin}}" ~/.local/bin/unity-solution-generator
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+      mkdir -p "$USERPROFILE/.local/bin"
+      cp -f "{{bin}}.exe" "$USERPROFILE/.local/bin/unity-solution-generator.exe"
+    else
+      mkdir -p ~/.local/bin
+      ln -sf "{{bin}}" ~/.local/bin/unity-solution-generator
+    fi
 
 # Cut a release: bump version, commit, tag, push. CI builds + uploads binary.
 # After CI succeeds, run `just publish` to push to crates.io.
@@ -53,12 +68,12 @@ profile: build
     echo "--- typecheck (warm no-op) ---"
     "{{bin}}" typecheck . > /dev/null  # warm up
     hyperfine --warmup 3 --runs 30 '"{{bin}}" typecheck .'
-    echo "--- lock (cold: nuke fingerprint each run) ---"
+    echo "--- lock (cold: nuke clock sidecar each run) ---"
     hyperfine --warmup 1 --runs 5 \
-      --prepare 'rm -f Library/UnitySolutionGenerator/lock-fingerprint' \
+      --prepare 'rm -f Library/UnitySolutionGenerator/.lock-watchman-clock' \
       '"{{bin}}" lock .'
-    echo "--- lock (warm: fingerprint cache hit) ---"
-    "{{bin}}" lock . > /dev/null  # ensure fingerprint exists
+    echo "--- lock (warm: clock-sidecar cache hit) ---"
+    "{{bin}}" lock . > /dev/null  # ensure sidecar exists
     hyperfine --warmup 3 '"{{bin}}" lock .'
     echo "--- startup ---"
     hyperfine --warmup 5 '"{{bin}}" --help'
@@ -71,7 +86,7 @@ profile-spans: build
     USG_PROFILE=1 "{{bin}}" generate . ios editor > /dev/null
     echo
     echo "--- USG_PROFILE=1 lock (cold) ---"
-    rm -f Library/UnitySolutionGenerator/lock-fingerprint
+    rm -f Library/UnitySolutionGenerator/.lock-watchman-clock
     USG_PROFILE=1 "{{bin}}" lock . > /dev/null
     echo
     echo "--- USG_PROFILE=1 lock (warm) ---"

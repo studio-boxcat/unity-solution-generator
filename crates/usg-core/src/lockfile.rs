@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use crate::error::{LockfileError, Result};
+use crate::error::{GeneratorError, LockfileError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
-use crate::lock_cache;
 use crate::lockfile_scanner::LockfileScanner;
-use crate::paths::{join_path, lockfile_path, parent_directory};
+use crate::paths::{join_path, lockfile_path, parent_directory, read_unity_version};
+use crate::scan::{Delta, ScanError, hint_is_relevant, since};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DllRef {
@@ -47,6 +48,7 @@ pub enum RefCategory {
     PlaybackIos,
     PlaybackAndroid,
     PlaybackStandalone,
+    PlaybackWindows,
     Project,
 }
 
@@ -65,6 +67,7 @@ impl RefCategory {
         RefCategory::PlaybackIos,
         RefCategory::PlaybackAndroid,
         RefCategory::PlaybackStandalone,
+        RefCategory::PlaybackWindows,
         RefCategory::Project,
     ];
 
@@ -81,11 +84,12 @@ impl RefCategory {
                 RefCategory::PlaybackIos => 1,
                 RefCategory::PlaybackAndroid => 1,
                 RefCategory::PlaybackStandalone => 1,
+                RefCategory::PlaybackWindows => 1,
                 RefCategory::Project => 1,
             }
         };
         let _ = count_per_variant;
-        7
+        8
     };
 
     pub fn as_section(self) -> &'static str {
@@ -96,6 +100,7 @@ impl RefCategory {
             RefCategory::PlaybackIos => "refs.playback.ios",
             RefCategory::PlaybackAndroid => "refs.playback.android",
             RefCategory::PlaybackStandalone => "refs.playback.standalone",
+            RefCategory::PlaybackWindows => "refs.playback.windows",
             RefCategory::Project => "refs.project",
         }
     }
@@ -108,6 +113,7 @@ impl RefCategory {
             "refs.playback.ios" => RefCategory::PlaybackIos,
             "refs.playback.android" => RefCategory::PlaybackAndroid,
             "refs.playback.standalone" => RefCategory::PlaybackStandalone,
+            "refs.playback.windows" => RefCategory::PlaybackWindows,
             "refs.project" => RefCategory::Project,
             _ => return None,
         })
@@ -156,28 +162,40 @@ impl Lockfile {
 
 pub struct LockfileIO;
 
+/// Sidecar file storing the Watchman clock at the time the lockfile was last
+/// written. Lives next to `csproj.lock` in the generator root. Single line,
+/// opaque token — never parsed.
+const CLOCK_SIDECAR: &str = ".lock-watchman-clock";
+
 impl LockfileIO {
     /// Scan + write the lockfile (creating the generator dir if needed).
-    /// `generator_root` controls where `csproj.lock` and `lock-fingerprint` live;
-    /// pass [`DEFAULT_GENERATOR_ROOT`] for the standard layout.
+    /// `generator_root` controls where `csproj.lock` and the `.lock-watchman-clock`
+    /// sidecar live; pass [`DEFAULT_GENERATOR_ROOT`] for the standard layout.
     ///
-    /// Short-circuits when the recorded fingerprint (see [`lock_cache`]) shows nothing
-    /// has changed since the last `lock`. In the cache-hit path no Unity-install scan
-    /// or project-side walk runs; we just refresh the fingerprint timestamps and return
-    /// the existing lockfile.
+    /// Short-circuits in two steps:
+    ///   1. Read the existing lockfile + sidecar clock.
+    ///   2. Query Watchman with the sidecar clock — if no project-relevant
+    ///      path was touched AND the lockfile's `unity-version` still matches
+    ///      `ProjectSettings/ProjectVersion.txt`, return the cached lockfile.
+    /// Otherwise full rescan via [`LockfileScanner`] + rewrite both files.
     pub fn scan_and_write(project_root: &str, generator_root: &str) -> Result<Lockfile> {
         let path = lockfile_path(project_root, generator_root);
         let generator_dir = join_path(project_root, generator_root);
-        let fp_path = lock_cache::fingerprint_path(&generator_dir);
+        let clock_path = join_path(&generator_dir, CLOCK_SIDECAR);
         create_dir_all(parent_directory(&path));
 
-        // Fast path: fingerprint matches and lockfile is still on disk.
+        // Fast path: lockfile and sidecar clock both exist, Watchman delta is
+        // benign, and the editor version hasn't changed.
         if std::path::Path::new(&path).exists() {
-            if let Some(entries) = lock_cache::load(&fp_path) {
-                if lock_cache::is_valid(&entries) {
-                    if let Ok(existing) = Self::read(&path) {
-                        return Ok(existing);
-                    }
+            if let Ok(existing) = Self::read(&path) {
+                if let Some(new_clock) =
+                    check_invalidation(project_root, &clock_path, &existing)?
+                {
+                    // Cache hit. Update sidecar with the latest clock so the
+                    // next call's `since(prev)` is incremental rather than
+                    // re-touching everything since the last write.
+                    let _ = write_file_if_changed(&clock_path, &new_clock);
+                    return Ok(existing);
                 }
             }
         }
@@ -185,23 +203,19 @@ impl LockfileIO {
         let scanned = LockfileScanner::scan_with_artifacts(project_root)?;
         Self::write(&scanned.lockfile, &path)?;
 
-        let entries = lock_cache::build_entries(
-            project_root,
-            &scanned.lockfile.unity_path,
-            &scanned.contributing_paths_relative,
-            &scanned.contributing_external_absolute,
-        );
-        // Best-effort: a fingerprint write failure must not fail the user-facing
-        // operation; we'd just rescan next time.
-        let _ = lock_cache::write(&fp_path, &scanned.lockfile.unity_version, &entries);
+        // Persist the clock the scanner already captured. Best-effort: a write
+        // failure forces a rescan on the next call but doesn't fail the
+        // user-facing operation.
+        let _ = write_file_if_changed(&clock_path, &scanned.watchman_clock);
         Ok(scanned.lockfile)
     }
 
     /// Ensure the lockfile is fresh and return it. Thin alias for
     /// [`scan_and_write`](Self::scan_and_write), which already short-circuits
-    /// via the fingerprint cache when nothing on disk has changed. A bare
-    /// `read` would silently use a stale lockfile (e.g. references to files
-    /// that no longer exist on disk) and surface as `MSB3245` from `dotnet build`.
+    /// via the Watchman clock + Unity-version check when nothing relevant
+    /// changed. A bare `read` would silently use a stale lockfile (e.g.
+    /// references to files that no longer exist on disk) and surface as
+    /// `MSB3245` from `dotnet build`.
     pub fn load_or_scan(project_root: &str, generator_root: &str) -> Result<Lockfile> {
         Self::scan_and_write(project_root, generator_root)
     }
@@ -342,16 +356,58 @@ fn write_ref_section(s: &mut String, name: &str, refs: &[DllRef]) {
 }
 
 fn parse_header_line(line: &str) -> Option<(&str, &str)> {
-    let colon = line.find(':')?;
-    let key = &line[..colon];
-    let value = line[colon + 1..].trim();
-    Some((key, value))
+    let (key, value) = line.split_once(':')?;
+    Some((key, value.trim()))
 }
 
 fn parse_dll_ref(line: &str) -> Option<DllRef> {
-    let pipe = line.find('|')?;
+    let (name, path) = line.split_once('|')?;
     Some(DllRef {
-        name: line[..pipe].to_string(),
-        path: line[pipe + 1..].to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+    })
+}
+
+/// Check whether the existing lockfile is still valid. Returns `Some(new_clock)`
+/// on cache hit (no Unity-version change, no project-relevant Watchman delta);
+/// `None` if anything forces a rescan. Watchman `Unavailable` is surfaced as
+/// an error so callers don't silently re-enter the scanner (which would
+/// produce a confusingly-different error path) — `Query` errors are logged
+/// and treated as a rescan trigger.
+fn check_invalidation(
+    project_root: &str,
+    clock_path: &str,
+    existing: &Lockfile,
+) -> Result<Option<String>> {
+    // 1. Unity version equality — cheap.
+    let Some(current_version) = read_unity_version(project_root) else {
+        return Ok(None); // Missing ProjectVersion.txt; let the rescanner fail loudly.
+    };
+    if current_version != existing.unity_version {
+        return Ok(None);
+    }
+
+    // 2. Watchman delta from the previous successful write.
+    let prev_clock = read_file(clock_path).ok();
+    let prev_clock_ref = prev_clock.as_deref();
+    let delta = match since(Path::new(project_root), prev_clock_ref) {
+        Ok(d) => d,
+        Err(ScanError::Unavailable) => {
+            return Err(GeneratorError::ScanUnavailable(ScanError::Unavailable.to_string()));
+        }
+        Err(e @ ScanError::Query(_)) => {
+            tracing::warn!("lockfile cache check: watchman query failed, rescanning ({e})");
+            return Ok(None);
+        }
+    };
+    Ok(match delta {
+        Delta::Fresh { .. } => None,
+        Delta::Touched { paths, new_clock } => {
+            if paths.iter().any(|p| hint_is_relevant(p)) {
+                None
+            } else {
+                Some(new_clock)
+            }
+        }
     })
 }

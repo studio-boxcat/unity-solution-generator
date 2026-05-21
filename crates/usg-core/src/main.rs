@@ -128,8 +128,8 @@ fn generate_sln(inv: &Invocation) -> Result<String, ExitCode> {
         .with_extra_refs(inv.extra_refs.clone());
 
     // Always route through `scan_and_write`: it serves the cached lockfile on
-    // a fingerprint hit (~ms) and rescans on a miss. A bare `read` would use
-    // a stale lockfile (e.g. dangling refs to deleted files → MSB3245).
+    // a Watchman-clock cache hit (~ms) and rescans on a miss. A bare `read`
+    // would use a stale lockfile (e.g. dangling refs to deleted files → MSB3245).
     let lockfile = match LockfileIO::scan_and_write(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
         Ok(l) => l,
         Err(e) => {
@@ -157,9 +157,9 @@ fn run_typecheck(args: &[String]) -> ExitCode {
     inv.print_banner("typecheck");
 
     // Refresh `.csproj`/`.sln` so Rider/IDE consumers see the current
-    // solution without a separate `generate` invocation. The fingerprint
-    // cache short-circuits this in ~ms on no-op runs; full cost only on
-    // actual changes. Same write path `build` uses internally.
+    // solution without a separate `generate` invocation. The Watchman clock
+    // short-circuits this in ~ms on no-op runs; full cost only on actual
+    // changes. Same write path `build` uses internally.
     if let Err(code) = generate_sln(&inv) {
         return code;
     }
@@ -269,7 +269,7 @@ fn parse_variant_args(rest: &[String]) -> (BuildPlatform, BuildConfig, Vec<DllRe
     let platform = match rest.first() {
         Some(s) => BuildPlatform::parse(s).unwrap_or_else(|| {
             die(&format!(
-                "Unknown platform '{}'. Use 'ios', 'android', or 'osx'.",
+                "Unknown platform '{}'. Use 'ios', 'android', 'osx', or 'windows'.",
                 s
             ))
         }),
@@ -372,7 +372,7 @@ COMMANDS:
 
 ARGUMENTS:
   unity-root            Unity project root (defaults to climbing from CWD)
-  platform              ios | android | osx
+  platform              ios | android | osx | windows
   config                prod | dev | editor
 
 OPTIONS:
