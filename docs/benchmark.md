@@ -8,15 +8,15 @@ Two layers of measurement: end-to-end wall-clock (`hyperfine`) and statistical m
 
 Hyperfine, `--warmup 5 --runs 50`:
 
-| Version | Architecture | Warm `typecheck` |
-|---|---|---|
-| Pre-overhaul baseline | 3 mtime-fingerprint caches | 36.6 ± 0.7 ms |
-| v0.3.0 (post-Watchman strip) | Watchman-only, no caches | 875 ms |
-| v0.4.0 (perf passes) | 5 caches, 2-tier invalidation, sidecars | 31.9 ± 0.7 ms |
-| v0.5.0 | 1 scan-cache, mtime-only fingerprint | 35.8 ± 0.9 ms |
-| **v0.6.0 (current)** | **bincode scan-cache + pruned fingerprint + free-fn API** | **~35 ms** |
+| Version | Architecture | Warm `typecheck` | Cold `typecheck` |
+|---|---|---|---|
+| Pre-overhaul baseline | 3 mtime-fingerprint caches | 36.6 ± 0.7 ms | — |
+| v0.3.0 (post-Watchman strip) | Watchman-only, no caches | 875 ms | — |
+| v0.4.0 (perf passes) | 5 caches, 2-tier invalidation, sidecars | 31.9 ± 0.7 ms | — |
+| v0.5.0 | 1 scan-cache, mtime-only fingerprint | 35.8 ± 0.9 ms | — |
+| **v0.6.0 (current)** | **bincode scan-cache + pruned fingerprint + free-fn API** | **37.3 ± 0.7 ms** | **210.8 ± 1.8 ms** |
 
-v0.6.0 keeps the v0.5.0 single-cache model but drops the text codec (~150 LOC) and the redundant `manifest.json` / `packages-lock.json` / `ProjectVersion.txt` mtime entries. The csc-dll-path sidecar moved to the per-user cache, removing it from the project tree entirely.
+v0.6.0 keeps the v0.5.0 single-cache model but drops the text codec (~150 LOC) and the redundant `manifest.json` / `packages-lock.json` / `ProjectVersion.txt` mtime entries. The csc-dll-path sidecar moved to the per-user cache, removing it from the project tree entirely. Warm-path delta is within noise — the hot path is dominated by csc UTD stat fan-out (~30 ms), not cache decode. Cold path (`rm scan-cache.bin` before each run) covers full Watchman enumerate + asmdef JSON parse + Unity install walk + lockfile rewrite + 6-asmdef csc compile.
 
 Run via `just profile` for warm/cold breakdown, `just profile-spans` for per-section tracing.
 
