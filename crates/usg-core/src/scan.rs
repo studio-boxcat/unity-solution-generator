@@ -24,43 +24,7 @@ use std::path::{Path, PathBuf};
 use watchman_client::Error as WatchmanError;
 use watchman_client::prelude::*;
 
-/// Result of a `since` query.
-#[derive(Debug)]
-pub enum Delta {
-    /// Watchman returned `is_fresh_instance` — daemon restart, journal
-    /// loss, or brand-new watch. `paths` is the **full enumeration** of
-    /// matching files (Watchman emits the complete set when it can't
-    /// compute a delta), so callers can use it as a walk substitute and
-    /// skip any separate filesystem traversal. Persist `new_clock` for
-    /// the next call.
-    Fresh {
-        paths: Vec<String>,
-        new_clock: String,
-    },
-    /// Steady-state delta. `paths` is only the project-relative paths
-    /// that changed (added, modified, or deleted — stat each file to
-    /// disambiguate). May be empty (cache hit: nothing relevant changed).
-    Touched {
-        paths: Vec<String>,
-        new_clock: String,
-    },
-}
-
-impl Delta {
-    /// Discard the Fresh/Touched discriminator and return the inner fields.
-    /// Useful when the caller has already decided to treat both variants
-    /// the same (e.g. cold-scan enumeration: a fresh-instance response and
-    /// a since-from-None response both carry the full file set).
-    pub fn into_paths_and_clock(self) -> (Vec<String>, String) {
-        match self {
-            Delta::Fresh { paths, new_clock } | Delta::Touched { paths, new_clock } => {
-                (paths, new_clock)
-            }
-        }
-    }
-}
-
-/// Errors from [`since`].
+/// Errors from [`enumerate`].
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
     /// Watchman CLI not found, daemon socket unreachable, or discovery
@@ -104,85 +68,69 @@ const TOPLEVEL_DIRS: &[&str] = &[
     "ProjectSettings",
 ];
 
-/// Sidecar file holding the last-known watchman sockname. Lives at
-/// `~/.cache/unity-solution-generator/watchman-sock`. Per-user (sockname is
-/// per-user-state in watchman's design).
-fn sockname_sidecar_path() -> Option<std::path::PathBuf> {
-    use crate::paths::host_cache_root_pub;
-    Some(std::path::PathBuf::from(host_cache_root_pub()?).join("unity-solution-generator").join("watchman-sock"))
-}
-
-/// One-time process setup. Resolves the Watchman socket path and stashes it
-/// in `WATCHMAN_SOCK` so subsequent `Connector::connect()` calls skip the
-/// per-call socket-discovery hop. Two-tier lookup:
-///   1. Cached sidecar file (~1 ms). Validated by `connect_or_retry` —
-///      a stale sockname (watchman restarted, sock path changed) trips
-///      retry below.
-///   2. `watchman get-sockname` subprocess (~120 ms). Result written to
-///      the sidecar.
+/// One-time process setup. Computes the Watchman socket path from the
+/// documented per-user convention and stashes it in `WATCHMAN_SOCK` so
+/// `Connector::connect()` skips its internal socket-discovery hop (which
+/// would otherwise spawn `watchman get-sockname` as a subprocess on every
+/// connect — ~120 ms on macOS).
 ///
-/// Idempotent — no-op if `WATCHMAN_SOCK` is already set, or if neither
-/// lookup succeeds (the connector still works without it, just slower).
+/// Conventions ([watchman docs]):
+/// - Unix:    `$XDG_STATE_HOME/watchman/<user>-state/sock`,
+///            fallback `$HOME/.local/state/watchman/<user>-state/sock`.
+/// - Windows: named pipe `\\.\pipe\watchman-<user>`.
 ///
-/// Why: the `watchman_client` crate's `Connector` spawns
-/// `watchman get-sockname` on every `connect()` unless `WATCHMAN_SOCK` is
-/// in env. A single CLI invocation issues multiple `since()` calls, so the
-/// 120 ms cost compounds without this cache.
+/// User has overridden `--sockname` in their watchman config? Our path
+/// won't exist on disk; we leave `WATCHMAN_SOCK` unset and `watchman_client`
+/// falls back to its own (slower) discovery, which honors the config.
+///
+/// Idempotent — no-op if `WATCHMAN_SOCK` is already set.
+///
+/// [watchman docs]: https://facebook.github.io/watchman/docs/cli-options#unix-domain-sockets
 pub fn init_socket_env() {
     if std::env::var_os("WATCHMAN_SOCK").is_some() {
         return;
     }
-    // Tier 1: sidecar.
-    if let Some(sidecar) = sockname_sidecar_path() {
-        if let Ok(s) = std::fs::read_to_string(&sidecar) {
-            let s = s.trim();
-            if !s.is_empty() && std::path::Path::new(s).exists() {
-                // SAFETY: top-of-main, single-threaded.
-                unsafe { std::env::set_var("WATCHMAN_SOCK", s); }
-                return;
-            }
-        }
-    }
-    // Tier 2: subprocess.
-    let Ok(out) = std::process::Command::new("watchman").arg("get-sockname").output() else {
+    let Some(path) = conventional_sock_path() else {
         return;
     };
-    if !out.status.success() {
+    // Validate the path exists before setting the env var. A stale convention
+    // (e.g. user uninstalled watchman) would otherwise wedge `Connector::connect()`
+    // with a confusing socket-error rather than the cleaner discovery fallback.
+    if !std::path::Path::new(&path).exists() {
         return;
     }
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-        return;
-    };
-    let Some(sock) = v.get("sockname").and_then(|s| s.as_str()) else {
-        return;
-    };
-    // SAFETY: called before any threads are spawned (top of main()).
+    // SAFETY: called at the top of main() before any threads are spawned.
+    // `set_var` is unsound under concurrent reads on POSIX; that's why this
+    // function explicitly documents the "single-threaded only" contract.
     unsafe {
-        std::env::set_var("WATCHMAN_SOCK", sock);
+        std::env::set_var("WATCHMAN_SOCK", path);
     }
-    // Best-effort sidecar write — failure just means next invocation pays the
-    // subprocess cost again.
-    if let Some(sidecar) = sockname_sidecar_path() {
-        if let Some(parent) = sidecar.parent() {
-            let _ = std::fs::create_dir_all(parent);
+}
+
+/// Per-platform default Watchman socket path. Mirrors `compute_user_state_dir()`
+/// in watchman's C++ source — keep in sync if upstream conventions change.
+fn conventional_sock_path() -> Option<String> {
+    if cfg!(target_os = "windows") {
+        // Windows uses a named pipe under \\.\pipe\watchman-<user>.
+        let user = std::env::var("USERNAME").ok().filter(|s| !s.is_empty())?;
+        return Some(format!(r"\\.\pipe\watchman-{}", user));
+    }
+    let user = std::env::var("USER").ok().filter(|s| !s.is_empty())?;
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Some(format!("{}/watchman/{}-state/sock", xdg, user));
         }
-        let _ = std::fs::write(&sidecar, sock);
     }
+    let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
+    Some(format!("{}/.local/state/watchman/{}-state/sock", home, user))
 }
 
-/// Called if a Watchman connect/query fails — the cached sockname may be
-/// stale (daemon restarted with a new sock). Wiping the sidecar forces the
-/// next `init_socket_env` to re-spawn `watchman get-sockname`.
-pub fn invalidate_sockname_cache() {
-    if let Some(sidecar) = sockname_sidecar_path() {
-        let _ = std::fs::remove_file(sidecar);
-    }
-}
-
-/// Query Watchman for everything that changed under `project_root` since
-/// `prev_clock`. Pass `None` for the first call on a project (returns
-/// `Fresh`); pass `Some(clock)` from a prior call for an incremental delta.
-pub fn since(project_root: &Path, prev_clock: Option<&str>) -> Result<Delta, ScanError> {
+/// Enumerate every project-tree file matching our suffix filter under
+/// `Assets/`, `Packages/`, `Library/PackageCache/`, `ProjectSettings/`.
+/// Watchman returns project-relative paths (forward-slash separators).
+/// One query per invocation; no clock cursor tracking — invalidation lives
+/// in the caller's mtime fingerprint over the persisted enumeration.
+pub fn enumerate(project_root: &Path) -> Result<Vec<String>, ScanError> {
     // `enable_all` covers IO + time; `watchman_client` internally uses
     // `tokio::time::timeout` on the connect path in newer versions, and the
     // cost of enabling the time driver on a one-shot runtime is negligible.
@@ -190,14 +138,11 @@ pub fn since(project_root: &Path, prev_clock: Option<&str>) -> Result<Delta, Sca
         .enable_all()
         .build()
         .map_err(|e| ScanError::Query(anyhow::Error::new(e).context("build tokio runtime")))?;
-    rt.block_on(since_inner(project_root, prev_clock))
+    rt.block_on(enumerate_inner(project_root))
 }
 
-async fn since_inner(
-    project_root: &Path,
-    prev_clock: Option<&str>,
-) -> Result<Delta, ScanError> {
-    let _span = tracing::info_span!("scan.watchman_query", fresh = prev_clock.is_none()).entered();
+async fn enumerate_inner(project_root: &Path) -> Result<Vec<String>, ScanError> {
+    let _span = tracing::info_span!("scan.watchman_query").entered();
 
     let client = Connector::new().connect().await.map_err(map_connect_err)?;
 
@@ -232,7 +177,6 @@ async fn since_inner(
     ]);
 
     let request = QueryRequestCommon {
-        since: prev_clock.map(|c| Clock::Spec(ClockSpec::StringClock(c.to_owned()))),
         expression: Some(expression),
         ..Default::default()
     };
@@ -242,38 +186,14 @@ async fn since_inner(
         .await
         .map_err(|e| ScanError::Query(anyhow::Error::new(e)))?;
 
-    let new_clock = clock_to_string(result.clock)?;
-
     // Watchman returns paths relative to the watch root. With `relative_root`
-    // auto-set from `ResolvedRoot`, they're project-relative — same shape our
-    // scan-cache uses.
-    let paths: Vec<String> = result
+    // auto-set from `ResolvedRoot`, they're project-relative.
+    Ok(result
         .files
         .unwrap_or_default()
         .into_iter()
         .filter_map(|row| row.name.into_inner().into_os_string().into_string().ok())
-        .collect();
-
-    if result.is_fresh_instance {
-        Ok(Delta::Fresh { paths, new_clock })
-    } else {
-        Ok(Delta::Touched { paths, new_clock })
-    }
-}
-
-fn clock_to_string(clock: Clock) -> Result<String, ScanError> {
-    match clock {
-        Clock::Spec(ClockSpec::StringClock(s)) => Ok(s),
-        // UnixTimestamp clocks aren't normally emitted; the server returns
-        // a string clock for our request. Stringify defensively so we don't
-        // drop data on the floor if it ever happens.
-        Clock::Spec(ClockSpec::UnixTimestamp(t)) => Ok(t.to_string()),
-        // We don't request SCM-aware queries; receiving one would indicate
-        // a server-config mismatch. Refuse to store a partial cursor.
-        Clock::ScmAware(_) => Err(ScanError::Query(anyhow::anyhow!(
-            "watchman returned an SCM-aware clock; not requested",
-        ))),
-    }
+        .collect())
 }
 
 /// Watchman returns very different errors for "binary not installed"
@@ -283,55 +203,22 @@ fn clock_to_string(clock: Clock) -> Result<String, ScanError> {
 fn map_connect_err(e: WatchmanError) -> ScanError {
     match e {
         WatchmanError::ConnectionDiscovery { .. } | WatchmanError::Connect { .. } => {
-            // Sidecar sockname may be stale (daemon restarted with new sock
-            // path). Nuke it so the next invocation re-runs `watchman get-sockname`.
-            invalidate_sockname_cache();
             ScanError::Unavailable
         }
         other => ScanError::Query(anyhow::Error::new(other)),
     }
 }
 
-/// Test whether a Watchman hint is relevant to the project / lockfile scan.
-/// Used by `project_scanner` to decide whether a `Touched` delta requires a
-/// cache invalidation.
-pub fn hint_is_relevant(hint: &str) -> bool {
-    hint.ends_with(".cs")
-        || hint.ends_with(".asmdef")
-        || hint.ends_with(".asmref")
-        || hint.ends_with(".dll")
-        || hint.ends_with("manifest.json")
-        || hint.ends_with("packages-lock.json")
-        || hint.ends_with("ProjectVersion.txt")
-        || hint.ends_with("ProjectSettings.asset")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hint_relevance_filters_noise() {
-        assert!(hint_is_relevant("Assets/Foo/Bar.cs"));
-        assert!(hint_is_relevant("Packages/com.unity.x/Runtime.asmdef"));
-        assert!(hint_is_relevant("Library/PackageCache/x@1.0.0/x.dll"));
-        assert!(hint_is_relevant("Packages/manifest.json"));
-        assert!(hint_is_relevant("Packages/packages-lock.json"));
-        assert!(hint_is_relevant("ProjectSettings/ProjectVersion.txt"));
-        assert!(hint_is_relevant("ProjectSettings/ProjectSettings.asset"));
-
-        // Irrelevant — Unity scene/asset files that don't affect csproj content.
-        assert!(!hint_is_relevant("Assets/Foo.prefab"));
-        assert!(!hint_is_relevant("Assets/Foo.meta"));
-        assert!(!hint_is_relevant("Library/Bee/Build.txt"));
-    }
 
     /// Integration test against a real Watchman daemon. Gated `#[ignore]` so
     /// `cargo test` is green on machines without Watchman; run via
     /// `cargo test --ignored scan::` to exercise.
     #[test]
     #[ignore = "requires watchman daemon"]
-    fn since_returns_fresh_then_touched() {
+    fn enumerate_returns_project_files() {
         use std::fs;
         use tempfile::tempdir;
 
@@ -347,31 +234,11 @@ mod tests {
         .unwrap();
         fs::write(root.join("Assets/Foo.cs"), "// stub\n").unwrap();
 
-        let first = since(root, None).expect("watchman should be running");
-        let clock = match first {
-            Delta::Fresh { paths, new_clock } => {
-                assert!(
-                    paths.iter().any(|p| p.ends_with("Foo.cs")),
-                    "Fresh paths should enumerate Foo.cs, got {paths:?}"
-                );
-                new_clock
-            }
-            Delta::Touched { .. } => panic!("expected Fresh on first call"),
-        };
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        fs::write(root.join("Assets/Foo.cs"), "// changed\n").unwrap();
-
-        let second = since(root, Some(&clock)).expect("watchman should be running");
-        match second {
-            Delta::Touched { paths, .. } => {
-                assert!(
-                    paths.iter().any(|p| p.ends_with("Foo.cs")),
-                    "expected touched path for Foo.cs, got {paths:?}",
-                );
-            }
-            Delta::Fresh { .. } => panic!("expected Touched on second call"),
-        }
+        let paths = enumerate(root).expect("watchman should be running");
+        assert!(
+            paths.iter().any(|p| p.ends_with("Foo.cs")),
+            "enumerate should return Foo.cs, got {paths:?}"
+        );
 
         let _ = std::process::Command::new("watchman")
             .arg("watch-del")
@@ -380,8 +247,8 @@ mod tests {
     }
 
     #[test]
-    fn since_errors_on_nonexistent_path_without_panicking() {
-        let result = since(Path::new("/nonexistent/usg-test-path-xyz"), None);
+    fn enumerate_errors_on_nonexistent_path_without_panicking() {
+        let result = enumerate(Path::new("/nonexistent/usg-test-path-xyz"));
         assert!(result.is_err());
     }
 }

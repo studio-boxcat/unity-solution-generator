@@ -115,25 +115,30 @@ Full reference: [[library-api.md]].
 
 ```mermaid
 flowchart LR
-  inv[CLI invocation] --> ulf[Load lockfile]
-  ulf --> uchk{lockfile.unity-version<br/>== ProjectVersion.txt?<br/>+ .lock-watchman-clock<br/>delta is irrelevant?}
-  uchk -->|both yes| skipu[Reuse lockfile as-is]
-  uchk -->|either no| uscan[Unity install fs walk<br/>+ Watchman project query] --> writelf[Write lockfile<br/>+ clock sidecar]
-  skipu --> proj
-  writelf --> proj
-  proj[scan::since<br/>None] --> derive[Re-derive asmdef records<br/>via rayon JSON parse]
-  derive --> gen[generate / typecheck]
+  inv[CLI invocation] --> chk{scan-cache mtime<br/>fingerprint matches?}
+  chk -->|yes| reuse[Reuse cached scan<br/>+ existing lockfile]
+  chk -->|no| watchman[scan::enumerate<br/>Watchman query] --> derive[Parse asmdefs<br/>+ Unity install walk]
+  derive --> write[Write scan-cache<br/>+ lockfile]
+  reuse --> gen[generate / typecheck]
+  write --> gen
 ```
 
-**Project tree (Watchman, required dependency):**
+**Single cache, mtime-fingerprinted (v0.5.0):**
+- One persisted file: `scan-cache` (text format, grep-debuggable, under `<generator_root>`).
+- Header section `[mtimes]` lists every path the scan content depends on with ns-mtimes — invalidation is pure `stat` of those paths. On meow-tower: ~40 entries.
+- Cache miss → one Watchman `enumerate(project_root)` call returns the full project file list; asmdef JSON parsed in parallel via `rayon`.
+- The lockfile (`csproj.lock`) shares the same invalidation: `LockfileIO::scan_and_write` validates by checking `unity-version` against `ProjectVersion.txt` AND `ProjectScanner::scan_cache_fingerprint_matches`. When both hold, the existing lockfile is reused as-is.
+
+**Watchman scope (required dependency):**
 - Watchman roots at the project. Query scoped to `Assets/`, `Packages/`, `Library/PackageCache/`, `ProjectSettings/` via the `DirName` expression.
 - Suffix-filtered to `cs`, `asmdef`, `asmref`, `dll`, `json`, `asset`, `txt`.
-- No on-disk scan-cache. Each `ProjectScanner::scan` issues one `since(None)` query and re-parses asmdef JSONs in parallel via `rayon`. The per-asmdef parse is microseconds; eliminating the cache trades ~ms of warm-path time for ~200 fewer LOC and one fewer invalidation surface.
-- Lockfile-level invalidation IS cached, via the `.lock-watchman-clock` sidecar — `LockfileIO::scan_and_write` queries `since(prev_clock)` and short-circuits when no project-relevant path was touched.
+- One `enumerate()` call per cache-miss invocation. No clock cursor tracking — invalidation lives in the mtime fingerprint, not in Watchman state.
 
 **Unity install (one-shot, not watched):**
 - Walked once per editor version using `std::fs::read_dir` recursion (via `walkdir` for the NetStandard subtree). Result is cached *inside* the lockfile (the refs sections themselves are the cache).
 - Invalidation: `lockfile.unity_version != ProjectVersion.txt` content → rescan.
+
+**Fingerprint paths:** top-level dirs (`Assets`, `Packages`, `Library/PackageCache`, `ProjectSettings`), every asmdef directory + ancestors, every `.asmdef`/`.asmref` file, plus the lockfile-input files `ProjectVersion.txt` / `manifest.json` / `packages-lock.json`. Directory mtimes catch add/remove; file mtimes catch in-place rewrites (which don't bump parent-dir mtime on POSIX).
 
 The Unity Editor install is intentionally NOT watched: it's a multi-GB write-once-per-version tree, and Watchman's cold-crawl on Windows can hit minutes (Metro #959). Versioning by string equality is correct and cheap.
 
@@ -161,7 +166,8 @@ All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored
 ```
 Library/UnitySolutionGenerator/
   csproj.lock                     ← lockfile (user-visible, may be checked in)
-  .lock-watchman-clock            ← opaque Watchman clock for lockfile invalidation
+  scan-cache                      ← project scan + mtime fingerprint (gitignored)
+  csc-dll-path                    ← cached `dotnet --list-sdks` result (gitignored)
   ios-editor/                     ← `generate` output: .csproj + .sln + Directory.Build.props
     obj/Debug/<asmdef>.dll        ←   `build` + `typecheck` shared output (see below)
     obj/Debug/<asmdef>.dll.usg-stamp ← `typecheck` ownership marker
@@ -198,11 +204,13 @@ One `pub const u32` constant in `lib.rs`:
 |---|---|---|
 | `LOCKFILE_VERSION` | `csproj.lock` | rarely; user-visible, may be checked in |
 
-`LOCKFILE_VERSION = 2` reflects the addition of `[refs.playback.windows]` for Windows build-target support. Older `v1` lockfiles re-scan cold on first read. No migration code path — Unity-version equality + Watchman delta drive the rescan automatically.
+`LOCKFILE_VERSION = 2` reflects the addition of `[refs.playback.windows]` for Windows build-target support. Older `v1` lockfiles re-scan cold on first read. No migration code path — Unity-version equality + scan-cache fingerprint drive the rescan automatically.
 
 Typecheck DLLs carry their own `.usg-stamp` sidecar that pins per-emit ownership; foreign writers (e.g. `dotnet build`) trip the next typecheck into a recompile. Use `rm -rf Library/UnitySolutionGenerator/<variant>/obj/Debug/` for a forced rebuild.
 
-The Watchman clock sidecar (`.lock-watchman-clock`) is unversioned by design — Watchman tokens are opaque, and an unrecognised cursor surfaces as `Delta::Fresh` which itself drives a clean rescan.
+The `scan-cache` file is unversioned by design — a malformed header (missing `[mtimes]` section) trips the loader's `None` return, which forces a full re-derive. Force a rescan by deleting `Library/UnitySolutionGenerator/scan-cache`.
+
+**When the mtime fingerprint is insufficient.** Backward-dated mtimes from operations that preserve timestamps (`tar -x`, `cp --preserve=timestamps`, `git restore --source` of older blobs, `rsync --times`) leave the fingerprint matching despite content changes. The escape hatch is manual: `rm Library/UnitySolutionGenerator/scan-cache`. Pre-overhaul ran on the same mtime-fingerprint model for 8 months without trouble; the sibling project `unity-assetdb` made the symmetric choice (Watchman-only, no mtime).
 
 ## `typecheck` deeper
 

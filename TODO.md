@@ -4,7 +4,14 @@
 
 ## Deferred
 
-(none — all open items from the typecheck overhaul session are closed.)
+Follow-up candidates surfaced during the v0.5.0 cache-simplification overhaul (adversarial review). All non-blocking; pick up if the codebase touches the area.
+
+- **Collapse unit structs to module-level free functions.** `ProjectScanner`, `LockfileIO`, `LockfileScanner`, `SolutionGenerator` are zero-field unit structs with a single `impl` block of free associated fns. Convert to `project_scanner::scan(...)`, `lockfile::scan_and_write(...)`, etc. — matches `typecheck::run` and `scan::enumerate` which already are free fns. Removes meaningless `new()` calls. Breaking API change for any downstream Rust consumer; FFI surface unaffected.
+- **Move `csc-dll-path` sidecar out of project tree.** It's a per-host (`dotnet --list-sdks`) artifact polluting `Library/UnitySolutionGenerator/`. Belongs under `usg_cache_dir(<unity-version>)/csc-dll-path` or `$XDG_CACHE_HOME/usg/csc-dll-path` — same place `package_cache.rs` already writes.
+- **Drop the duplicate `scan_err_to_generator` helpers.** Two near-identical impls in `lockfile_scanner.rs` and `project_scanner.rs`. Merge into one `pub(crate) fn` in `scan.rs`.
+- **Bincode-ify `scan-cache`.** ~150 LOC of text codec (`encode_asmdef_record`/`decode_asmdef_record`/`split_semi` etc.) for a format no human edits. `bincode = "2"` already in the workspace deps; replacing the codec drops ~120 LOC.
+- **Persist `.asmdef`/`.asmref` paths in `scan-cache`.** `collect_mtimes` currently `read_dir`s each asmdef directory to find them. Storing the path list in the cache header skips that walk on warm path (~0.5 ms saved).
+- **Drop `ProjectVersion.txt` from `scan-cache` fingerprint.** Lockfile owns that invariant via its `unity-version` check; the duplicate stat is redundant. (Small win, breaks the "scan-cache fingerprint is the single invalidation signal" mental model — only worth it if we're sure.)
 
 ## Historical notes
 

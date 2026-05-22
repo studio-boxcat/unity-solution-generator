@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use crate::error::{GeneratorError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
 use crate::paths::{join_path, mtime_nanos_for, parent_directory};
-use crate::scan::{Delta, ScanError, hint_is_relevant, since};
+use crate::scan::{ScanError, enumerate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectCategory {
@@ -123,100 +123,44 @@ pub struct ScanResult {
 
 pub struct ProjectScanner;
 
-/// Compact on-disk scan cache: bincode-serialized `(watchman_clock, ScanResult)`.
-/// Lives at `<generator_root>/scan-cache.bin`. Bincode keeps the read+parse
-/// cost in the low-ms range on meow-tower-sized projects (~13 asmdefs) vs.
-/// the ~10ms we'd pay re-parsing asmdef JSON.
-const SCAN_CACHE_FILE: &str = "scan-cache.bin";
+/// On-disk scan cache. Text format (grep-debuggable). Lives at
+/// `<generator_root>/scan-cache`. Single-tier invalidation via the embedded
+/// mtime fingerprint.
+const SCAN_CACHE_FILE: &str = "scan-cache";
 
 impl ProjectScanner {
-    /// Watchman-driven scan with a fast-path on-disk cache. Existing API:
-    /// returns just the [`ScanResult`]. Use [`scan_with_freshness`] to also
-    /// learn whether the result came from a cache hit (which lets callers
-    /// skip downstream Watchman queries — see `LockfileIO::load_or_skip`).
+    /// Watchman-driven scan with a fast-path on-disk cache. Single-tier
+    /// invalidation: stat the persisted mtime fingerprint (~40 paths) and
+    /// reuse the cached scan if all match. Cache miss → one Watchman
+    /// enumeration query + per-asmdef JSON parse.
+    ///
+    /// The fingerprint covers top-level dirs (add/remove), every asmdef
+    /// directory + ancestors, every `.asmdef`/`.asmref` file (in-place edits),
+    /// plus `ProjectVersion.txt` / `manifest.json` / `packages-lock.json`
+    /// (lockfile inputs). On meow-tower this hits ~1–2 ms warm.
     pub fn scan(project_root: &str, generator_root: &str) -> Result<ScanResult> {
-        Ok(Self::scan_with_freshness(project_root, generator_root)?.0)
-    }
-
-    /// Returns `(scan, cache_hit)`. When `cache_hit` is `true`, the cached
-    /// scan was validated as still-fresh — downstream caches (notably the
-    /// lockfile) can short-circuit their own validation.
-    ///
-    /// Two-tier invalidation:
-    /// - **Tier 0 (mtime fingerprint):** stat the persisted set of
-    ///   contributing paths (asmdef/asmref files + their parent dirs). All
-    ///   ns-mtimes match the cached values → trust the cache, skip Watchman
-    ///   entirely. Typical cost on meow-tower: ~1–2 ms (≈40 stats × ~30 µs).
-    /// - **Tier 1 (Watchman):** if tier-0 fails, query
-    ///   `since(prev_clock)`. Authoritative — catches changes the mtime
-    ///   fingerprint can miss (e.g. file content rewrites that preserve
-    ///   parent-dir mtime). Cost: ~14 ms warm round-trip.
-    ///
-    /// On meow-tower-sized projects this brings warm-no-op from ~50 ms
-    /// (Watchman-only) to ~36 ms (mtime tier-0 hits the common case),
-    /// matching the pre-overhaul fingerprint cache's wall-clock.
-    pub fn scan_with_freshness(
-        project_root: &str,
-        generator_root: &str,
-    ) -> Result<(ScanResult, bool)> {
         let cache_path = join_path(
             project_root,
             &format!("{}/{}", generator_root, SCAN_CACHE_FILE),
         );
 
-        // Try tier-0 (mtime fingerprint) then tier-1 (Watchman).
         if let Some((header, cached_scan)) = load_cached_scan(&cache_path) {
             if mtimes_unchanged(project_root, &header.mtimes) {
-                return Ok((cached_scan, true));
-            }
-            if let Ok(delta) = since(Path::new(project_root), Some(&header.watchman_clock)) {
-                if let Delta::Touched { paths, new_clock } = delta {
-                    if !paths.iter().any(|p| hint_is_relevant(p)) {
-                        // Rewrite cache with the advancing clock + refreshed
-                        // mtime fingerprint so the next call's tier-0 check
-                        // picks up where this one left off.
-                        let mtimes = collect_mtimes(project_root, &cached_scan);
-                        write_cached_scan(
-                            &cache_path,
-                            &CacheHeader {
-                                watchman_clock: new_clock,
-                                mtimes,
-                            },
-                            &cached_scan,
-                        );
-                        return Ok((cached_scan, true));
-                    }
-                }
-                // Fresh delta or relevant change → fall through to re-derive.
+                return Ok(cached_scan);
             }
         }
 
         let scan = Self::scan_uncached(project_root)?;
-        // Capture the clock as part of the re-derive — `since(None)` returns
-        // the current clock alongside the full enumeration.
-        if let Ok(delta) = since(Path::new(project_root), None) {
-            let (_, new_clock) = delta.into_paths_and_clock();
-            let mtimes = collect_mtimes(project_root, &scan);
-            write_cached_scan(
-                &cache_path,
-                &CacheHeader {
-                    watchman_clock: new_clock,
-                    mtimes,
-                },
-                &scan,
-            );
-        }
-        Ok((scan, false))
+        let mtimes = collect_mtimes(project_root, &scan);
+        write_cached_scan(&cache_path, &CacheHeader { mtimes }, &scan);
+        Ok(scan)
     }
 
     fn scan_uncached(project_root: &str) -> Result<ScanResult> {
         let _span = tracing::info_span!("project_scanner.scan").entered();
 
-        // One Watchman query. `since(None)` returns the full file enumeration
-        // — same response shape as a `Fresh` instance. Result paths are
-        // project-relative with forward-slash separators.
-        let delta = since(Path::new(project_root), None).map_err(scan_err_to_generator)?;
-        let (paths, _clock) = delta.into_paths_and_clock();
+        // One Watchman query — returns the full file enumeration.
+        let paths = enumerate(Path::new(project_root)).map_err(scan_err_to_generator)?;
         let (cs_dirs, asmdef_paths, asmref_paths) = partition_paths(&paths);
 
         // Parse asmdefs + asmrefs in parallel. Most projects have <100 of
@@ -272,22 +216,17 @@ impl ProjectScanner {
     }
 }
 
-/// Persisted invariants alongside the cached scan. The `mtimes` table is
-/// tier-0 invalidation; `watchman_clock` is tier-1 fallback.
+/// Persisted alongside the cached scan: project-relative paths → ns-mtimes
+/// at cache-write time. The cache is fresh iff every path's current mtime
+/// equals the cached value. On meow-tower: ~40 entries.
 struct CacheHeader {
-    watchman_clock: String,
-    /// Project-relative path → ns-mtime at cache-write time. Paths are
-    /// asmdef/asmref files (catches in-place edits) + their parent dirs
-    /// (catches add/remove). On meow-tower: ~40 entries.
     mtimes: Vec<(String, u128)>,
 }
 
 /// Tab-delimited text format keyed for grep-debuggability. One line per
-/// asmdef record; header carries `watchman-clock` + an `[mtimes]` section
-/// for tier-0 fingerprint invalidation.
+/// asmdef record; header carries the `[mtimes]` fingerprint section.
 fn load_cached_scan(cache_path: &str) -> Option<(CacheHeader, ScanResult)> {
     let content = read_file(cache_path).ok()?;
-    let mut clock: Option<String> = None;
     let mut mtimes: Vec<(String, u128)> = Vec::new();
     let mut asm_def_by_name: HashMap<String, AsmDefRecord> = HashMap::new();
     let mut dirs_by_project: HashMap<String, Vec<String>> = HashMap::new();
@@ -297,10 +236,6 @@ fn load_cached_scan(cache_path: &str) -> Option<(CacheHeader, ScanResult)> {
     let mut section: Option<Sec> = None;
     for line in content.split('\n') {
         if line.is_empty() { continue; }
-        if let Some(rest) = line.strip_prefix("# watchman-clock:") {
-            clock = Some(rest.trim().to_string());
-            continue;
-        }
         if line.starts_with('#') { continue; }
         match line {
             "[mtimes]" => { section = Some(Sec::Mtimes); continue; }
@@ -331,8 +266,12 @@ fn load_cached_scan(cache_path: &str) -> Option<(CacheHeader, ScanResult)> {
             None => {}
         }
     }
+    // mtimes section must be present for the cache to be usable.
+    if mtimes.is_empty() {
+        return None;
+    }
     Some((
-        CacheHeader { watchman_clock: clock?, mtimes },
+        CacheHeader { mtimes },
         ScanResult { asm_def_by_name, dirs_by_project, unresolved_dirs },
     ))
 }
@@ -340,7 +279,6 @@ fn load_cached_scan(cache_path: &str) -> Option<(CacheHeader, ScanResult)> {
 fn write_cached_scan(cache_path: &str, header: &CacheHeader, scan: &ScanResult) {
     let mut s = String::with_capacity(8 * 1024);
     s.push_str("# scan-cache — auto-generated, do not edit\n");
-    s.push_str(&format!("# watchman-clock: {}\n", header.watchman_clock));
     s.push_str("[mtimes]\n");
     for (p, m) in &header.mtimes {
         s.push_str(p);
@@ -394,9 +332,18 @@ fn write_cached_scan(cache_path: &str, header: &CacheHeader, scan: &ScanResult) 
 fn collect_mtimes(project_root: &str, scan: &ScanResult) -> Vec<(String, u128)> {
     use std::collections::BTreeSet;
     let mut paths: BTreeSet<String> = BTreeSet::new();
+    // Top-level dir mtimes: bump on entry add/remove.
     paths.insert("Assets".to_string());
     paths.insert("Packages".to_string());
     paths.insert("Library/PackageCache".to_string());
+    paths.insert("ProjectSettings".to_string());
+    // File-level mtimes for files the lockfile derives from. These rewrites
+    // preserve parent-dir mtime on POSIX, so the dir entry above doesn't
+    // catch them — file-level tracking is the only signal.
+    let mut file_paths: BTreeSet<String> = BTreeSet::new();
+    file_paths.insert("ProjectSettings/ProjectVersion.txt".to_string());
+    file_paths.insert("Packages/manifest.json".to_string());
+    file_paths.insert("Packages/packages-lock.json".to_string());
     let mut asmdef_dirs: BTreeSet<String> = BTreeSet::new();
     for record in scan.asm_def_by_name.values() {
         asmdef_dirs.insert(record.directory.clone());
@@ -427,8 +374,9 @@ fn collect_mtimes(project_root: &str, scan: &ScanResult) -> Vec<(String, u128)> 
         })
         .collect();
 
-    // Per-file mtimes for asmdef/asmref content edits.
-    let mut file_paths: BTreeSet<String> = BTreeSet::new();
+    // Per-file mtimes for asmdef/asmref content edits (in-place file rewrites
+    // bump file mtime but not parent-dir mtime). Append to the file_paths set
+    // seeded above with lockfile-input files.
     for dir in &asmdef_dirs {
         let full_dir = if dir.is_empty() {
             project_root.to_string()
@@ -453,6 +401,25 @@ fn collect_mtimes(project_root: &str, scan: &ScanResult) -> Vec<(String, u128)> 
         out.push((p, mtime_nanos_for(&full).unwrap_or(0)));
     }
     out
+}
+
+/// Check whether the persisted `scan-cache` fingerprint matches the current
+/// filesystem state. Returns `false` if the cache is missing, malformed, or
+/// any tracked path's mtime has changed. Used by `LockfileIO::scan_and_write`
+/// as its own invalidation signal — when the scan cache is fresh, the lockfile
+/// derived from the same scan state is also fresh.
+pub(crate) fn scan_cache_fingerprint_matches(
+    project_root: &str,
+    generator_root: &str,
+) -> bool {
+    let cache_path = join_path(
+        project_root,
+        &format!("{}/{}", generator_root, SCAN_CACHE_FILE),
+    );
+    let Some((header, _)) = load_cached_scan(&cache_path) else {
+        return false;
+    };
+    mtimes_unchanged(project_root, &header.mtimes)
 }
 
 /// Tier-0 invalidation check: all recorded paths still have their cached

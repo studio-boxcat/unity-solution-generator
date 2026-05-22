@@ -22,26 +22,12 @@ use crate::io::{file_exists, list_directory, read_file};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{join_path, resolve_real_path, unity_data_subpath, unity_install_root};
 use crate::project_scanner::parse_version_defines;
-use crate::scan::{ScanError, since};
+use crate::scan::{ScanError, enumerate};
 
 pub struct LockfileScanner;
 
-/// Output of [`LockfileScanner::scan_with_artifacts`]: the lockfile plus the
-/// Watchman clock at the moment the project scan completed. Callers persist
-/// the clock for delta-based invalidation on subsequent invocations.
-pub struct ScannedLockfile {
-    pub lockfile: Lockfile,
-    /// Opaque Watchman clock cursor captured during the project enumeration.
-    /// Pass back as `prev_clock` on the next `since()` to detect deltas.
-    pub watchman_clock: String,
-}
-
 impl LockfileScanner {
     pub fn scan(project_root: &str) -> Result<Lockfile> {
-        Self::scan_with_artifacts(project_root).map(|s| s.lockfile)
-    }
-
-    pub fn scan_with_artifacts(project_root: &str) -> Result<ScannedLockfile> {
         let _span = tracing::info_span!("lockfile_scanner.scan").entered();
         let (version, unity_path) = resolve_unity_path(project_root)?;
         let _unity_span = tracing::info_span!("lockfile_scanner.unity_install").entered();
@@ -171,7 +157,7 @@ impl LockfileScanner {
         drop(_unity_span);
         let _proj_span = tracing::info_span!("lockfile_scanner.project_walk").entered();
 
-        let (all_paths, watchman_clock) = enumerate_project_paths(project_root)?;
+        let all_paths = enumerate_project_paths(project_root)?;
         let mut by_root: [Vec<&str>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for p in &all_paths {
             let n = path_filename(p);
@@ -314,10 +300,7 @@ impl LockfileScanner {
             defines: all_defines,
             defines_scripting: scripting_defines,
         };
-        Ok(ScannedLockfile {
-            lockfile,
-            watchman_clock,
-        })
+        Ok(lockfile)
     }
 }
 
@@ -380,10 +363,9 @@ fn walk_files(
 /// This shares the same Watchman watch as `project_scanner` — the daemon
 /// dedupes watches per project, so two callers in one CLI invocation cost no
 /// more than one cold-crawl on the first call.
-fn enumerate_project_paths(project_root: &str) -> Result<(Vec<String>, String)> {
+fn enumerate_project_paths(project_root: &str) -> Result<Vec<String>> {
     let _s = tracing::info_span!("lockfile_scanner.watchman_query").entered();
-    let delta = since(Path::new(project_root), None).map_err(scan_to_generator)?;
-    Ok(delta.into_paths_and_clock())
+    enumerate(Path::new(project_root)).map_err(scan_to_generator)
 }
 
 /// Map `scan::ScanError` into the crate-level error, preserving the

@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
-use crate::error::{GeneratorError, LockfileError, Result};
+use crate::error::{LockfileError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
 use crate::lockfile_scanner::LockfileScanner;
-use crate::paths::{join_path, lockfile_path, parent_directory, read_unity_version};
-use crate::scan::{Delta, ScanError, hint_is_relevant, since};
+use crate::paths::{lockfile_path, parent_directory, read_unity_version};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DllRef {
@@ -162,93 +160,42 @@ impl Lockfile {
 
 pub struct LockfileIO;
 
-/// Sidecar file storing the Watchman clock at the time the lockfile was last
-/// written. Lives next to `csproj.lock` in the generator root. Single line,
-/// opaque token — never parsed.
-const CLOCK_SIDECAR: &str = ".lock-watchman-clock";
-
 impl LockfileIO {
-    /// Scan + write the lockfile (creating the generator dir if needed).
-    /// `generator_root` controls where `csproj.lock` and the `.lock-watchman-clock`
-    /// sidecar live; pass [`DEFAULT_GENERATOR_ROOT`] for the standard layout.
+    /// Load the lockfile, returning a fresh one if the on-disk version is
+    /// missing, malformed, or stale. Freshness criteria:
+    ///   1. `lockfile.unity-version` matches `ProjectSettings/ProjectVersion.txt`
+    ///   2. The `scan-cache` mtime fingerprint validates (no project-relevant
+    ///      file has changed since the scan was written, which means the
+    ///      derived lockfile is also still valid).
     ///
-    /// Short-circuits in two steps:
-    ///   1. Read the existing lockfile + sidecar clock.
-    ///   2. Query Watchman with the sidecar clock — if no project-relevant
-    ///      path was touched AND the lockfile's `unity-version` still matches
-    ///      `ProjectSettings/ProjectVersion.txt`, return the cached lockfile.
-    /// Otherwise full rescan via [`LockfileScanner`] + rewrite both files.
+    /// On miss → full rescan via [`LockfileScanner::scan`] + atomic rewrite.
+    /// Watchman is invoked indirectly via the rescan path; the cache-hit path
+    /// is pure mtime-stat (sub-ms).
     pub fn scan_and_write(project_root: &str, generator_root: &str) -> Result<Lockfile> {
         let path = lockfile_path(project_root, generator_root);
-        let generator_dir = join_path(project_root, generator_root);
-        let clock_path = join_path(&generator_dir, CLOCK_SIDECAR);
         create_dir_all(parent_directory(&path));
 
-        // Fast path: lockfile and sidecar clock both exist, Watchman delta is
-        // benign, and the editor version hasn't changed.
+        // Fast path: lockfile exists, unity-version still matches, and the
+        // scan-cache fingerprint says no project-relevant file has changed
+        // since the scan (and therefore the lockfile) was written.
         if std::path::Path::new(&path).exists() {
             if let Ok(existing) = Self::read(&path) {
-                if let Some(new_clock) =
-                    check_invalidation(project_root, &clock_path, &existing)?
-                {
-                    // Cache hit. Update sidecar with the latest clock so the
-                    // next call's `since(prev)` is incremental rather than
-                    // re-touching everything since the last write.
-                    let _ = write_file_if_changed(&clock_path, &new_clock);
-                    return Ok(existing);
+                if let Some(current) = read_unity_version(project_root) {
+                    if current == existing.unity_version
+                        && crate::project_scanner::scan_cache_fingerprint_matches(
+                            project_root,
+                            generator_root,
+                        )
+                    {
+                        return Ok(existing);
+                    }
                 }
             }
         }
 
-        let scanned = LockfileScanner::scan_with_artifacts(project_root)?;
-        Self::write(&scanned.lockfile, &path)?;
-
-        // Persist the clock the scanner already captured. Best-effort: a write
-        // failure forces a rescan on the next call but doesn't fail the
-        // user-facing operation.
-        let _ = write_file_if_changed(&clock_path, &scanned.watchman_clock);
-        Ok(scanned.lockfile)
-    }
-
-    /// Ensure the lockfile is fresh and return it. Thin alias for
-    /// [`scan_and_write`](Self::scan_and_write), which already short-circuits
-    /// via the Watchman clock + Unity-version check when nothing relevant
-    /// changed. A bare `read` would silently use a stale lockfile (e.g.
-    /// references to files that no longer exist on disk) and surface as
-    /// `MSB3245` from `dotnet build`.
-    pub fn load_or_scan(project_root: &str, generator_root: &str) -> Result<Lockfile> {
-        Self::scan_and_write(project_root, generator_root)
-    }
-
-    /// Fast-path validation that **skips the Watchman query** by trusting an
-    /// upstream signal that the project tree is unchanged. Caller must have
-    /// just verified scan-cache freshness via
-    /// `ProjectScanner::scan_with_freshness` returning `cache_hit=true` —
-    /// that's the signal that no project-relevant file has changed since the
-    /// lockfile was written, so we only need to validate `unity-version`
-    /// against `ProjectVersion.txt`.
-    ///
-    /// Returns `Ok(Some(lockfile))` on fast-path success; `Ok(None)` if the
-    /// lockfile is missing, malformed, or `unity-version` mismatched — caller
-    /// then falls back to the full [`scan_and_write`].
-    pub fn load_if_unity_matches(
-        project_root: &str,
-        generator_root: &str,
-    ) -> Result<Option<Lockfile>> {
-        let path = lockfile_path(project_root, generator_root);
-        if !std::path::Path::new(&path).exists() {
-            return Ok(None);
-        }
-        let Ok(existing) = Self::read(&path) else {
-            return Ok(None);
-        };
-        let Some(current_version) = read_unity_version(project_root) else {
-            return Ok(None);
-        };
-        if current_version != existing.unity_version {
-            return Ok(None);
-        }
-        Ok(Some(existing))
+        let lockfile = LockfileScanner::scan(project_root)?;
+        Self::write(&lockfile, &path)?;
+        Ok(lockfile)
     }
 
     pub fn write(lockfile: &Lockfile, path: &str) -> Result<()> {
@@ -399,46 +346,3 @@ fn parse_dll_ref(line: &str) -> Option<DllRef> {
     })
 }
 
-/// Check whether the existing lockfile is still valid. Returns `Some(new_clock)`
-/// on cache hit (no Unity-version change, no project-relevant Watchman delta);
-/// `None` if anything forces a rescan. Watchman `Unavailable` is surfaced as
-/// an error so callers don't silently re-enter the scanner (which would
-/// produce a confusingly-different error path) — `Query` errors are logged
-/// and treated as a rescan trigger.
-fn check_invalidation(
-    project_root: &str,
-    clock_path: &str,
-    existing: &Lockfile,
-) -> Result<Option<String>> {
-    // 1. Unity version equality — cheap.
-    let Some(current_version) = read_unity_version(project_root) else {
-        return Ok(None); // Missing ProjectVersion.txt; let the rescanner fail loudly.
-    };
-    if current_version != existing.unity_version {
-        return Ok(None);
-    }
-
-    // 2. Watchman delta from the previous successful write.
-    let prev_clock = read_file(clock_path).ok();
-    let prev_clock_ref = prev_clock.as_deref();
-    let delta = match since(Path::new(project_root), prev_clock_ref) {
-        Ok(d) => d,
-        Err(ScanError::Unavailable) => {
-            return Err(GeneratorError::ScanUnavailable(ScanError::Unavailable.to_string()));
-        }
-        Err(e @ ScanError::Query(_)) => {
-            tracing::warn!("lockfile cache check: watchman query failed, rescanning ({e})");
-            return Ok(None);
-        }
-    };
-    Ok(match delta {
-        Delta::Fresh { .. } => None,
-        Delta::Touched { paths, new_clock } => {
-            if paths.iter().any(|p| hint_is_relevant(p)) {
-                None
-            } else {
-                Some(new_clock)
-            }
-        }
-    })
-}

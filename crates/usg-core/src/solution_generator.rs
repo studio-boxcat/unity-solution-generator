@@ -421,6 +421,10 @@ impl SolutionGenerator {
         SolutionGenerator
     }
 
+    /// Convenience wrapper for the test suite and any caller that hasn't
+    /// already loaded a `ScanResult`. Does the scan internally; the CLI
+    /// driver and `unity_solution_generator::generate(...)` use
+    /// [`Self::generate`] directly to avoid duplicate scans.
     pub fn generate_from_lockfile(
         &self,
         options: &GenerateOptions,
@@ -428,13 +432,14 @@ impl SolutionGenerator {
     ) -> Result<GenerateResult> {
         let project_root = resolve_real_path(&options.project_root);
         let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
-        self.generate_from_lockfile_with_scan(options, lockfile, scan)
+        self.generate(options, lockfile, scan)
     }
 
-    /// Like [`generate_from_lockfile`] but accepts a pre-computed
-    /// [`ScanResult`] — used by the CLI to share a single Watchman query
-    /// between `generate_sln` and `typecheck::run` in the same invocation.
-    pub fn generate_from_lockfile_with_scan(
+    /// Render `.csproj`/`.sln`/`Directory.Build.props` for one platform+config
+    /// variant. Callers pre-compute the scan (via `ProjectScanner::scan`) and
+    /// lockfile (via `LockfileIO::scan_and_write`) so a single CLI invocation
+    /// hits the project tree exactly once.
+    pub fn generate(
         &self,
         options: &GenerateOptions,
         lockfile: &Lockfile,

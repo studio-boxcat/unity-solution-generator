@@ -16,9 +16,9 @@ use std::time::{Duration, UNIX_EPOCH};
 use rayon::prelude::*;
 
 use crate::error::{GeneratorError, Result, io_err};
-use crate::lockfile::{DllRef, Lockfile, LockfileIO, RefCategory};
+use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, mtime_nanos_for, resolve_real_path};
-use crate::project_scanner::{AsmDefRecord, ProjectCategory, ProjectScanner};
+use crate::project_scanner::{AsmDefRecord, ProjectCategory};
 use crate::solution_generator::{BuildConfig, BuildPlatform};
 
 #[derive(Debug, Clone)]
@@ -65,18 +65,9 @@ impl TypecheckResult {
 }
 
 /// Run typecheck. Returns the per-project status; caller decides exit code.
-pub fn run(opts: &TypecheckOptions) -> Result<TypecheckResult> {
-    let root = resolve_real_path(&opts.project_root);
-    let lockfile = LockfileIO::load_or_scan(&root, DEFAULT_GENERATOR_ROOT)?;
-    let scan = ProjectScanner::scan(&root, DEFAULT_GENERATOR_ROOT)?;
-    run_with(opts, &lockfile, &scan)
-}
-
-/// Like [`run`] but accepts a pre-computed lockfile and scan. Used by the
-/// CLI driver to share these between `generate_sln` and `typecheck::run`
-/// in the same invocation — without this the warm-no-op path pays Watchman
-/// + asmdef-parse twice (~400 ms wasted on meow-tower).
-pub fn run_with(
+/// Caller pre-computes scan + lockfile so a single CLI invocation hits the
+/// project tree exactly once.
+pub fn run(
     opts: &TypecheckOptions,
     lockfile: &Lockfile,
     scan: &crate::project_scanner::ScanResult,

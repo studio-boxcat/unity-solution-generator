@@ -98,7 +98,8 @@ pub fn generate(
         .with_build_config(build_config)
         .with_output_dir(output_dir)
         .with_extra_refs(extra_refs_vec);
-    let lockfile = LockfileIO::load_or_scan(&resolved, DEFAULT_GENERATOR_ROOT)?;
-    SolutionGenerator::new().generate_from_lockfile(&options, &lockfile)?;
+    let lockfile = LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT)?;
+    let scan = ProjectScanner::scan(&resolved, DEFAULT_GENERATOR_ROOT)?;
+    SolutionGenerator::new().generate(&options, &lockfile, scan)?;
     Ok(())
 }
