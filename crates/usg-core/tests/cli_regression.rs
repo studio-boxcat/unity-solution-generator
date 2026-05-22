@@ -7,8 +7,8 @@
 //!   solution files via a single subcommand, no separate generate step.
 //!
 //! Standalone `lock` and `generate` subcommands were removed in v0.3.0 — every
-//! subcommand auto-locks and refreshes via `LockfileIO::scan_and_write` +
-//! `generate_sln` internally. The library API (`SolutionGenerator::generate_from_lockfile`,
+//! subcommand auto-locks and refreshes via `lockfile::scan_and_write` +
+//! `generate_sln` internally. The library API (`solution_generator::generate_from_lockfile`,
 //! `unity_solution_generator::generate(...)`) covers the "render-only" use
 //! case for FFI hosts like meow-tower's BoxcatBridge.
 
@@ -39,7 +39,7 @@ fn fixture() -> WatchedTempDir {
     let lf = unity_solution_generator::Lockfile::empty("6000.2.7f2", "/test/unity");
     let lf_dir = root.join("Library/UnitySolutionGenerator");
     std::fs::create_dir_all(&lf_dir).unwrap();
-    unity_solution_generator::LockfileIO::write(&lf, lf_dir.join("csproj.lock").to_str().unwrap()).unwrap();
+    unity_solution_generator::lockfile::write(&lf, lf_dir.join("csproj.lock").to_str().unwrap()).unwrap();
     tmp
 }
 

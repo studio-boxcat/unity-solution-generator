@@ -46,7 +46,7 @@ unity-solution-generator build . ios prod -- -m --no-restore -v:n  # forward arg
 
 Positional args: `<command> <unity-root> <platform> <config>`. Platform: `ios` | `android` | `osx` | `windows`. Config: `prod` | `dev` | `editor`.
 
-Pure "render without compiling" is reachable via the **library API** (`SolutionGenerator::generate_from_lockfile`) — meow-tower's BoxcatBridge FFI uses that path, not the CLI.
+Pure "render without compiling" is reachable via the **library API** (`solution_generator::generate_from_lockfile`) — meow-tower's BoxcatBridge FFI uses that path, not the CLI.
 
 | Option | Description |
 |--------|-------------|
@@ -114,8 +114,8 @@ Quick refs:
 
 ## Unity project setup
 
-No explicit setup step. First invocation of `typecheck` or `build` writes the lockfile + clock sidecar; subsequent invocations validate via:
+No explicit setup step. First invocation of `typecheck` or `build` writes the lockfile + bincode scan-cache; subsequent invocations validate via:
 1. Comparing `lockfile.unity-version` against the current `ProjectSettings/ProjectVersion.txt`.
-2. Querying Watchman with the previous `.lock-watchman-clock` cursor — if any project-relevant path (`.cs`/`.asmdef`/`.asmref`/`.dll`/manifest) changed, the lockfile is rescanned.
+2. Comparing the scan-cache's mtime fingerprint (asmdef/asmref dirs + ancestors + top-level project dirs) against the filesystem — if any tracked mtime drifted, the lockfile is rescanned.
 
-On a cache hit the check costs ~ms. To force a rescan, delete `Library/UnitySolutionGenerator/.lock-watchman-clock`.
+On a cache hit the check costs ~ms (~30 `stat` calls). To force a rescan, delete `Library/UnitySolutionGenerator/scan-cache.bin`.

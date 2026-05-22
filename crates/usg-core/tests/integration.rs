@@ -7,8 +7,8 @@ use std::path::Path;
 
 use common::{assert_compile_set, make_temp_root, read_compile_set, read_file, write_file};
 use unity_solution_generator::{
-    BuildConfig, BuildPlatform, DllRef, GenerateOptions, Lockfile, LockfileIO, ProjectScanner,
-    RefCategory, SolutionGenerator,
+    BuildConfig, BuildPlatform, DllRef, GenerateOptions, Lockfile, RefCategory,
+    lockfile, project_scanner, solution_generator,
     defines::{generate_version_defines, parse_scripting_defines},
     solution_generator::render_directory_build_props,
 };
@@ -70,8 +70,7 @@ fn nested_assembly_root_mapping_and_legacy_fallback() {
     write_file(root, "Assets/Game/Tests/Baz.cs", "class Baz {}\n");
     write_file(root, "Assets/Plugins/Legacy.cs", "class Legacy {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
 
     let v = "tpl/ios-editor";
@@ -111,8 +110,7 @@ fn asm_ref_name_resolution_and_tilde_skip() {
         "class Hidden {}\n",
     );
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_compile_set(
         root,
@@ -135,8 +133,7 @@ fn tilde_directory_excluded_from_scan() {
     write_file(root, "Assets/Game/src~/Hidden.cs", "class Hidden {}\n");
     write_file(root, "Assets/Game/backup~/Old.cs", "class Old {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_compile_set(
         root,
@@ -158,8 +155,7 @@ fn dot_directory_excluded_from_scan() {
     write_file(root, "Assets/Game/Visible.cs", "class Visible {}\n");
     write_file(root, "Assets/Game/.hidden/Secret.cs", "class Secret {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_compile_set(
         root,
@@ -192,9 +188,8 @@ fn prod_variant_category_filtering() {
     write_file(root, "Assets/Assemblies/MyEditor/Bar.cs", "class Bar {}\n");
     write_file(root, "Assets/Assemblies/MyTests/Baz.cs", "class Baz {}\n");
 
-    let g = SolutionGenerator::new();
-    let prod = g
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &bare_lockfile())
+    
+    let prod = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &bare_lockfile())
         .unwrap();
     assert_eq!(prod.variant_csprojs, vec!["tpl/ios-prod/Runtime.csproj"]);
     let prod_props = read_file(root, "tpl/ios-prod/Directory.Build.props");
@@ -206,8 +201,7 @@ fn prod_variant_category_filtering() {
     assert!(prod_sln.contains("\"Runtime\""));
     assert!(!prod_sln.contains("\"MyEditor\""));
 
-    let editor = g
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
+    let editor = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     assert_eq!(editor.variant_csprojs.len(), 3);
     let editor_props = read_file(root, "tpl/ios-editor/Directory.Build.props");
@@ -287,8 +281,8 @@ fn lockfile_round_trip() {
     let root = tmp.path();
     let lockfile_path = root.join("csproj.lock");
     let lf = make_minimal_lockfile();
-    LockfileIO::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
-    let reloaded = LockfileIO::read(lockfile_path.to_str().unwrap()).unwrap();
+    lockfile::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
+    let reloaded = lockfile::read(lockfile_path.to_str().unwrap()).unwrap();
 
     assert_eq!(reloaded.unity_version, lf.unity_version);
     assert_eq!(reloaded.unity_path, lf.unity_path);
@@ -306,7 +300,7 @@ fn lockfile_round_trip() {
     // Idempotent serialization
     let first = std::fs::read_to_string(&lockfile_path).unwrap();
     let second_path = root.join("csproj2.lock");
-    LockfileIO::write(&reloaded, second_path.to_str().unwrap()).unwrap();
+    lockfile::write(&reloaded, second_path.to_str().unwrap()).unwrap();
     let second = std::fs::read_to_string(&second_path).unwrap();
     assert_eq!(first, second);
 }
@@ -377,8 +371,7 @@ fn lockfile_generate_references_in_csproj() {
     write_file(root, "Assets/Assemblies/Main/Foo.cs", "class Foo {}\n");
     write_file(root, "Assets/Assemblies/Lib/Bar.cs", "class Bar {}\n");
 
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    let r = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert_eq!(r.variant_csprojs.len(), 2);
 
@@ -406,8 +399,7 @@ fn lockfile_generate_editor_refs_not_in_prod() {
     );
     write_file(root, "Assets/Assemblies/Runtime/Code.cs", "class Code {}\n");
 
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Android, BuildConfig::Prod), &lf)
+    let r = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Android, BuildConfig::Prod), &lf)
         .unwrap();
     assert_eq!(r.variant_csprojs.len(), 1);
     let csproj = read_file(root, "tpl/android-prod/Runtime.csproj");
@@ -435,8 +427,7 @@ fn lockfile_generate_allow_unsafe_blocks() {
     write_file(root, "Assets/Assemblies/SafeLib/S.cs", "class S {}\n");
     write_file(root, "Assets/Assemblies/UnsafeLib/U.cs", "class U {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
 
     let safe = read_file(root, "tpl/ios-editor/SafeLib.csproj");
@@ -461,8 +452,7 @@ fn lockfile_generate_defines_in_props() {
     write_file(root, "Assets/Assemblies/Lib/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let props = read_file(root, "tpl/ios-editor/Directory.Build.props");
     assert!(props.contains("UNITY_6000"));
@@ -484,8 +474,7 @@ fn lockfile_generate_source_patterns_preserved() {
     write_file(root, "Assets/Game/B.cs", "class B {}\n");
     write_file(root, "Assets/Game/Sub/C.cs", "class C {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert_compile_set(
         root,
@@ -519,9 +508,8 @@ fn lockfile_generate_platform_filtering() {
         "Assets/Assemblies/AllPlatforms/Code.cs",
         "class AllCode {}\n",
     );
-    let g = SolutionGenerator::new();
-    let ios = g
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &lf)
+    
+    let ios = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &lf)
         .unwrap();
     let names: std::collections::HashSet<String> = ios
         .variant_csprojs
@@ -538,8 +526,7 @@ fn lockfile_generate_platform_filtering() {
     assert!(names.contains("IOSOnly"));
     assert!(names.contains("AllPlatforms"));
 
-    let android = g
-        .generate_from_lockfile(&opts(root, BuildPlatform::Android, BuildConfig::Prod), &lf)
+    let android = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Android, BuildConfig::Prod), &lf)
         .unwrap();
     let names: std::collections::HashSet<String> = android
         .variant_csprojs
@@ -567,7 +554,7 @@ fn lockfile_generate_asmdef_version_defines() {
         r#"{"name":"Lib","versionDefines":[{"name":"com.unity.modules.physics2d","expression":"","define":"PACKAGE_PHYSICS2D"},{"name":"Unity","expression":"","define":"MY_FEATURE"}]}"#,
     );
     write_file(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n");
-    let scan = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap();
+    let scan = project_scanner::scan(root.to_str().unwrap(), GR).unwrap();
     let asm = scan.asm_def_by_name.get("Lib").unwrap();
     assert_eq!(asm.version_defines.len(), 2);
     assert_eq!(asm.version_defines[0].package_name, "com.unity.modules.physics2d");
@@ -582,8 +569,7 @@ fn lockfile_generate_csproj_xml_well_formed() {
     let lf = make_minimal_lockfile();
     write_file(root, "Assets/Assemblies/Main/Main.asmdef", r#"{"name":"Main"}"#);
     write_file(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n");
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let csproj = read_file(root, "tpl/ios-editor/Main.csproj");
     assert!(csproj.starts_with("<?xml version=\"1.0\""));
@@ -611,8 +597,7 @@ fn scan_cache_invalidates_on_new_cs_file() {
     write_file(root, "Assets/Assemblies/Main/Main.asmdef", r#"{"name":"Main"}"#);
     write_file(root, "Assets/Assemblies/Main/A.cs", "class A {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert_compile_set(
         root,
@@ -628,8 +613,7 @@ fn scan_cache_invalidates_on_new_cs_file() {
         "class B {}\n",
     );
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert_compile_set(
         root,
@@ -649,8 +633,7 @@ fn project_root_is_absolute_in_props() {
     write_file(root, "Assets/Assemblies/Lib/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n");
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let props = read_file(root, "tpl/ios-editor/Directory.Build.props");
     assert!(
@@ -707,8 +690,7 @@ fn output_dot_produces_root_output() {
     write_file(root, "Assets/Assemblies/Main/A.cs", "class A {}\n");
     write_file(root, "Assets/Game/B.cs", "class B {}\n");
 
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(
+    let r = solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor).with_output_dir(Some(".")),
             &lf,
         )
@@ -731,8 +713,7 @@ fn output_deep_path_produces_correct_prefix() {
     write_file(root, "Assets/Assemblies/Main/A.cs", "class A {}\n");
 
     let out = "Library/com.example/deep/output";
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(
+    let r = solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor).with_output_dir(Some(out)),
             &lf,
         )
@@ -751,8 +732,7 @@ fn output_single_dir_depth_one() {
     write_file(root, "Assets/Assemblies/Lib/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/Assemblies/Lib/Code.cs", "class Code {}\n");
 
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(
+    let r = solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor).with_output_dir(Some("output")),
             &lf,
         )
@@ -770,8 +750,7 @@ fn default_output_unchanged() {
     write_file(root, "Assets/Assemblies/Main/Main.asmdef", r#"{"name":"Main"}"#);
     write_file(root, "Assets/Assemblies/Main/A.cs", "class A {}\n");
 
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    let r = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert_eq!(r.variant_csprojs, vec!["tpl/ios-editor/Main.csproj"]);
     let csproj = read_file(root, "tpl/ios-editor/Main.csproj");
@@ -798,8 +777,7 @@ fn extra_refs_appear_in_csproj() {
         ),
     ];
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(
+    solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor).with_extra_refs(extra),
             &lf,
         )
@@ -819,8 +797,7 @@ fn extra_refs_deduplicated_with_lockfile_refs() {
     write_file(root, "Assets/Assemblies/Main/Code.cs", "class Code {}\n");
 
     let extra = vec![DllRef::new("UnityEngine", "/duplicate/UnityEngine.dll")];
-    SolutionGenerator::new()
-        .generate_from_lockfile(
+    solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor).with_extra_refs(extra),
             &lf,
         )
@@ -840,8 +817,7 @@ fn extra_refs_with_output_dir() {
     let extra = vec![DllRef::new("TestLib", "/path/to/TestLib.dll")];
     let out = "Library/hotreload/Solution";
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(
+    solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor)
                 .with_output_dir(Some(out))
                 .with_extra_refs(extra),
@@ -882,9 +858,8 @@ fn category_inference_from_asmdef_fields() {
         write_file(root, &format!("Assets/{}/Code.cs", c), "class Code {}\n");
     }
 
-    let g = SolutionGenerator::new();
-    let prod = g
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &bare_lockfile())
+    
+    let prod = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Prod), &bare_lockfile())
         .unwrap();
     let prod_names: std::collections::HashSet<String> = prod
         .variant_csprojs
@@ -906,8 +881,7 @@ fn category_inference_from_asmdef_fields() {
             .collect()
     );
 
-    let editor = g
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
+    let editor = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     let editor_names: std::collections::HashSet<String> = editor
         .variant_csprojs
@@ -973,8 +947,7 @@ fn e2e_generated_compile_set_matches_original_csproj() {
         "<Project>\n  <ItemGroup>\n    <Compile Include=\"Assets/Game/Sandbox/S.cs\" />\n  </ItemGroup>\n</Project>",
     );
 
-    SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &bare_lockfile())
         .unwrap();
     let v = "tpl/ios-editor";
     let orig_main = read_compile_set(root, "Main.original.csproj");

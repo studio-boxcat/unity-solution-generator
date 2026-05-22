@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::io::{create_dir_all, write_file_if_changed};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, resolve_real_path};
-use crate::project_scanner::{AsmDefRecord, ProjectCategory, ProjectScanner, ScanResult};
+use crate::project_scanner::{self, AsmDefRecord, ProjectCategory, ScanResult};
 use crate::xml::{deterministic_guid, xml_escape};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +145,6 @@ const DEBUG_DEFINES: &[&str] = &["DEBUG", "TRACE", "UNITY_ASSERTIONS"];
 pub struct GenerateOptions {
     pub project_root: String,
     pub generator_root: String,
-    pub verbose: bool,
     /// `None` → default variant subdir; `Some(".")` → project root; `Some("rel/path")` otherwise.
     pub output_dir: Option<String>,
     pub extra_refs: Vec<DllRef>,
@@ -158,7 +157,6 @@ impl GenerateOptions {
         Self {
             project_root: project_root.into(),
             generator_root: DEFAULT_GENERATOR_ROOT.to_string(),
-            verbose: false,
             output_dir: None,
             extra_refs: Vec::new(),
             platform,
@@ -190,11 +188,6 @@ impl GenerateOptions {
 
     pub fn with_extra_refs(mut self, extra_refs: Vec<DllRef>) -> Self {
         self.extra_refs = extra_refs;
-        self
-    }
-
-    pub fn with_verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
         self
     }
 }
@@ -248,12 +241,6 @@ fn build_context(
             scan.unresolved_dirs.len()
         ));
     }
-    if options.verbose {
-        for d in scan.unresolved_dirs.iter().take(20) {
-            warnings.push(format!("Unresolved: {}/", d));
-        }
-    }
-
     let depth: usize = if let Some(out) = options.output_dir.as_deref() {
         if out == "." {
             0
@@ -414,125 +401,108 @@ where
     })
 }
 
-pub struct SolutionGenerator;
+/// Convenience wrapper for the test suite and any caller that hasn't already
+/// loaded a `ScanResult`. Does the scan internally; the CLI driver and
+/// `unity_solution_generator::generate(...)` call [`generate`] directly to
+/// avoid duplicate scans.
+pub fn generate_from_lockfile(
+    options: &GenerateOptions,
+    lockfile: &Lockfile,
+) -> Result<GenerateResult> {
+    let project_root = resolve_real_path(&options.project_root);
+    let scan = project_scanner::scan(&project_root, &options.generator_root)?;
+    generate(options, lockfile, scan)
+}
 
-impl SolutionGenerator {
-    pub fn new() -> Self {
-        SolutionGenerator
+/// Render `.csproj`/`.sln`/`Directory.Build.props` for one platform+config
+/// variant. Callers pre-compute the scan (via `project_scanner::scan`) and
+/// lockfile (via `lockfile::scan_and_write`) so a single CLI invocation hits
+/// the project tree exactly once.
+pub fn generate(
+    options: &GenerateOptions,
+    lockfile: &Lockfile,
+    scan: ScanResult,
+) -> Result<GenerateResult> {
+    let _span = tracing::info_span!("generate.from_lockfile").entered();
+    let project_root = resolve_real_path(&options.project_root);
+
+    let mut projects: Vec<ProjectInfo> = Vec::new();
+    let mut all_names: HashSet<String> = HashSet::new();
+    for name in scan.asm_def_by_name.keys() {
+        if !scan.dirs_by_project.contains_key(name) {
+            continue;
+        }
+        projects.push(ProjectInfo {
+            name: name.clone(),
+            guid: deterministic_guid(name),
+        });
+        all_names.insert(name.clone());
     }
-
-    /// Convenience wrapper for the test suite and any caller that hasn't
-    /// already loaded a `ScanResult`. Does the scan internally; the CLI
-    /// driver and `unity_solution_generator::generate(...)` use
-    /// [`Self::generate`] directly to avoid duplicate scans.
-    pub fn generate_from_lockfile(
-        &self,
-        options: &GenerateOptions,
-        lockfile: &Lockfile,
-    ) -> Result<GenerateResult> {
-        let project_root = resolve_real_path(&options.project_root);
-        let scan = ProjectScanner::scan(&project_root, &options.generator_root)?;
-        self.generate(options, lockfile, scan)
-    }
-
-    /// Render `.csproj`/`.sln`/`Directory.Build.props` for one platform+config
-    /// variant. Callers pre-compute the scan (via `ProjectScanner::scan`) and
-    /// lockfile (via `LockfileIO::scan_and_write`) so a single CLI invocation
-    /// hits the project tree exactly once.
-    pub fn generate(
-        &self,
-        options: &GenerateOptions,
-        lockfile: &Lockfile,
-        scan: ScanResult,
-    ) -> Result<GenerateResult> {
-        let _span = tracing::info_span!("generate.from_lockfile").entered();
-        let project_root = resolve_real_path(&options.project_root);
-
-        let mut projects: Vec<ProjectInfo> = Vec::new();
-        let mut all_names: HashSet<String> = HashSet::new();
-        for name in scan.asm_def_by_name.keys() {
-            if !scan.dirs_by_project.contains_key(name) {
-                continue;
-            }
+    for name in scan.dirs_by_project.keys() {
+        if !all_names.contains(name) {
             projects.push(ProjectInfo {
                 name: name.clone(),
                 guid: deterministic_guid(name),
             });
-            all_names.insert(name.clone());
         }
-        for name in scan.dirs_by_project.keys() {
-            if !all_names.contains(name) {
-                projects.push(ProjectInfo {
-                    name: name.clone(),
-                    guid: deterministic_guid(name),
-                });
-            }
-        }
-        projects.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let ctx = build_context(options, project_root.clone(), projects, scan);
+    let ctx = build_context(options, project_root.clone(), projects, scan);
 
-        let mut static_defines: Vec<String> = lockfile.defines.clone();
-        static_defines.extend(lockfile.defines_scripting.iter().cloned());
-        write_file_if_changed(
-            &join_path(&ctx.variant_dir, "Directory.Build.props"),
-            &render_directory_build_props(
-                &ctx.project_root,
-                Some(&lockfile.unity_path),
-                Some(&crate::paths::usg_cache_dir(&lockfile.unity_version)),
-                options.platform,
-                options.build_config,
-                &static_defines,
-            ),
-        )?;
-
-        let refs_block = collect_references_block(
-            lockfile,
+    let mut static_defines: Vec<String> = lockfile.defines.clone();
+    static_defines.extend(lockfile.defines_scripting.iter().cloned());
+    write_file_if_changed(
+        &join_path(&ctx.variant_dir, "Directory.Build.props"),
+        &render_directory_build_props(
+            &ctx.project_root,
+            Some(&lockfile.unity_path),
+            Some(&crate::paths::usg_cache_dir(&lockfile.unity_version)),
             options.platform,
-            options.build_config == BuildConfig::Editor,
-            &options.extra_refs,
+            options.build_config,
+            &static_defines,
+        ),
+    )?;
+
+    let refs_block = collect_references_block(
+        lockfile,
+        options.platform,
+        options.build_config == BuildConfig::Editor,
+        &options.extra_refs,
+    );
+    let analyzer_block = render_analyzers(&lockfile.analyzers);
+    let lang_version = lockfile.lang_version.clone();
+    let asm_def_by_name = ctx.scan.asm_def_by_name.clone();
+
+    let result = write_variant(&ctx, |project, source_block, reference_block| {
+        let allow_unsafe = asm_def_by_name
+            .get(&project.name)
+            .map(|a| a.allow_unsafe_code)
+            .unwrap_or(false);
+        let mut out = render_csproj_header(
+            &project.name,
+            &project.guid,
+            &lang_version,
+            allow_unsafe,
         );
-        let analyzer_block = render_analyzers(&lockfile.analyzers);
-        let lang_version = lockfile.lang_version.clone();
-        let asm_def_by_name = ctx.scan.asm_def_by_name.clone();
+        out.push_str(&analyzer_block);
+        out.push_str(&refs_block);
+        out.push_str("  <ItemGroup>\n");
+        if !source_block.is_empty() {
+            out.push_str(source_block);
+            out.push('\n');
+        }
+        if !reference_block.is_empty() {
+            out.push_str(reference_block);
+            out.push('\n');
+        }
+        out.push_str("  </ItemGroup>\n");
+        out.push_str("  <Import Project=\"$(MSBuildToolsPath)\\Microsoft.CSharp.targets\" />\n");
+        out.push_str("</Project>\n");
+        out
+    })?;
 
-        let result = write_variant(&ctx, |project, source_block, reference_block| {
-            let allow_unsafe = asm_def_by_name
-                .get(&project.name)
-                .map(|a| a.allow_unsafe_code)
-                .unwrap_or(false);
-            let mut out = render_csproj_header(
-                &project.name,
-                &project.guid,
-                &lang_version,
-                allow_unsafe,
-            );
-            out.push_str(&analyzer_block);
-            out.push_str(&refs_block);
-            out.push_str("  <ItemGroup>\n");
-            if !source_block.is_empty() {
-                out.push_str(source_block);
-                out.push('\n');
-            }
-            if !reference_block.is_empty() {
-                out.push_str(reference_block);
-                out.push('\n');
-            }
-            out.push_str("  </ItemGroup>\n");
-            out.push_str("  <Import Project=\"$(MSBuildToolsPath)\\Microsoft.CSharp.targets\" />\n");
-            out.push_str("</Project>\n");
-            out
-        })?;
-
-        Ok(result)
-    }
-
-}
-
-impl Default for SolutionGenerator {
-    fn default() -> Self {
-        Self::new()
-    }
+    Ok(result)
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────

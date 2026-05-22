@@ -1,8 +1,8 @@
 use std::process::{Command, ExitCode};
 
 use unity_solution_generator::{
-    BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions, LockfileIO,
-    ProjectScanner, SolutionGenerator, TypecheckOptions, resolve_project_root,
+    BuildConfig, BuildPlatform, DEFAULT_GENERATOR_ROOT, DllRef, GenerateOptions,
+    TypecheckOptions, lockfile, project_scanner, resolve_project_root, solution_generator,
     typecheck::{run as typecheck_run, typecheck_output_dir},
 };
 
@@ -20,7 +20,7 @@ fn main() -> ExitCode {
     // Surface: `typecheck` (refresh .csproj/.sln + csc validation, used by
     // meow-tower's Hot Reload pre-flight) and `build` (refresh + `dotnet
     // build`). The standalone `lock` / `generate` subcommands were removed
-    // in v0.3.0 — every subcommand auto-locks via `LockfileIO::scan_and_write`
+    // in v0.3.0 — every subcommand auto-locks via `lockfile::scan_and_write`
     // on cache miss, and `typecheck`/`build` both refresh the .csproj/.sln
     // via `generate_sln`. FFI hosts (BoxcatBridge) keep using
     // `unity_solution_generator::generate(...)` directly — that Rust API is
@@ -91,14 +91,14 @@ fn generate_sln(
         .with_build_config(inv.config)
         .with_extra_refs(inv.extra_refs.clone());
 
-    let lockfile = match LockfileIO::scan_and_write(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
+    let lockfile = match lockfile::scan_and_write(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("error: {}", e);
             return Err(ExitCode::from(1));
         }
     };
-    let scan = match ProjectScanner::scan(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
+    let scan = match project_scanner::scan(&inv.project_root, DEFAULT_GENERATOR_ROOT) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -106,7 +106,7 @@ fn generate_sln(
         }
     };
 
-    match SolutionGenerator::new().generate(&options, &lockfile, scan.clone()) {
+    match solution_generator::generate(&options, &lockfile, scan.clone()) {
         Ok(r) => {
             for w in r.warnings {
                 eprintln!("warning: {}", w);
@@ -323,7 +323,7 @@ COMMANDS:
 
   Both subcommands implicitly scan + write `csproj.lock` on cache miss; no
   separate `lock` command. Generating .csproj/.sln without invoking the
-  compiler is reachable via the library API (`SolutionGenerator`) — meow-tower's
+  compiler is reachable via the library API (`solution_generator::generate`) — meow-tower's
   BoxcatBridge FFI uses that path. See `docs/library-api.md`.
 
 ARGUMENTS:

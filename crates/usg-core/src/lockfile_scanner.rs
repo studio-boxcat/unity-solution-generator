@@ -22,286 +22,282 @@ use crate::io::{file_exists, list_directory, read_file};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{join_path, resolve_real_path, unity_data_subpath, unity_install_root};
 use crate::project_scanner::parse_version_defines;
-use crate::scan::{ScanError, enumerate};
+use crate::scan::{enumerate, to_generator_error};
 
-pub struct LockfileScanner;
+pub fn scan(project_root: &str) -> Result<Lockfile> {
+    let _span = tracing::info_span!("lockfile_scanner.scan").entered();
+    let (version, unity_path) = resolve_unity_path(project_root)?;
+    let _unity_span = tracing::info_span!("lockfile_scanner.unity_install").entered();
 
-impl LockfileScanner {
-    pub fn scan(project_root: &str) -> Result<Lockfile> {
-        let _span = tracing::info_span!("lockfile_scanner.scan").entered();
-        let (version, unity_path) = resolve_unity_path(project_root)?;
-        let _unity_span = tracing::info_span!("lockfile_scanner.unity_install").entered();
+    // Bundle-content prefix. macOS bundles via `Unity.app/Contents`;
+    // Windows/Linux flatten under `Editor/Data`. All `Managed/*`,
+    // `NetStandard/*`, `Tools/*` paths sit under this subpath.
+    let data_sub = unity_data_subpath();
+    let app_contents = join_path(&unity_path, data_sub);
 
-        // Bundle-content prefix. macOS bundles via `Unity.app/Contents`;
-        // Windows/Linux flatten under `Editor/Data`. All `Managed/*`,
-        // `NetStandard/*`, `Tools/*` paths sit under this subpath.
-        let data_sub = unity_data_subpath();
-        let app_contents = join_path(&unity_path, data_sub);
-
-        let managed_engine_dir = join_path(&app_contents, "Managed/UnityEngine");
-        let mut engine_refs: Vec<DllRef> = Vec::new();
-        let mut editor_refs: Vec<DllRef> = Vec::new();
-        let mut managed_dlls: Vec<String> = list_directory(&managed_engine_dir)
-            .into_iter()
-            .filter(|n| n.ends_with(".dll"))
-            .collect();
-        managed_dlls.sort();
-        for dll in &managed_dlls {
-            let name = &dll[..dll.len() - 4];
-            if !(name.starts_with("UnityEngine") || name.starts_with("UnityEditor")) {
-                continue;
-            }
-            let path = format!("$(UnityPath)/{}/Managed/UnityEngine/{}", data_sub, dll);
-            if name.starts_with("UnityEditor") {
-                editor_refs.push(DllRef::new(name, path));
-            } else {
-                engine_refs.push(DllRef::new(name, path));
-            }
+    let managed_engine_dir = join_path(&app_contents, "Managed/UnityEngine");
+    let mut engine_refs: Vec<DllRef> = Vec::new();
+    let mut editor_refs: Vec<DllRef> = Vec::new();
+    let mut managed_dlls: Vec<String> = list_directory(&managed_engine_dir)
+        .into_iter()
+        .filter(|n| n.ends_with(".dll"))
+        .collect();
+    managed_dlls.sort();
+    for dll in &managed_dlls {
+        let name = &dll[..dll.len() - 4];
+        if !(name.starts_with("UnityEngine") || name.starts_with("UnityEditor")) {
+            continue;
         }
-
-        // Lives one level up from Managed/UnityEngine/.
-        let graphs_dll = join_path(&app_contents, "Managed/UnityEditor.Graphs.dll");
-        if file_exists(&graphs_dll) {
-            editor_refs.push(DllRef::new(
-                "UnityEditor.Graphs",
-                format!("$(UnityPath)/{}/Managed/UnityEditor.Graphs.dll", data_sub),
-            ));
-        }
-
-        let netstd_base = join_path(&app_contents, "NetStandard");
-        let mut netstd_refs: Vec<DllRef> = Vec::new();
-        walk_files(&netstd_base, &netstd_base, &[".dll"], |rel, name| {
-            let n = &name[..name.len() - 4];
-            // Drop the WCF family. `System.Private.ServiceModel.dll` declares a
-            // dep on `System.Reflection.DispatchProxy` v4.0.6.0, but Unity only
-            // ships the v4.0.5.0 shim — MSBuild's RAR can't unify and emits a
-            // multi-line MSB3277 per csproj on `dotnet build`. WCF isn't usable
-            // from a Unity runtime anyway, so excluding the family is safe.
-            if n == "System.Private.ServiceModel"
-                || n.starts_with("System.ServiceModel")
-            {
-                return;
-            }
-            netstd_refs.push(DllRef::new(
-                n,
-                format!("$(UnityPath)/{}/NetStandard/{}", data_sub, rel),
-            ));
-        });
-        netstd_refs.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // PlaybackEngines layout: macOS keeps iOSSupport/AndroidPlayer at the
-        // editor-root level (outside the `.app` bundle for code-signing), but
-        // tucks MacStandaloneSupport under `Contents/`. Windows/Linux put
-        // everything under `Editor/Data/PlaybackEngines/`. The `playback_base`
-        // here resolves to whichever applies on the host.
-        let playback_base = if cfg!(target_os = "macos") {
-            join_path(&unity_path, "PlaybackEngines")
+        let path = format!("$(UnityPath)/{}/Managed/UnityEngine/{}", data_sub, dll);
+        if name.starts_with("UnityEditor") {
+            editor_refs.push(DllRef::new(name, path));
         } else {
-            join_path(&app_contents, "PlaybackEngines")
-        };
-        let playback_ref_prefix = if cfg!(target_os = "macos") {
-            "PlaybackEngines".to_string()
-        } else {
-            format!("{}/PlaybackEngines", data_sub)
-        };
-        let ios_refs = scan_playback_dlls(
-            &join_path(&playback_base, "iOSSupport"),
-            &format!("{}/iOSSupport", playback_ref_prefix),
-        );
-        let android_refs = scan_playback_dlls(
-            &join_path(&playback_base, "AndroidPlayer"),
-            &format!("{}/AndroidPlayer", playback_ref_prefix),
-        );
-        // Mac standalone is the macOS exception: lives under Contents on mac,
-        // under Editor/Data/PlaybackEngines on non-mac. Use the unified base.
-        let standalone_base = if cfg!(target_os = "macos") {
-            join_path(&app_contents, "PlaybackEngines/MacStandaloneSupport")
-        } else {
-            join_path(&playback_base, "MacStandaloneSupport")
-        };
-        let standalone_prefix = if cfg!(target_os = "macos") {
-            format!("{}/PlaybackEngines/MacStandaloneSupport", data_sub)
-        } else {
-            format!("{}/MacStandaloneSupport", playback_ref_prefix)
-        };
-        let standalone_refs = scan_playback_dlls(&standalone_base, &standalone_prefix);
-        let windows_refs = scan_playback_dlls(
-            &join_path(&playback_base, "WindowsStandaloneSupport"),
-            &format!("{}/WindowsStandaloneSupport", playback_ref_prefix),
-        );
-
-        let source_gen_dir = join_path(&app_contents, "Tools/Unity.SourceGenerators");
-        let mut analyzers: Vec<String> = Vec::new();
-        let mut sg_dlls: Vec<String> = list_directory(&source_gen_dir)
-            .into_iter()
-            .filter(|n| n.ends_with(".dll"))
-            .collect();
-        sg_dlls.sort();
-        for dll in sg_dlls {
-            analyzers.push(format!(
-                "$(UnityPath)/{}/Tools/Unity.SourceGenerators/{}",
-                data_sub, dll
-            ));
+            engine_refs.push(DllRef::new(name, path));
         }
-
-        // Project-side enumeration via Watchman. The same query that powers
-        // project_scanner returns all `.dll` and `.asmdef` paths under
-        // `Assets/`, `Packages/`, and `Library/PackageCache/`. We treat the
-        // first call here as the seed (it returns `Fresh` with the full
-        // enumeration); incremental delta handling is the project_scanner's
-        // job. Both share the same Watchman watch.
-        //
-        // Dedupe by assembly name preserves the historical "first wins" rule
-        // across roots. The Watchman response order isn't guaranteed
-        // root-by-root, so we partition then iterate in the canonical order.
-        drop(_unity_span);
-        let _proj_span = tracing::info_span!("lockfile_scanner.project_walk").entered();
-
-        let all_paths = enumerate_project_paths(project_root)?;
-        let mut by_root: [Vec<&str>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for p in &all_paths {
-            let n = path_filename(p);
-            if !(n.ends_with(".dll") || n.ends_with(".asmdef")) {
-                continue;
-            }
-            if has_skipped_component(p) {
-                continue;
-            }
-            if p.starts_with("Assets/") {
-                by_root[0].push(p.as_str());
-            } else if p.starts_with("Packages/") {
-                by_root[1].push(p.as_str());
-            } else if p.starts_with("Library/PackageCache/") {
-                by_root[2].push(p.as_str());
-            }
-        }
-
-        let mut project_refs: Vec<DllRef> = Vec::new();
-        let mut seen_project_dlls: BTreeSet<String> = BTreeSet::new();
-        let mut seen_analyzers: BTreeSet<String> = BTreeSet::new();
-        let mut asmdef_paths: Vec<String> = Vec::new();
-        for hits in &mut by_root {
-            hits.sort();
-            for rel in hits.iter() {
-                let rel = (*rel).to_string();
-                let file_name = path_filename(&rel);
-                if file_name.ends_with(".dll") {
-                    let name = &file_name[..file_name.len() - 4];
-                    let path = format!("$(ProjectRoot)/{}", rel);
-                    if is_analyzer_dll(name) {
-                        if seen_analyzers.insert(name.to_string()) {
-                            analyzers.push(path);
-                        }
-                    } else if seen_project_dlls.insert(name.to_string()) {
-                        project_refs.push(DllRef::new(name, path));
-                    }
-                } else {
-                    asmdef_paths.push(join_path(project_root, &rel));
-                }
-            }
-        }
-
-        // Targeted fallback for packages that `Library/PackageCache/` doesn't
-        // cover — typically a fresh worktree where Unity hasn't run yet, so
-        // registry/builtin packages haven't been resolved into the per-project
-        // cache. We read `packages-lock.json` to find what *should* be there;
-        // for each gap we look up the package in `BuiltInPackages/` (already
-        // extracted, lives in the Unity install) or extract from
-        // `PackageManager/Editor/<name>-<version>.tgz` into a per-user cache.
-        // Walking those sources in bulk would drown the cold-lock path
-        // (~28 s on meow-tower); the missing-package set is usually empty in
-        // practice, so the gated approach reverts to the original ~30 ms.
-        let missing_packages = compute_missing_packages(project_root);
-        if !missing_packages.is_empty() {
-            tracing::info!(
-                "lockfile_scanner: {} package(s) missing from PackageCache; falling back to BuiltInPackages + tgz extract",
-                missing_packages.len()
-            );
-        }
-        // Each fallback source roots its walk at the per-package directory and
-        // emits ref paths using a single placeholder + prefix. Walks the
-        // fallback dirs directly (these are outside any Watchman root and are
-        // small per-package trees — no Watchman cost benefit).
-        let mut ingest = |pkg_dir: &str, ref_prefix: &str| {
-            for (rel, file_name) in fs_walk_dlls_and_asmdefs(pkg_dir, pkg_dir) {
-                if file_name.ends_with(".dll") {
-                    let name = &file_name[..file_name.len() - 4];
-                    let path = format!("{}/{}", ref_prefix, rel);
-                    if is_analyzer_dll(name) {
-                        if seen_analyzers.insert(name.to_string()) {
-                            analyzers.push(path);
-                        }
-                    } else if seen_project_dlls.insert(name.to_string()) {
-                        project_refs.push(DllRef::new(name, path));
-                    }
-                } else {
-                    asmdef_paths.push(format!("{}/{}", pkg_dir, rel));
-                }
-            }
-        };
-        // BuiltInPackages lives under the bundle-content subpath on every host
-        // (macOS Contents/Resources, Windows/Linux Editor/Data/Resources).
-        let builtin_base = format!(
-            "{}/{}/Resources/PackageManager/BuiltInPackages",
-            unity_path, data_sub
-        );
-        let builtin_prefix_base =
-            format!("$(UnityPath)/{}/Resources/PackageManager/BuiltInPackages", data_sub);
-        for entry in &missing_packages {
-            let builtin = format!("{}/{}", builtin_base, entry.name);
-            if Path::new(&builtin).exists() {
-                let prefix = format!("{}/{}", builtin_prefix_base, entry.name);
-                ingest(&builtin, &prefix);
-                continue;
-            }
-            let Some(extract_root) = crate::package_cache::ensure_extracted_for_package(
-                &unity_path,
-                &version,
-                &entry.name,
-            ) else {
-                tracing::warn!(
-                    "lockfile_scanner: package '{}' missing from PackageCache, BuiltInPackages, and Editor/*.tgz",
-                    entry.name
-                );
-                continue;
-            };
-            let prefix = format!("$(UsgCache)/{}", entry.name);
-            ingest(&extract_root, &prefix);
-        }
-
-        analyzers.sort();
-        project_refs.sort_by(|a, b| a.name.cmp(&b.name));
-
-        drop(_proj_span);
-        let _defines_span = tracing::info_span!("lockfile_scanner.defines").entered();
-        let version_defines = generate_version_defines(&version);
-        let asmdef_defines = collect_asmdef_version_defines(project_root, &asmdef_paths);
-        let mut all_defines = version_defines;
-        all_defines.extend(DEFAULT_FEATURE_DEFINES.iter().map(|s| s.to_string()));
-        all_defines.extend(asmdef_defines);
-        let scripting_defines = parse_scripting_defines(project_root);
-
-        let mut refs = std::collections::BTreeMap::new();
-        refs.insert(RefCategory::Engine, engine_refs);
-        refs.insert(RefCategory::Editor, editor_refs);
-        refs.insert(RefCategory::Netstandard, netstd_refs);
-        refs.insert(RefCategory::PlaybackIos, ios_refs);
-        refs.insert(RefCategory::PlaybackAndroid, android_refs);
-        refs.insert(RefCategory::PlaybackStandalone, standalone_refs);
-        refs.insert(RefCategory::PlaybackWindows, windows_refs);
-        refs.insert(RefCategory::Project, project_refs);
-
-        let lockfile = Lockfile {
-            unity_version: version,
-            unity_path,
-            lang_version: "9.0".to_string(),
-            analyzers,
-            refs,
-            defines: all_defines,
-            defines_scripting: scripting_defines,
-        };
-        Ok(lockfile)
     }
+
+    // Lives one level up from Managed/UnityEngine/.
+    let graphs_dll = join_path(&app_contents, "Managed/UnityEditor.Graphs.dll");
+    if file_exists(&graphs_dll) {
+        editor_refs.push(DllRef::new(
+            "UnityEditor.Graphs",
+            format!("$(UnityPath)/{}/Managed/UnityEditor.Graphs.dll", data_sub),
+        ));
+    }
+
+    let netstd_base = join_path(&app_contents, "NetStandard");
+    let mut netstd_refs: Vec<DllRef> = Vec::new();
+    walk_files(&netstd_base, &netstd_base, &[".dll"], |rel, name| {
+        let n = &name[..name.len() - 4];
+        // Drop the WCF family. `System.Private.ServiceModel.dll` declares a
+        // dep on `System.Reflection.DispatchProxy` v4.0.6.0, but Unity only
+        // ships the v4.0.5.0 shim — MSBuild's RAR can't unify and emits a
+        // multi-line MSB3277 per csproj on `dotnet build`. WCF isn't usable
+        // from a Unity runtime anyway, so excluding the family is safe.
+        if n == "System.Private.ServiceModel"
+            || n.starts_with("System.ServiceModel")
+        {
+            return;
+        }
+        netstd_refs.push(DllRef::new(
+            n,
+            format!("$(UnityPath)/{}/NetStandard/{}", data_sub, rel),
+        ));
+    });
+    netstd_refs.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // PlaybackEngines layout: macOS keeps iOSSupport/AndroidPlayer at the
+    // editor-root level (outside the `.app` bundle for code-signing), but
+    // tucks MacStandaloneSupport under `Contents/`. Windows/Linux put
+    // everything under `Editor/Data/PlaybackEngines/`. The `playback_base`
+    // here resolves to whichever applies on the host.
+    let playback_base = if cfg!(target_os = "macos") {
+        join_path(&unity_path, "PlaybackEngines")
+    } else {
+        join_path(&app_contents, "PlaybackEngines")
+    };
+    let playback_ref_prefix = if cfg!(target_os = "macos") {
+        "PlaybackEngines".to_string()
+    } else {
+        format!("{}/PlaybackEngines", data_sub)
+    };
+    let ios_refs = scan_playback_dlls(
+        &join_path(&playback_base, "iOSSupport"),
+        &format!("{}/iOSSupport", playback_ref_prefix),
+    );
+    let android_refs = scan_playback_dlls(
+        &join_path(&playback_base, "AndroidPlayer"),
+        &format!("{}/AndroidPlayer", playback_ref_prefix),
+    );
+    // Mac standalone is the macOS exception: lives under Contents on mac,
+    // under Editor/Data/PlaybackEngines on non-mac. Use the unified base.
+    let standalone_base = if cfg!(target_os = "macos") {
+        join_path(&app_contents, "PlaybackEngines/MacStandaloneSupport")
+    } else {
+        join_path(&playback_base, "MacStandaloneSupport")
+    };
+    let standalone_prefix = if cfg!(target_os = "macos") {
+        format!("{}/PlaybackEngines/MacStandaloneSupport", data_sub)
+    } else {
+        format!("{}/MacStandaloneSupport", playback_ref_prefix)
+    };
+    let standalone_refs = scan_playback_dlls(&standalone_base, &standalone_prefix);
+    let windows_refs = scan_playback_dlls(
+        &join_path(&playback_base, "WindowsStandaloneSupport"),
+        &format!("{}/WindowsStandaloneSupport", playback_ref_prefix),
+    );
+
+    let source_gen_dir = join_path(&app_contents, "Tools/Unity.SourceGenerators");
+    let mut analyzers: Vec<String> = Vec::new();
+    let mut sg_dlls: Vec<String> = list_directory(&source_gen_dir)
+        .into_iter()
+        .filter(|n| n.ends_with(".dll"))
+        .collect();
+    sg_dlls.sort();
+    for dll in sg_dlls {
+        analyzers.push(format!(
+            "$(UnityPath)/{}/Tools/Unity.SourceGenerators/{}",
+            data_sub, dll
+        ));
+    }
+
+    // Project-side enumeration via Watchman. The same query that powers
+    // project_scanner returns all `.dll` and `.asmdef` paths under
+    // `Assets/`, `Packages/`, and `Library/PackageCache/`. We treat the
+    // first call here as the seed (it returns `Fresh` with the full
+    // enumeration); incremental delta handling is the project_scanner's
+    // job. Both share the same Watchman watch.
+    //
+    // Dedupe by assembly name preserves the historical "first wins" rule
+    // across roots. The Watchman response order isn't guaranteed
+    // root-by-root, so we partition then iterate in the canonical order.
+    drop(_unity_span);
+    let _proj_span = tracing::info_span!("lockfile_scanner.project_walk").entered();
+
+    let all_paths = enumerate_project_paths(project_root)?;
+    let mut by_root: [Vec<&str>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for p in &all_paths {
+        let n = path_filename(p);
+        if !(n.ends_with(".dll") || n.ends_with(".asmdef")) {
+            continue;
+        }
+        if has_skipped_component(p) {
+            continue;
+        }
+        if p.starts_with("Assets/") {
+            by_root[0].push(p.as_str());
+        } else if p.starts_with("Packages/") {
+            by_root[1].push(p.as_str());
+        } else if p.starts_with("Library/PackageCache/") {
+            by_root[2].push(p.as_str());
+        }
+    }
+
+    let mut project_refs: Vec<DllRef> = Vec::new();
+    let mut seen_project_dlls: BTreeSet<String> = BTreeSet::new();
+    let mut seen_analyzers: BTreeSet<String> = BTreeSet::new();
+    let mut asmdef_paths: Vec<String> = Vec::new();
+    for hits in &mut by_root {
+        hits.sort();
+        for rel in hits.iter() {
+            let rel = (*rel).to_string();
+            let file_name = path_filename(&rel);
+            if file_name.ends_with(".dll") {
+                let name = &file_name[..file_name.len() - 4];
+                let path = format!("$(ProjectRoot)/{}", rel);
+                if is_analyzer_dll(name) {
+                    if seen_analyzers.insert(name.to_string()) {
+                        analyzers.push(path);
+                    }
+                } else if seen_project_dlls.insert(name.to_string()) {
+                    project_refs.push(DllRef::new(name, path));
+                }
+            } else {
+                asmdef_paths.push(join_path(project_root, &rel));
+            }
+        }
+    }
+
+    // Targeted fallback for packages that `Library/PackageCache/` doesn't
+    // cover — typically a fresh worktree where Unity hasn't run yet, so
+    // registry/builtin packages haven't been resolved into the per-project
+    // cache. We read `packages-lock.json` to find what *should* be there;
+    // for each gap we look up the package in `BuiltInPackages/` (already
+    // extracted, lives in the Unity install) or extract from
+    // `PackageManager/Editor/<name>-<version>.tgz` into a per-user cache.
+    // Walking those sources in bulk would drown the cold-lock path
+    // (~28 s on meow-tower); the missing-package set is usually empty in
+    // practice, so the gated approach reverts to the original ~30 ms.
+    let missing_packages = compute_missing_packages(project_root);
+    if !missing_packages.is_empty() {
+        tracing::info!(
+            "lockfile_scanner: {} package(s) missing from PackageCache; falling back to BuiltInPackages + tgz extract",
+            missing_packages.len()
+        );
+    }
+    // Each fallback source roots its walk at the per-package directory and
+    // emits ref paths using a single placeholder + prefix. Walks the
+    // fallback dirs directly (these are outside any Watchman root and are
+    // small per-package trees — no Watchman cost benefit).
+    let mut ingest = |pkg_dir: &str, ref_prefix: &str| {
+        for (rel, file_name) in fs_walk_dlls_and_asmdefs(pkg_dir, pkg_dir) {
+            if file_name.ends_with(".dll") {
+                let name = &file_name[..file_name.len() - 4];
+                let path = format!("{}/{}", ref_prefix, rel);
+                if is_analyzer_dll(name) {
+                    if seen_analyzers.insert(name.to_string()) {
+                        analyzers.push(path);
+                    }
+                } else if seen_project_dlls.insert(name.to_string()) {
+                    project_refs.push(DllRef::new(name, path));
+                }
+            } else {
+                asmdef_paths.push(format!("{}/{}", pkg_dir, rel));
+            }
+        }
+    };
+    // BuiltInPackages lives under the bundle-content subpath on every host
+    // (macOS Contents/Resources, Windows/Linux Editor/Data/Resources).
+    let builtin_base = format!(
+        "{}/{}/Resources/PackageManager/BuiltInPackages",
+        unity_path, data_sub
+    );
+    let builtin_prefix_base =
+        format!("$(UnityPath)/{}/Resources/PackageManager/BuiltInPackages", data_sub);
+    for entry in &missing_packages {
+        let builtin = format!("{}/{}", builtin_base, entry.name);
+        if Path::new(&builtin).exists() {
+            let prefix = format!("{}/{}", builtin_prefix_base, entry.name);
+            ingest(&builtin, &prefix);
+            continue;
+        }
+        let Some(extract_root) = crate::package_cache::ensure_extracted_for_package(
+            &unity_path,
+            &version,
+            &entry.name,
+        ) else {
+            tracing::warn!(
+                "lockfile_scanner: package '{}' missing from PackageCache, BuiltInPackages, and Editor/*.tgz",
+                entry.name
+            );
+            continue;
+        };
+        let prefix = format!("$(UsgCache)/{}", entry.name);
+        ingest(&extract_root, &prefix);
+    }
+
+    analyzers.sort();
+    project_refs.sort_by(|a, b| a.name.cmp(&b.name));
+
+    drop(_proj_span);
+    let _defines_span = tracing::info_span!("lockfile_scanner.defines").entered();
+    let version_defines = generate_version_defines(&version);
+    let asmdef_defines = collect_asmdef_version_defines(project_root, &asmdef_paths);
+    let mut all_defines = version_defines;
+    all_defines.extend(DEFAULT_FEATURE_DEFINES.iter().map(|s| s.to_string()));
+    all_defines.extend(asmdef_defines);
+    let scripting_defines = parse_scripting_defines(project_root);
+
+    let mut refs = std::collections::BTreeMap::new();
+    refs.insert(RefCategory::Engine, engine_refs);
+    refs.insert(RefCategory::Editor, editor_refs);
+    refs.insert(RefCategory::Netstandard, netstd_refs);
+    refs.insert(RefCategory::PlaybackIos, ios_refs);
+    refs.insert(RefCategory::PlaybackAndroid, android_refs);
+    refs.insert(RefCategory::PlaybackStandalone, standalone_refs);
+    refs.insert(RefCategory::PlaybackWindows, windows_refs);
+    refs.insert(RefCategory::Project, project_refs);
+
+    let lockfile = Lockfile {
+        unity_version: version,
+        unity_path,
+        lang_version: "9.0".to_string(),
+    analyzers,
+    refs,
+    defines: all_defines,
+    defines_scripting: scripting_defines,
+};
+Ok(lockfile)
 }
 
 fn resolve_unity_path(project_root: &str) -> Result<(String, String)> {
@@ -365,18 +361,7 @@ fn walk_files(
 /// more than one cold-crawl on the first call.
 fn enumerate_project_paths(project_root: &str) -> Result<Vec<String>> {
     let _s = tracing::info_span!("lockfile_scanner.watchman_query").entered();
-    enumerate(Path::new(project_root)).map_err(scan_to_generator)
-}
-
-/// Map `scan::ScanError` into the crate-level error, preserving the
-/// "watchman unavailable" hint so callers can print a focused install message.
-fn scan_to_generator(e: ScanError) -> crate::error::GeneratorError {
-    match e {
-        ScanError::Unavailable => {
-            crate::error::GeneratorError::ScanUnavailable(e.to_string())
-        }
-        ScanError::Query(_) => crate::error::GeneratorError::Other(e.to_string()),
-    }
+    enumerate(Path::new(project_root)).map_err(to_generator_error)
 }
 
 /// Recursively walk `directory` and return every `.dll` / `.asmdef` as

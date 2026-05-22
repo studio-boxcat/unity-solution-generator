@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::error::{LockfileError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
-use crate::lockfile_scanner::LockfileScanner;
+use crate::lockfile_scanner;
 use crate::paths::{lockfile_path, parent_directory, read_unity_version};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,14 +51,10 @@ pub enum RefCategory {
 }
 
 impl RefCategory {
-    /// All variants in the canonical iteration order used by `LockfileIO::write`.
-    ///
-    /// Adding a new variant has to update **both** the array literal AND the
-    /// length below; the const assertion ties them together so a forgotten array
-    /// entry fails compilation. The exhaustive match in `as_section`/`from_section`
-    /// catches the variant on the first build attempt; this assertion catches it
-    /// on the second (when the developer updates the match but forgets the array).
-    pub const ALL: [RefCategory; Self::COUNT] = [
+    /// All variants in the canonical iteration order used by `lockfile::write`.
+    /// The exhaustive match in `as_section`/`from_section` forces any new variant
+    /// to be addressed at compile time.
+    pub const ALL: [RefCategory; 8] = [
         RefCategory::Engine,
         RefCategory::Editor,
         RefCategory::Netstandard,
@@ -68,27 +64,6 @@ impl RefCategory {
         RefCategory::PlaybackWindows,
         RefCategory::Project,
     ];
-
-    /// Number of variants. Bumping this is enforced by the array literal above —
-    /// the array length must match this constant or compilation fails.
-    pub const COUNT: usize = {
-        // One arm per variant. Adding a new enum variant fails the exhaustive
-        // match here, forcing the developer to also bump COUNT and add to ALL.
-        let count_per_variant = |v: RefCategory| -> usize {
-            match v {
-                RefCategory::Engine => 1,
-                RefCategory::Editor => 1,
-                RefCategory::Netstandard => 1,
-                RefCategory::PlaybackIos => 1,
-                RefCategory::PlaybackAndroid => 1,
-                RefCategory::PlaybackStandalone => 1,
-                RefCategory::PlaybackWindows => 1,
-                RefCategory::Project => 1,
-            }
-        };
-        let _ = count_per_variant;
-        8
-    };
 
     pub fn as_section(self) -> &'static str {
         match self {
@@ -158,161 +133,157 @@ impl Lockfile {
     }
 }
 
-pub struct LockfileIO;
+/// Load the lockfile, returning a fresh one if the on-disk version is
+/// missing, malformed, or stale. Freshness criteria:
+///   1. `lockfile.unity-version` matches `ProjectSettings/ProjectVersion.txt`
+///   2. The `scan-cache` mtime fingerprint validates (no project-relevant
+///      file has changed since the scan was written, which means the
+///      derived lockfile is also still valid).
+///
+/// On miss → full rescan via [`lockfile_scanner::scan`] + atomic rewrite.
+/// Watchman is invoked indirectly via the rescan path; the cache-hit path
+/// is pure mtime-stat (sub-ms).
+pub fn scan_and_write(project_root: &str, generator_root: &str) -> Result<Lockfile> {
+    let path = lockfile_path(project_root, generator_root);
+    create_dir_all(parent_directory(&path));
 
-impl LockfileIO {
-    /// Load the lockfile, returning a fresh one if the on-disk version is
-    /// missing, malformed, or stale. Freshness criteria:
-    ///   1. `lockfile.unity-version` matches `ProjectSettings/ProjectVersion.txt`
-    ///   2. The `scan-cache` mtime fingerprint validates (no project-relevant
-    ///      file has changed since the scan was written, which means the
-    ///      derived lockfile is also still valid).
-    ///
-    /// On miss → full rescan via [`LockfileScanner::scan`] + atomic rewrite.
-    /// Watchman is invoked indirectly via the rescan path; the cache-hit path
-    /// is pure mtime-stat (sub-ms).
-    pub fn scan_and_write(project_root: &str, generator_root: &str) -> Result<Lockfile> {
-        let path = lockfile_path(project_root, generator_root);
-        create_dir_all(parent_directory(&path));
-
-        // Fast path: lockfile exists, unity-version still matches, and the
-        // scan-cache fingerprint says no project-relevant file has changed
-        // since the scan (and therefore the lockfile) was written.
-        if std::path::Path::new(&path).exists() {
-            if let Ok(existing) = Self::read(&path) {
-                if let Some(current) = read_unity_version(project_root) {
-                    if current == existing.unity_version
-                        && crate::project_scanner::scan_cache_fingerprint_matches(
-                            project_root,
-                            generator_root,
-                        )
-                    {
-                        return Ok(existing);
-                    }
+    // Fast path: lockfile exists, unity-version still matches, and the
+    // scan-cache fingerprint says no project-relevant file has changed
+    // since the scan (and therefore the lockfile) was written.
+    if std::path::Path::new(&path).exists() {
+        if let Ok(existing) = read(&path) {
+            if let Some(current) = read_unity_version(project_root) {
+                if current == existing.unity_version
+                    && crate::project_scanner::scan_cache_fingerprint_matches(
+                        project_root,
+                        generator_root,
+                    )
+                {
+                    return Ok(existing);
                 }
             }
         }
-
-        let lockfile = LockfileScanner::scan(project_root)?;
-        Self::write(&lockfile, &path)?;
-        Ok(lockfile)
     }
 
-    pub fn write(lockfile: &Lockfile, path: &str) -> Result<()> {
-        let mut s = String::new();
-        s.push_str("# csproj.lock — auto-generated by unity-solution-generator\n");
-        s.push_str("# Refreshed on every typecheck/build when Watchman reports relevant changes.\n\n");
-        s.push_str(&format!("unity-version: {}\n", lockfile.unity_version));
-        s.push_str(&format!("unity-path: {}\n", lockfile.unity_path));
-        s.push_str(&format!("lang-version: {}\n", lockfile.lang_version));
+    let lockfile = lockfile_scanner::scan(project_root)?;
+    write(&lockfile, &path)?;
+    Ok(lockfile)
+}
 
-        write_section(&mut s, "analyzers", &lockfile.analyzers);
-        for cat in RefCategory::ALL {
-            write_ref_section(&mut s, cat.as_section(), lockfile.refs_for(cat));
-        }
+pub fn write(lockfile: &Lockfile, path: &str) -> Result<()> {
+    let mut s = String::new();
+    s.push_str("# csproj.lock — auto-generated by unity-solution-generator\n");
+    s.push_str("# Refreshed on every typecheck/build when Watchman reports relevant changes.\n\n");
+    s.push_str(&format!("unity-version: {}\n", lockfile.unity_version));
+    s.push_str(&format!("unity-path: {}\n", lockfile.unity_path));
+    s.push_str(&format!("lang-version: {}\n", lockfile.lang_version));
 
-        s.push_str("\n[defines]\n");
-        s.push_str(&lockfile.defines.join(";"));
-        s.push('\n');
-
-        s.push_str("\n[defines.scripting]\n");
-        s.push_str(&lockfile.defines_scripting.join(";"));
-        s.push('\n');
-
-        write_file_if_changed(path, &s)?;
-        Ok(())
+    write_section(&mut s, "analyzers", &lockfile.analyzers);
+    for cat in RefCategory::ALL {
+        write_ref_section(&mut s, cat.as_section(), lockfile.refs_for(cat));
     }
 
-    pub fn read(path: &str) -> Result<Lockfile> {
-        let content = read_file(path)?;
+    s.push_str("\n[defines]\n");
+    s.push_str(&lockfile.defines.join(";"));
+    s.push('\n');
 
-        let mut unity_version = String::new();
-        let mut unity_path = String::new();
-        let mut lang_version = String::from("9.0");
-        let mut analyzers: Vec<String> = Vec::new();
-        let mut refs: BTreeMap<RefCategory, Vec<DllRef>> = BTreeMap::new();
-        let mut defines: Vec<String> = Vec::new();
-        let mut defines_scripting: Vec<String> = Vec::new();
+    s.push_str("\n[defines.scripting]\n");
+    s.push_str(&lockfile.defines_scripting.join(";"));
+    s.push('\n');
 
-        enum Section {
-            Analyzers,
-            Ref(RefCategory),
-            Defines,
-            DefinesScripting,
-        }
-        let mut current: Option<Section> = None;
+    write_file_if_changed(path, &s)?;
+    Ok(())
+}
 
-        for line in content.split('\n') {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
+pub fn read(path: &str) -> Result<Lockfile> {
+    let content = read_file(path)?;
 
-            if line.starts_with('[') && line.ends_with(']') {
-                let name = &line[1..line.len() - 1];
-                current = if let Some(cat) = RefCategory::from_section(name) {
-                    Some(Section::Ref(cat))
-                } else {
-                    match name {
-                        "analyzers" => Some(Section::Analyzers),
-                        "defines" => Some(Section::Defines),
-                        "defines.scripting" => Some(Section::DefinesScripting),
-                        _ => None,
-                    }
-                };
-                continue;
-            }
+    let mut unity_version = String::new();
+    let mut unity_path = String::new();
+    let mut lang_version = String::from("9.0");
+    let mut analyzers: Vec<String> = Vec::new();
+    let mut refs: BTreeMap<RefCategory, Vec<DllRef>> = BTreeMap::new();
+    let mut defines: Vec<String> = Vec::new();
+    let mut defines_scripting: Vec<String> = Vec::new();
 
-            match &current {
-                None => {
-                    if let Some((k, v)) = parse_header_line(line) {
-                        match k {
-                            "unity-version" => unity_version = v.to_string(),
-                            "unity-path" => unity_path = v.to_string(),
-                            "lang-version" => lang_version = v.to_string(),
-                            _ => {}
-                        }
-                    }
-                }
-                Some(Section::Analyzers) => analyzers.push(line.to_string()),
-                Some(Section::Ref(cat)) => {
-                    if let Some(r) = parse_dll_ref(line) {
-                        refs.entry(*cat).or_default().push(r);
-                    }
-                }
-                // The writer always emits a single semicolon-delimited line per
-                // section, but a hand-edited or future writer could spill across
-                // multiple lines. Use `extend` so we don't silently drop everything
-                // but the last line.
-                Some(Section::Defines) => {
-                    if !line.is_empty() {
-                        defines.extend(line.split(';').map(str::to_string));
-                    }
-                }
-                Some(Section::DefinesScripting) => {
-                    if !line.is_empty() {
-                        defines_scripting.extend(line.split(';').map(str::to_string));
-                    }
-                }
-            }
-        }
-
-        if unity_version.is_empty() {
-            return Err(LockfileError::InvalidLockfile("missing unity-version".into()).into());
-        }
-        if unity_path.is_empty() {
-            return Err(LockfileError::InvalidLockfile("missing unity-path".into()).into());
-        }
-
-        Ok(Lockfile {
-            unity_version,
-            unity_path,
-            lang_version,
-            analyzers,
-            refs,
-            defines,
-            defines_scripting,
-        })
+    enum Section {
+        Analyzers,
+        Ref(RefCategory),
+        Defines,
+        DefinesScripting,
     }
+    let mut current: Option<Section> = None;
+
+    for line in content.split('\n') {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = &line[1..line.len() - 1];
+            current = if let Some(cat) = RefCategory::from_section(name) {
+                Some(Section::Ref(cat))
+            } else {
+                match name {
+                    "analyzers" => Some(Section::Analyzers),
+                    "defines" => Some(Section::Defines),
+                    "defines.scripting" => Some(Section::DefinesScripting),
+                    _ => None,
+                }
+            };
+            continue;
+        }
+
+        match &current {
+            None => {
+                if let Some((k, v)) = parse_header_line(line) {
+                    match k {
+                        "unity-version" => unity_version = v.to_string(),
+                        "unity-path" => unity_path = v.to_string(),
+                        "lang-version" => lang_version = v.to_string(),
+                        _ => {}
+                    }
+                }
+            }
+            Some(Section::Analyzers) => analyzers.push(line.to_string()),
+            Some(Section::Ref(cat)) => {
+                if let Some(r) = parse_dll_ref(line) {
+                    refs.entry(*cat).or_default().push(r);
+                }
+            }
+            // The writer always emits a single semicolon-delimited line per
+            // section, but a hand-edited or future writer could spill across
+            // multiple lines. Use `extend` so we don't silently drop everything
+            // but the last line.
+            Some(Section::Defines) => {
+                if !line.is_empty() {
+                    defines.extend(line.split(';').map(str::to_string));
+                }
+            }
+            Some(Section::DefinesScripting) => {
+                if !line.is_empty() {
+                    defines_scripting.extend(line.split(';').map(str::to_string));
+                }
+            }
+        }
+    }
+
+    if unity_version.is_empty() {
+        return Err(LockfileError::InvalidLockfile("missing unity-version".into()).into());
+    }
+    if unity_path.is_empty() {
+        return Err(LockfileError::InvalidLockfile("missing unity-path".into()).into());
+    }
+
+    Ok(Lockfile {
+        unity_version,
+        unity_path,
+        lang_version,
+    analyzers,
+    refs,
+    defines,
+    defines_scripting,
+})
 }
 
 fn write_section(s: &mut String, name: &str, lines: &[String]) {

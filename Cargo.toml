@@ -29,6 +29,9 @@ tokio = { version = "1", default-features = false, features = ["rt", "net", "io-
 anyhow = "1"
 # Typed error enums; used by `scan.rs` for `WatchmanError` and friends.
 thiserror = "2"
+# Compact binary codec for the `scan-cache` file. Native `Encode`/`Decode`
+# derives — no serde required. Saves ~120 LOC of hand-rolled text codec.
+bincode = "2"
 
 # `panic = "unwind"` (the default) is required by FFI hosts that wrap calls
 # in `catch_unwind` (e.g. meow-tower's BoxcatBridge). Don't set "abort" here.

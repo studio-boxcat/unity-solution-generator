@@ -32,6 +32,7 @@ watchman_client.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+bincode.workspace = true
 flate2 = "1"
 tar = "0.4"
 tracing = "0.1"

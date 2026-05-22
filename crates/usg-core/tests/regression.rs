@@ -16,7 +16,7 @@ use std::path::Path;
 
 use common::{make_temp_root, write_file};
 use unity_solution_generator::{
-    BuildConfig, BuildPlatform, GenerateOptions, Lockfile, RefCategory, SolutionGenerator,
+    BuildConfig, BuildPlatform, GenerateOptions, Lockfile, RefCategory, solution_generator,
     xml::deterministic_guid,
 };
 
@@ -129,8 +129,7 @@ fn ios_editor_includes_all_four_asmdefs() {
     let root = tmp.path();
     write_fixture(root);
 
-    let result = SolutionGenerator::new()
-        .generate_from_lockfile(
+    let result = solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor),
             &lockfile_for_fixture(),
         )
@@ -157,8 +156,7 @@ fn ios_prod_excludes_editor_only() {
     let root = tmp.path();
     write_fixture(root);
 
-    let result = SolutionGenerator::new()
-        .generate_from_lockfile(
+    let result = solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Prod),
             &lockfile_for_fixture(),
         )
@@ -187,8 +185,7 @@ fn android_prod_excludes_ios_only() {
     let root = tmp.path();
     write_fixture(root);
 
-    let result = SolutionGenerator::new()
-        .generate_from_lockfile(
+    let result = solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Android, BuildConfig::Prod),
             &lockfile_for_fixture(),
         )

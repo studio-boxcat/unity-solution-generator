@@ -40,12 +40,12 @@ crates/
   usg-core/                 lib + companion binary (cargo `[lib]` + `[[bin]]`)
     Cargo.toml              [lib] + [[bin]] unity-solution-generator
     src/
-      lib.rs                pub API + LOCKFILE_VERSION + CACHE_VERSION
+      lib.rs                pub API + LOCKFILE_VERSION
       main.rs               arg parse + subcommand dispatch
-      lockfile.rs           Lockfile, DllRef, RefCategory, LockfileIO
-                            (Watchman clock sidecar invalidation)
-      project_scanner.rs    project-side scan; AsmDefRecord, ProjectCategory
-                            (Watchman-driven enumeration + clock cursor cache)
+      lockfile.rs           Lockfile, DllRef, RefCategory + free-fn I/O
+                            (scan_and_write / read / write)
+      project_scanner.rs    project-side scan; AsmDefRecord, ProjectCategory;
+                            bincode scan-cache w/ mtime fingerprint
       lockfile_scanner.rs   Unity-install (fs walk, one-shot per version)
                             + project DLL/asmdef discovery (Watchman)
       scan.rs               Watchman wire layer (sync facade over async)
@@ -57,7 +57,6 @@ crates/
       paths.rs              cross-platform path helpers; dunce::canonicalize
                             (Windows-safe); per-host install/data subpaths
       io.rs                 atomic_write via tempfile::NamedTempFile::persist
-      profile.rs            tracing macros
       xml.rs                escape + deterministic GUID (pinned invariant)
       error.rs              GeneratorError + LockfileError + io_err helper
     tests/                  e2e + integration + cli_regression + typecheck_paths
@@ -69,9 +68,8 @@ The crate publishes to crates.io as `unity-solution-generator`. Cdylib hosting (
 
 ```mermaid
 graph LR
-    inv[CLI invocation] -->|auto-lock on cache miss| L[lockfile.rs::scan_and_write]
+    inv[CLI invocation] -->|auto-lock on cache miss| L[lockfile::scan_and_write]
     L --> B[csproj.lock]
-    L --> CLK[.lock-watchman-clock]
     B --> R[solution_generator::generate_from_lockfile]
     R --> D[.csproj/.sln]
     D --> T[typecheck]
@@ -82,7 +80,7 @@ graph LR
 
 Pipeline stages (all internal — no standalone `lock` or `generate` CLI surface; the library API exposes the building blocks for FFI hosts):
 
-1. **Lockfile auto-refresh** (`LockfileIO::scan_and_write`) — runs at the top of every subcommand. Reads `ProjectSettings/ProjectVersion.txt` for the Unity version, resolves the install path via `paths::unity_install_root(version)`, walks `Managed/`, `NetStandard/`, `PlaybackEngines/<P>` directly (one-shot fs walk per editor version), then queries Watchman for `.dll`/`.asmdef` paths under `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock` + `.lock-watchman-clock` sidecar. Cache-hit path skips both walks via the unity-version equality + Watchman delta check.
+1. **Lockfile auto-refresh** (`lockfile::scan_and_write`) — runs at the top of every subcommand. Reads `ProjectSettings/ProjectVersion.txt` for the Unity version, resolves the install path via `paths::unity_install_root(version)`, walks `Managed/`, `NetStandard/`, `PlaybackEngines/<P>` directly (one-shot fs walk per editor version), then queries Watchman for `.dll`/`.asmdef` paths under `Assets/`, `Packages/`, `Library/PackageCache/`. Output: `csproj.lock`. Cache-hit path skips both walks when `unity-version` matches `ProjectVersion.txt` AND the scan-cache mtime fingerprint is intact.
 
    Package DLLs come from three sources, priority-ordered: `Library/PackageCache/<name>@<hash>` (resolved per-project) → `<UnityInstall>/<data>/Resources/PackageManager/BuiltInPackages/<name>` (Unity's bundled directory packages) → `<usg_cache>/<unity-version>/<name>` (extracted on demand from `<UnityInstall>/<data>/Resources/PackageManager/Editor/*.tgz`). The latter two only fire for `packages-lock.json` entries PackageCache hasn't resolved — typically a fresh worktree where Unity hasn't run. PackageCache wins when present so we honor Unity's actual version pinning.
 
@@ -101,7 +99,7 @@ Pipeline stages (all internal — no standalone `lock` or `generate` CLI surface
 | `typecheck` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>]` (defaults: `ios editor`) |
 | `build` | `[<root>] [<platform>] [<config>] [--extra-refs <paths>] [-- <dotnet-build-args>...]` (defaults: `ios editor`) |
 
-`<root>` is optional — when omitted the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`. `<platform>` accepts `ios | android | osx | windows`. Both subcommands implicitly call `LockfileIO::scan_and_write` (auto-lock on cache miss) and `generate_sln` (refresh `.csproj`/`.sln`) before doing their compile-check / `dotnet build` work — so there's no standalone `lock` or `generate` CLI surface. "Render without compiling" is the library API's job; see [[library-api.md]].
+`<root>` is optional — when omitted the CLI climbs from CWD to the nearest ancestor containing `ProjectSettings/ProjectVersion.txt`. `<platform>` accepts `ios | android | osx | windows`. Both subcommands implicitly call `lockfile::scan_and_write` (auto-lock on cache miss) and `solution_generator::generate` (refresh `.csproj`/`.sln`) before doing their compile-check / `dotnet build` work — so there's no standalone `lock` or `generate` CLI surface. "Render without compiling" is the library API's job; see [[library-api.md]].
 
 ### Rust API
 
@@ -123,11 +121,11 @@ flowchart LR
   write --> gen
 ```
 
-**Single cache, mtime-fingerprinted (v0.5.0):**
-- One persisted file: `scan-cache` (text format, grep-debuggable, under `<generator_root>`).
-- Header section `[mtimes]` lists every path the scan content depends on with ns-mtimes — invalidation is pure `stat` of those paths. On meow-tower: ~40 entries.
+**Single cache, mtime-fingerprinted (v0.6.0):**
+- One persisted file: `scan-cache.bin` (bincode 2, schema-versioned via `SCAN_CACHE_SCHEMA`, under `<generator_root>`).
+- Header lists every path the scan content depends on with ns-mtimes — invalidation is pure `stat` of those paths. On meow-tower: ~30 entries (asmdef/asmref dirs + ancestors + top-level project dirs).
 - Cache miss → one Watchman `enumerate(project_root)` call returns the full project file list; asmdef JSON parsed in parallel via `rayon`.
-- The lockfile (`csproj.lock`) shares the same invalidation: `LockfileIO::scan_and_write` validates by checking `unity-version` against `ProjectVersion.txt` AND `ProjectScanner::scan_cache_fingerprint_matches`. When both hold, the existing lockfile is reused as-is.
+- The lockfile (`csproj.lock`) shares the same invalidation: `lockfile::scan_and_write` validates by checking `unity-version` against `ProjectVersion.txt` AND `project_scanner::scan_cache_fingerprint_matches`. When both hold, the existing lockfile is reused as-is.
 
 **Watchman scope (required dependency):**
 - Watchman roots at the project. Query scoped to `Assets/`, `Packages/`, `Library/PackageCache/`, `ProjectSettings/` via the `DirName` expression.
@@ -138,7 +136,7 @@ flowchart LR
 - Walked once per editor version using `std::fs::read_dir` recursion (via `walkdir` for the NetStandard subtree). Result is cached *inside* the lockfile (the refs sections themselves are the cache).
 - Invalidation: `lockfile.unity_version != ProjectVersion.txt` content → rescan.
 
-**Fingerprint paths:** top-level dirs (`Assets`, `Packages`, `Library/PackageCache`, `ProjectSettings`), every asmdef directory + ancestors, every `.asmdef`/`.asmref` file, plus the lockfile-input files `ProjectVersion.txt` / `manifest.json` / `packages-lock.json`. Directory mtimes catch add/remove; file mtimes catch in-place rewrites (which don't bump parent-dir mtime on POSIX).
+**Fingerprint paths:** top-level dirs (`Assets`, `Packages`, `Library/PackageCache`, `ProjectSettings`), every asmdef directory + ancestors, every `.asmdef`/`.asmref` file. Directory mtimes catch add/remove; file mtimes catch in-place rewrites (which don't bump parent-dir mtime on POSIX). The lockfile's `unity-version` field handles `ProjectVersion.txt` drift on its own; package-manifest changes are surfaced via the `Library/PackageCache` dir mtime once Unity resolves them — fingerprinting `manifest.json` / `packages-lock.json` directly would force a rescan before the resolution exists.
 
 The Unity Editor install is intentionally NOT watched: it's a multi-GB write-once-per-version tree, and Watchman's cold-crawl on Windows can hit minutes (Metro #959). Versioning by string equality is correct and cheap.
 
@@ -166,8 +164,7 @@ All generator artifacts live under `Library/UnitySolutionGenerator/` (gitignored
 ```
 Library/UnitySolutionGenerator/
   csproj.lock                     ← lockfile (user-visible, may be checked in)
-  scan-cache                      ← project scan + mtime fingerprint (gitignored)
-  csc-dll-path                    ← cached `dotnet --list-sdks` result (gitignored)
+  scan-cache.bin                  ← project scan + mtime fingerprint (gitignored)
   ios-editor/                     ← `generate` output: .csproj + .sln + Directory.Build.props
     obj/Debug/<asmdef>.dll        ←   `build` + `typecheck` shared output (see below)
     obj/Debug/<asmdef>.dll.usg-stamp ← `typecheck` ownership marker
@@ -188,6 +185,7 @@ Per-user cache lives outside the project. Host-specific roots:
 
 ```
 <host-cache>/unity-solution-generator/<unity-version>/
+  csc-dll-path                    ← cached `dotnet --list-sdks` result
   <package-name>/
     <extracted .tgz contents>
     .complete                     ← marker; absence = mid-extract or crashed
@@ -208,9 +206,9 @@ One `pub const u32` constant in `lib.rs`:
 
 Typecheck DLLs carry their own `.usg-stamp` sidecar that pins per-emit ownership; foreign writers (e.g. `dotnet build`) trip the next typecheck into a recompile. Use `rm -rf Library/UnitySolutionGenerator/<variant>/obj/Debug/` for a forced rebuild.
 
-The `scan-cache` file is unversioned by design — a malformed header (missing `[mtimes]` section) trips the loader's `None` return, which forces a full re-derive. Force a rescan by deleting `Library/UnitySolutionGenerator/scan-cache`.
+The `scan-cache.bin` file carries a `SCAN_CACHE_SCHEMA: u32` in its bincoded header; a decode failure (legacy schema, corrupt bytes) trips the loader's `None` return, forcing a full re-derive. Force a rescan by deleting `Library/UnitySolutionGenerator/scan-cache.bin`.
 
-**When the mtime fingerprint is insufficient.** Backward-dated mtimes from operations that preserve timestamps (`tar -x`, `cp --preserve=timestamps`, `git restore --source` of older blobs, `rsync --times`) leave the fingerprint matching despite content changes. The escape hatch is manual: `rm Library/UnitySolutionGenerator/scan-cache`. Pre-overhaul ran on the same mtime-fingerprint model for 8 months without trouble; the sibling project `unity-assetdb` made the symmetric choice (Watchman-only, no mtime).
+**When the mtime fingerprint is insufficient.** Backward-dated mtimes from operations that preserve timestamps (`tar -x`, `cp --preserve=timestamps`, `git restore --source` of older blobs, `rsync --times`) leave the fingerprint matching despite content changes. The escape hatch is manual: `rm Library/UnitySolutionGenerator/scan-cache.bin`. Pre-overhaul ran on the same mtime-fingerprint model for 8 months without trouble; the sibling project `unity-assetdb` made the symmetric choice (Watchman-only, no mtime).
 
 ## `typecheck` deeper
 

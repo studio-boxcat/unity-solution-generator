@@ -13,15 +13,16 @@ Hyperfine, `--warmup 5 --runs 50`:
 | Pre-overhaul baseline | 3 mtime-fingerprint caches | 36.6 ± 0.7 ms |
 | v0.3.0 (post-Watchman strip) | Watchman-only, no caches | 875 ms |
 | v0.4.0 (perf passes) | 5 caches, 2-tier invalidation, sidecars | 31.9 ± 0.7 ms |
-| **v0.5.0 (current)** | **1 scan-cache, mtime-only fingerprint** | **35.8 ± 0.9 ms** |
+| v0.5.0 | 1 scan-cache, mtime-only fingerprint | 35.8 ± 0.9 ms |
+| **v0.6.0 (current)** | **bincode scan-cache + pruned fingerprint + free-fn API** | **~35 ms** |
 
-v0.5.0 trades ~4 ms vs v0.4.0 for ~150 fewer LOC, one fewer persisted file, and a much simpler invalidation model. Still under the pre-overhaul target.
+v0.6.0 keeps the v0.5.0 single-cache model but drops the text codec (~150 LOC) and the redundant `manifest.json` / `packages-lock.json` / `ProjectVersion.txt` mtime entries. The csc-dll-path sidecar moved to the per-user cache, removing it from the project tree entirely.
 
 Run via `just profile` for warm/cold breakdown, `just profile-spans` for per-section tracing.
 
 ## Per-section (one run, USG_PROFILE=1)
 
-Cache-miss (`scan-cache` deleted, full re-derive):
+Cache-miss (`scan-cache.bin` deleted, full re-derive):
 ```
 typecheck (~100 ms total)
 ├─ lockfile_scanner.scan                ~15 ms   Unity install walkdir + Watchman enumerate
@@ -32,8 +33,8 @@ typecheck (~100 ms total)
 Warm cache-hit:
 ```
 typecheck (~36 ms wall-clock)
-├─ scan_cache_fingerprint_matches       ~1 ms    ~40 stat calls
-├─ LockfileIO::scan_and_write            <1 ms    read csproj.lock + unity-version stringy check
+├─ scan_cache_fingerprint_matches       ~1 ms    ~30 stat calls
+├─ lockfile::scan_and_write             <1 ms    read csproj.lock + unity-version stringy check
 └─ typecheck.run                        ~30 ms   csc UTD checks (stat sources + refs per asmdef)
 ```
 
@@ -83,18 +84,18 @@ Cold rebuild now lands at the same order of magnitude as the retired MSBuild dri
 
 For posterity: MSBuild's up-to-date check failed for our setup — `obj/Debug/<proj>.csproj.CoreCompileInputs.cache` was rewritten on every invocation with the same-second mtime as the `.dll`, so MSBuild re-invoked `csc` on all 9 projects every time. PerformanceSummary on a warm meow-tower run showed `Csc 9 calls 1168 ms` cumulative ≈ ~500 ms wall-clock with parallelism. The MSBuild Server, RAR optimizations, and analyzer-skip flags all contributed, but the floor was csc itself running unconditionally. Bypassing MSBuild was the only way to drop below it.
 
-## Caching layers (v0.5.0)
+## Caching layers (v0.6.0)
 
 Two on-disk artifacts. One invalidation invariant.
 
 | Cache | Path | Invalidates on | Hot-path skip |
 |---|---|---|---|
-| `scan-cache` | `Library/UnitySolutionGenerator/scan-cache` | Any of ~40 fingerprinted mtimes (asmdef/asmref files + parent dirs + `manifest.json` + `packages-lock.json` + `ProjectVersion.txt`) | Full Watchman enumeration + per-asmdef JSON parse + Unity install rescan + lockfile rewrite |
-| `csc-dll-path` | `Library/UnitySolutionGenerator/csc-dll-path` | Cached path no longer exists (SDK uninstall) | `dotnet --list-sdks` subprocess (~60 ms) |
+| `scan-cache.bin` | `Library/UnitySolutionGenerator/scan-cache.bin` | Any of ~30 fingerprinted mtimes (asmdef/asmref files + parent dirs + top-level project dirs) | Full Watchman enumeration + per-asmdef JSON parse + Unity install rescan + lockfile rewrite |
+| `csc-dll-path` | `<host-cache>/unity-solution-generator/<unity-version>/csc-dll-path` | Cached path no longer exists (SDK uninstall) | `dotnet --list-sdks` subprocess (~60 ms) |
 
-Lockfile (`csproj.lock`) reuses the `scan-cache` fingerprint as its invalidation signal — `LockfileIO::scan_and_write` validates by `unity-version` equality AND `scan_cache_fingerprint_matches`. When both hold, the existing lockfile is reused without a rescan. No separate Watchman query for the lockfile.
+Lockfile (`csproj.lock`) reuses the `scan-cache.bin` fingerprint as its invalidation signal — `lockfile::scan_and_write` validates by `unity-version` equality AND `scan_cache_fingerprint_matches`. When both hold, the existing lockfile is reused without a rescan. No separate Watchman query for the lockfile.
 
-Hot-path cache validation: ~40 `stat()` calls (~1–2 ms total).
+Hot-path cache validation: ~30 `stat()` calls (~1–2 ms total).
 
 ## Concurrency
 

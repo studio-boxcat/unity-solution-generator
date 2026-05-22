@@ -2,7 +2,7 @@
 mod common;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use unity_solution_generator::{BuildConfig, BuildPlatform, GenerateOptions, SolutionGenerator};
+use unity_solution_generator::{BuildConfig, BuildPlatform, GenerateOptions, solution_generator};
 
 fn bench_generate(c: &mut Criterion) {
     let mut group = c.benchmark_group("generate.from_lockfile");
@@ -15,13 +15,11 @@ fn bench_generate(c: &mut Criterion) {
             .with_build_config(BuildConfig::Editor);
         // Warm up scan-cache + write a first variant so on-disk byte-equality short-circuits
         // `write_file_if_changed` for csprojs (steady-state behaviour).
-        SolutionGenerator::new()
-            .generate_from_lockfile(&options, &lockfile)
+        solution_generator::generate_from_lockfile(&options, &lockfile)
             .unwrap();
         group.bench_function(&id, |b| {
             b.iter(|| {
-                SolutionGenerator::new()
-                    .generate_from_lockfile(&options, &lockfile)
+                solution_generator::generate_from_lockfile(&options, &lockfile)
                     .unwrap();
             });
         });

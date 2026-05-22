@@ -66,9 +66,9 @@ profile: build
     echo "--- typecheck (warm no-op) ---"
     "{{bin}}" typecheck . > /dev/null  # warm up
     hyperfine --warmup 3 --runs 30 '"{{bin}}" typecheck .'
-    echo "--- typecheck (cold: nuke clock sidecar each run) ---"
+    echo "--- typecheck (cold: nuke scan-cache each run) ---"
     hyperfine --warmup 1 --runs 5 \
-      --prepare 'rm -f Library/UnitySolutionGenerator/.lock-watchman-clock' \
+      --prepare 'rm -f Library/UnitySolutionGenerator/scan-cache.bin' \
       '"{{bin}}" typecheck .'
     echo "--- startup ---"
     hyperfine --warmup 5 '"{{bin}}" --help'

@@ -24,6 +24,16 @@ use std::path::{Path, PathBuf};
 use watchman_client::Error as WatchmanError;
 use watchman_client::prelude::*;
 
+/// Map a `ScanError` into the crate-level error type, preserving the
+/// `Unavailable` discriminant so callers (BoxcatBridge, CLI) can surface
+/// the "install watchman" message without string-matching.
+pub(crate) fn to_generator_error(e: ScanError) -> crate::error::GeneratorError {
+    match e {
+        ScanError::Unavailable => crate::error::GeneratorError::ScanUnavailable(e.to_string()),
+        ScanError::Query(_) => crate::error::GeneratorError::Other(e.to_string()),
+    }
+}
+
 /// Errors from [`enumerate`].
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {

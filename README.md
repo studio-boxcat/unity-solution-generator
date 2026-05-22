@@ -48,7 +48,7 @@ unity_solution_generator::generate(
 )?;
 ```
 
-For lower-level control (render without invoking the compiler — what meow-tower's BoxcatBridge FFI uses) see `SolutionGenerator::generate_from_lockfile`, `ProjectScanner`, and `LockfileScanner`. The CLI is intentionally minimal — `typecheck` and `build` only.
+For lower-level control (render without invoking the compiler — what meow-tower's BoxcatBridge FFI uses) see `solution_generator::generate_from_lockfile`, `project_scanner::scan`, and `lockfile::scan_and_write`. The CLI is intentionally minimal — `typecheck` and `build` only.
 
 ## License
 

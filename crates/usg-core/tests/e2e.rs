@@ -9,8 +9,8 @@ use std::path::Path;
 
 use common::{make_temp_root, read_compile_set, read_file, write_file};
 use unity_solution_generator::{
-    BuildConfig, BuildPlatform, DllRef, GenerateOptions, GeneratorError, Lockfile, LockfileIO,
-    ProjectScanner, RefCategory, SolutionGenerator,
+    BuildConfig, BuildPlatform, DllRef, GenerateOptions, GeneratorError, Lockfile, RefCategory,
+    lockfile, project_scanner, solution_generator,
 };
 
 const GR: &str = "tpl";
@@ -55,14 +55,14 @@ fn regeneration_is_byte_identical() {
     write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/A/Code.cs", "class Code {}\n");
 
-    let g = SolutionGenerator::new();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let csproj1 = read_file(root, "tpl/ios-editor/Lib.csproj");
     let sln1 = read_file(root, &format!("tpl/ios-editor/{}.sln", root.file_name().unwrap().to_string_lossy()));
     let props1 = read_file(root, "tpl/ios-editor/Directory.Build.props");
 
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let csproj2 = read_file(root, "tpl/ios-editor/Lib.csproj");
     let sln2 = read_file(root, &format!("tpl/ios-editor/{}.sln", root.file_name().unwrap().to_string_lossy()));
@@ -84,16 +84,14 @@ fn multi_variant_from_same_lockfile_share_scan_cache() {
     write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/A/Code.cs", "class Code {}\n");
 
-    let g = SolutionGenerator::new();
+    
     for (p, c) in [
         (BuildPlatform::Ios, BuildConfig::Editor),
         (BuildPlatform::Ios, BuildConfig::Prod),
         (BuildPlatform::Android, BuildConfig::Editor),
         (BuildPlatform::Osx, BuildConfig::Editor),
     ] {
-        let r = g
-            .generate_from_lockfile(&opts(root, p, c), &lf)
-            .unwrap();
+        let r = solution_generator::generate_from_lockfile(&opts(root, p, c), &lf).unwrap();
         assert!(r.variant_csprojs.iter().any(|s| s.ends_with("Lib.csproj")));
     }
     // Sanity-check the on-disk variants exist
@@ -119,7 +117,7 @@ fn native_plugin_dirs_skipped() {
     write_file(root, "Assets/Plugin/x86_64/Code.cs", "class Native {}\n");
     write_file(root, "Assets/Plugin/Code.cs", "class Plain {}\n");
     // ProjectScanner does NOT apply native-plugin filtering — both files should be picked up.
-    let scan = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap();
+    let scan = project_scanner::scan(root.to_str().unwrap(), GR).unwrap();
     let total_dirs: usize = scan.dirs_by_project.values().map(|v| v.len()).sum::<usize>()
         + scan.unresolved_dirs.len();
     assert!(
@@ -155,7 +153,7 @@ fn asmdef_version_defines_filtered_by_manifest() {
     // which requires a real Unity install. So we directly verify ProjectScanner ingests
     // versionDefines into the AsmDefRecord, and the manifest-filtering happens in the
     // lockfile path. Here we verify the AsmDefRecord captures all three.
-    let scan = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap();
+    let scan = project_scanner::scan(root.to_str().unwrap(), GR).unwrap();
     let asm = scan.asm_def_by_name.get("Lib").unwrap();
     assert_eq!(asm.version_defines.len(), 3);
     let names: std::collections::HashSet<_> =
@@ -174,7 +172,7 @@ fn duplicate_asmdef_name_errors() {
     write_file(root, "Assets/A/X.cs", "class X {}\n");
     write_file(root, "Assets/B/Y.cs", "class Y {}\n");
 
-    let err = ProjectScanner::scan(root.to_str().unwrap(), GR).unwrap_err();
+    let err = project_scanner::scan(root.to_str().unwrap(), GR).unwrap_err();
     match err {
         GeneratorError::DuplicateAsmDefName(n) => assert_eq!(n, "Foo"),
         other => panic!("expected DuplicateAsmDefName, got {:?}", other),
@@ -188,8 +186,8 @@ fn lockfile_round_trip_preserves_unicode() {
     let path = root.join("csproj.lock");
     let mut lf = small_lockfile();
     lf.defines.push("FÜRBALL_测试".to_string());
-    LockfileIO::write(&lf, path.to_str().unwrap()).unwrap();
-    let r = LockfileIO::read(path.to_str().unwrap()).unwrap();
+    lockfile::write(&lf, path.to_str().unwrap()).unwrap();
+    let r = lockfile::read(path.to_str().unwrap()).unwrap();
     assert_eq!(r.defines, lf.defines);
 }
 
@@ -205,8 +203,7 @@ fn extra_refs_ordering_preserves_lockfile_first() {
         DllRef::new("UnityEngine", "/SHOULD_NOT_WIN/UnityEngine.dll"),
         DllRef::new("MyExtra", "/path/MyExtra.dll"),
     ];
-    SolutionGenerator::new()
-        .generate_from_lockfile(
+    solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor).with_extra_refs(extra),
             &lf,
         )
@@ -235,8 +232,8 @@ fn changing_asmref_target_reroutes_sources() {
     write_file(root, "Assets/Game/Assembly.asmref", r#"{"reference":"Asm1"}"#);
     write_file(root, "Assets/Game/Code.cs", "class Code {}\n");
 
-    let g = SolutionGenerator::new();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let asm1 = read_compile_set(root, "tpl/ios-editor/Asm1.csproj");
     let asm2 = read_compile_set(root, "tpl/ios-editor/Asm2.csproj");
@@ -246,7 +243,7 @@ fn changing_asmref_target_reroutes_sources() {
     std::thread::sleep(std::time::Duration::from_millis(10));
     write_file(root, "Assets/Game/Assembly.asmref", r#"{"reference":"Asm2"}"#);
 
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let asm1 = read_compile_set(root, "tpl/ios-editor/Asm1.csproj");
     let asm2 = read_compile_set(root, "tpl/ios-editor/Asm2.csproj");
@@ -265,14 +262,14 @@ fn writefile_if_changed_skips_unchanged() {
     write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/A/Code.cs", "class Code {}\n");
 
-    let g = SolutionGenerator::new();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let csproj_path = root.join("tpl/ios-editor/Lib.csproj");
     let mtime_before = std::fs::metadata(&csproj_path).unwrap().modified().unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(20));
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let mtime_after = std::fs::metadata(&csproj_path).unwrap().modified().unwrap();
     assert_eq!(
@@ -288,8 +285,7 @@ fn output_dir_with_trailing_slash_normalised() {
     let lf = small_lockfile();
     write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"Lib"}"#);
     write_file(root, "Assets/A/Code.cs", "class Code {}\n");
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(
+    let r = solution_generator::generate_from_lockfile(
             &opts(root, BuildPlatform::Ios, BuildConfig::Editor)
                 .with_output_dir(Some("Library/foo/bar/")),
             &lf,
@@ -316,8 +312,8 @@ fn inplace_asmdef_edit_invalidates_scan_cache() {
     write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"OldName"}"#);
     write_file(root, "Assets/A/Code.cs", "class Code {}\n");
 
-    let g = SolutionGenerator::new();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert!(root.join("tpl/ios-editor/OldName.csproj").exists());
 
@@ -325,7 +321,7 @@ fn inplace_asmdef_edit_invalidates_scan_cache() {
     // In-place edit: same file path, different name. Parent dir mtime won't bump.
     write_file(root, "Assets/A/Lib.asmdef", r#"{"name":"NewName"}"#);
 
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert!(
         root.join("tpl/ios-editor/NewName.csproj").exists(),
@@ -344,8 +340,7 @@ fn no_lockfile_no_templates_falls_back_via_cli_path() {
     let lf = small_lockfile();
     // Plain .cs file under Assets/, no asmdef. Should land in Assembly-CSharp via legacy rules.
     write_file(root, "Assets/Foo.cs", "class Foo {}\n");
-    let r = SolutionGenerator::new()
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    let r = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert!(
         r.variant_csprojs
@@ -372,18 +367,16 @@ fn generate_short_circuits_when_inputs_unchanged() {
     // Provide a real csproj.lock so the generate path has something to read.
     let lockfile_path = root.join("Library/UnitySolutionGenerator/csproj.lock");
     std::fs::create_dir_all(lockfile_path.parent().unwrap()).unwrap();
-    LockfileIO::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
+    lockfile::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
 
-    let g = SolutionGenerator::new();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     let csproj_path = root.join("tpl/ios-editor/Lib.csproj");
     let mtime_first = std::fs::metadata(&csproj_path).unwrap().modified().unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let r2 = g
-        .generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
-        .unwrap();
+    let r2 = solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf).unwrap();
     let mtime_second = std::fs::metadata(&csproj_path).unwrap().modified().unwrap();
     assert_eq!(
         mtime_first, mtime_second,
@@ -401,8 +394,8 @@ fn generate_short_circuits_when_inputs_unchanged() {
     let mut lf2 = lf.clone();
     lf2.defines.push("MY_NEW_DEFINE".to_string());
     std::fs::remove_file(&lockfile_path).unwrap();
-    LockfileIO::write(&lf2, lockfile_path.to_str().unwrap()).unwrap();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf2)
+    lockfile::write(&lf2, lockfile_path.to_str().unwrap()).unwrap();
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf2)
         .unwrap();
     let props = read_file(root, "tpl/ios-editor/Directory.Build.props");
     assert!(
@@ -423,10 +416,10 @@ fn generate_rebuilds_after_variant_dir_wipe() {
     write_file(root, "Assets/A/Code.cs", "class Code {}\n");
     let lockfile_path = root.join("Library/UnitySolutionGenerator/csproj.lock");
     std::fs::create_dir_all(lockfile_path.parent().unwrap()).unwrap();
-    LockfileIO::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
+    lockfile::write(&lf, lockfile_path.to_str().unwrap()).unwrap();
 
-    let g = SolutionGenerator::new();
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
 
     // Wipe the variant dir.
@@ -434,7 +427,7 @@ fn generate_rebuilds_after_variant_dir_wipe() {
     assert!(!root.join("tpl/ios-editor/Lib.csproj").exists());
 
     // Next generate must rebuild the csproj despite the scan-cache existing.
-    g.generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
+    solution_generator::generate_from_lockfile(&opts(root, BuildPlatform::Ios, BuildConfig::Editor), &lf)
         .unwrap();
     assert!(root.join("tpl/ios-editor/Lib.csproj").exists());
 }

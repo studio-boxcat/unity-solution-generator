@@ -2,7 +2,7 @@
 mod common;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use unity_solution_generator::LockfileIO;
+use unity_solution_generator::lockfile;
 
 fn bench_lockfile_io(c: &mut Criterion) {
     let mut group = c.benchmark_group("lockfile_io");
@@ -12,14 +12,14 @@ fn bench_lockfile_io(c: &mut Criterion) {
 
     group.bench_function("write_initial", |b| {
         b.iter(|| {
-            LockfileIO::write(&lockfile, &path).unwrap();
+            lockfile::write(&lockfile, &path).unwrap();
         });
     });
 
-    LockfileIO::write(&lockfile, &path).unwrap();
+    lockfile::write(&lockfile, &path).unwrap();
     group.bench_function("read", |b| {
         b.iter(|| {
-            let _ = LockfileIO::read(&path).unwrap();
+            let _ = lockfile::read(&path).unwrap();
         });
     });
 

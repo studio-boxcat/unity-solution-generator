@@ -17,7 +17,6 @@ pub mod lockfile;
 pub mod lockfile_scanner;
 pub(crate) mod package_cache;
 pub mod paths;
-pub mod profile;
 pub mod project_scanner;
 pub mod scan;
 pub mod solution_generator;
@@ -26,14 +25,13 @@ pub mod xml;
 
 pub use defines::{generate_version_defines, parse_scripting_defines};
 pub use error::{GeneratorError, LockfileError, Result};
-pub use lockfile::{DllRef, Lockfile, LockfileIO, RefCategory};
-pub use lockfile_scanner::LockfileScanner;
+pub use lockfile::{DllRef, Lockfile, RefCategory};
 pub use paths::{
     DEFAULT_GENERATOR_ROOT, lockfile_path, parent_directory, resolve_project_root, resolve_real_path,
 };
-pub use project_scanner::{AsmDefRecord, ProjectCategory, ProjectScanner, ScanResult, VersionDefine};
+pub use project_scanner::{AsmDefRecord, ProjectCategory, ScanResult, VersionDefine};
 pub use solution_generator::{
-    BuildConfig, BuildPlatform, GenerateOptions, GenerateResult, SolutionGenerator,
+    BuildConfig, BuildPlatform, GenerateOptions, GenerateResult,
 };
 pub use typecheck::{TypecheckOptions, TypecheckResult};
 
@@ -98,8 +96,8 @@ pub fn generate(
         .with_build_config(build_config)
         .with_output_dir(output_dir)
         .with_extra_refs(extra_refs_vec);
-    let lockfile = LockfileIO::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT)?;
-    let scan = ProjectScanner::scan(&resolved, DEFAULT_GENERATOR_ROOT)?;
-    SolutionGenerator::new().generate(&options, &lockfile, scan)?;
+    let lockfile = lockfile::scan_and_write(&resolved, DEFAULT_GENERATOR_ROOT)?;
+    let scan = project_scanner::scan(&resolved, DEFAULT_GENERATOR_ROOT)?;
+    solution_generator::generate(&options, &lockfile, scan)?;
     Ok(())
 }

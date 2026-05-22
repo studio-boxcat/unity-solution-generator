@@ -56,12 +56,6 @@ fn output_dir_varies_with_variant() {
 }
 
 #[test]
-fn legacy_dir_uses_old_typecheck_prefix() {
-    let dir = tcx::legacy_typecheck_dir("/proj", GR, BuildPlatform::Ios, BuildConfig::Editor);
-    assert_eq!(dir, "/proj/Library/USG/typecheck-ios-editor");
-}
-
-#[test]
 fn stamp_path_is_dll_dot_usg_stamp() {
     assert_eq!(tcx::stamp_path_for("/x/Foo.dll"), "/x/Foo.dll.usg-stamp");
 }
@@ -158,59 +152,6 @@ fn utd_true_when_stamp_matches_and_inputs_older() {
         dll.to_str().unwrap(),
         stamp.to_str().unwrap(),
     ));
-}
-
-// ── legacy dir cleanup ───────────────────────────────────────────────────
-
-#[test]
-fn purge_legacy_removes_old_typecheck_dir() {
-    let tmp = make_temp_root();
-    let root = tmp.path();
-    let legacy = root.join("Library/USG/typecheck-ios-editor");
-    fs::create_dir_all(&legacy).unwrap();
-    fs::write(legacy.join("Foo.dll"), b"stale\n").unwrap();
-    fs::write(legacy.join("Foo.rsp"), b"stale\n").unwrap();
-
-    tcx::purge_legacy_typecheck_dir(
-        root.to_str().unwrap(),
-        GR,
-        BuildPlatform::Ios,
-        BuildConfig::Editor,
-    );
-
-    assert!(!legacy.exists(), "legacy typecheck-ios-editor should be removed");
-}
-
-#[test]
-fn purge_legacy_is_idempotent_when_absent() {
-    // Must not error / panic when the legacy dir was never there.
-    let tmp = make_temp_root();
-    tcx::purge_legacy_typecheck_dir(
-        tmp.path().to_str().unwrap(),
-        GR,
-        BuildPlatform::Ios,
-        BuildConfig::Editor,
-    );
-}
-
-#[test]
-fn purge_legacy_only_touches_matching_variant() {
-    // We purge ios-editor; an unrelated android-prod legacy dir must survive.
-    let tmp = make_temp_root();
-    let root = tmp.path();
-    let other = root.join("Library/USG/typecheck-android-prod");
-    fs::create_dir_all(&other).unwrap();
-    fs::write(other.join("Foo.dll"), b"keep\n").unwrap();
-
-    tcx::purge_legacy_typecheck_dir(
-        root.to_str().unwrap(),
-        GR,
-        BuildPlatform::Ios,
-        BuildConfig::Editor,
-    );
-
-    assert!(other.exists(), "other-variant legacy dir must not be touched");
-    assert!(other.join("Foo.dll").exists());
 }
 
 // ── post-emit stamping behaviour (pure, no csc) ──────────────────────────

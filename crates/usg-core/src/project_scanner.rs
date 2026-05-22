@@ -15,24 +15,24 @@ use std::path::Path;
 use rayon::prelude::*;
 
 use crate::error::{GeneratorError, Result};
-use crate::io::{create_dir_all, read_file, write_file_if_changed};
+use crate::io::{create_dir_all, read_file};
 use crate::paths::{join_path, mtime_nanos_for, parent_directory};
-use crate::scan::{ScanError, enumerate};
+use crate::scan::{enumerate, to_generator_error};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub enum ProjectCategory {
     Runtime,
     Editor,
     Test,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct VersionDefine {
     pub package_name: String,
     pub define: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct AsmDefRecord {
     pub name: String,
     pub directory: String,
@@ -114,205 +114,142 @@ fn infer_category(include_platforms: &[String], define_constraints: &[String]) -
     ProjectCategory::Runtime
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct ScanResult {
     pub asm_def_by_name: HashMap<String, AsmDefRecord>,
     pub dirs_by_project: HashMap<String, Vec<String>>,
     pub unresolved_dirs: Vec<String>,
 }
 
-pub struct ProjectScanner;
+/// On-disk scan cache. Compact bincode binary format. Lives at
+/// `<generator_root>/scan-cache.bin`. Single-tier invalidation via the
+/// embedded mtime fingerprint — if any tracked path's ns-mtime has changed
+/// since the cache was written, full re-derive.
+const SCAN_CACHE_FILE: &str = "scan-cache.bin";
 
-/// On-disk scan cache. Text format (grep-debuggable). Lives at
-/// `<generator_root>/scan-cache`. Single-tier invalidation via the embedded
-/// mtime fingerprint.
-const SCAN_CACHE_FILE: &str = "scan-cache";
+/// Schema version embedded in every `scan-cache.bin`. Bumping this
+/// invalidates all caches wholesale — no migrations. Cold rebuild on bump
+/// is harmless (file is gitignored under `Library/`).
+const SCAN_CACHE_SCHEMA: u32 = 1;
 
-impl ProjectScanner {
-    /// Watchman-driven scan with a fast-path on-disk cache. Single-tier
-    /// invalidation: stat the persisted mtime fingerprint (~40 paths) and
-    /// reuse the cached scan if all match. Cache miss → one Watchman
-    /// enumeration query + per-asmdef JSON parse.
-    ///
-    /// The fingerprint covers top-level dirs (add/remove), every asmdef
-    /// directory + ancestors, every `.asmdef`/`.asmref` file (in-place edits),
-    /// plus `ProjectVersion.txt` / `manifest.json` / `packages-lock.json`
-    /// (lockfile inputs). On meow-tower this hits ~1–2 ms warm.
-    pub fn scan(project_root: &str, generator_root: &str) -> Result<ScanResult> {
-        let cache_path = join_path(
-            project_root,
-            &format!("{}/{}", generator_root, SCAN_CACHE_FILE),
-        );
-
-        if let Some((header, cached_scan)) = load_cached_scan(&cache_path) {
-            if mtimes_unchanged(project_root, &header.mtimes) {
-                return Ok(cached_scan);
-            }
-        }
-
-        let scan = Self::scan_uncached(project_root)?;
-        let mtimes = collect_mtimes(project_root, &scan);
-        write_cached_scan(&cache_path, &CacheHeader { mtimes }, &scan);
-        Ok(scan)
-    }
-
-    fn scan_uncached(project_root: &str) -> Result<ScanResult> {
-        let _span = tracing::info_span!("project_scanner.scan").entered();
-
-        // One Watchman query — returns the full file enumeration.
-        let paths = enumerate(Path::new(project_root)).map_err(scan_err_to_generator)?;
-        let (cs_dirs, asmdef_paths, asmref_paths) = partition_paths(&paths);
-
-        // Parse asmdefs + asmrefs in parallel. Most projects have <100 of
-        // each; per-file `read` is the dominant cost, so amortising across
-        // cores is the win.
-        let asmdef_records: Vec<AsmDefRecord> = asmdef_paths
-            .par_iter()
-            .filter_map(|p| AsmDefRecord::load(project_root, p).ok().flatten())
-            .collect();
-        let asmref_records: Vec<(String, String)> = asmref_paths
-            .par_iter()
-            .filter_map(|p| load_asm_ref(project_root, p).ok().flatten())
-            .collect();
-
-        let mut asm_def_by_name: HashMap<String, AsmDefRecord> = HashMap::new();
-        for record in asmdef_records {
-            if asm_def_by_name.contains_key(&record.name) {
-                return Err(GeneratorError::DuplicateAsmDefName(record.name));
-            }
-            asm_def_by_name.insert(record.name.clone(), record);
-        }
-
-        let mut assembly_roots: HashMap<String, String> = HashMap::new();
-        for (name, record) in &asm_def_by_name {
-            assembly_roots.insert(record.directory.clone(), name.clone());
-        }
-        for (dir, reference) in asmref_records {
-            if asm_def_by_name.contains_key(&reference) {
-                assembly_roots.insert(dir, reference);
-            }
-        }
-
-        let mut dirs_by_project: HashMap<String, Vec<String>> = HashMap::new();
-        let mut unresolved_dirs: Vec<String> = Vec::new();
-        for dir in &cs_dirs {
-            if let Some(owner) = find_assembly_owner(dir, &assembly_roots) {
-                dirs_by_project.entry(owner).or_default().push(dir.clone());
-            } else if let Some(legacy) = resolve_legacy_project(dir) {
-                dirs_by_project
-                    .entry(legacy.to_string())
-                    .or_default()
-                    .push(dir.clone());
-            } else {
-                unresolved_dirs.push(dir.clone());
-            }
-        }
-
-        Ok(ScanResult {
-            asm_def_by_name,
-            dirs_by_project,
-            unresolved_dirs,
-        })
-    }
-}
-
-/// Persisted alongside the cached scan: project-relative paths → ns-mtimes
-/// at cache-write time. The cache is fresh iff every path's current mtime
-/// equals the cached value. On meow-tower: ~40 entries.
-struct CacheHeader {
+/// Full on-disk payload: schema version + mtime fingerprint + scan content.
+#[derive(bincode::Encode, bincode::Decode)]
+struct CacheFile {
+    schema: u32,
     mtimes: Vec<(String, u128)>,
+    scan: ScanResult,
 }
 
-/// Tab-delimited text format keyed for grep-debuggability. One line per
-/// asmdef record; header carries the `[mtimes]` fingerprint section.
-fn load_cached_scan(cache_path: &str) -> Option<(CacheHeader, ScanResult)> {
-    let content = read_file(cache_path).ok()?;
-    let mut mtimes: Vec<(String, u128)> = Vec::new();
+/// Watchman-driven scan with a fast-path on-disk cache. Single-tier
+/// invalidation: stat the persisted mtime fingerprint (~40 paths) and
+/// reuse the cached scan if all match. Cache miss → one Watchman
+/// enumeration query + per-asmdef JSON parse.
+///
+/// The fingerprint covers top-level dirs (add/remove), every asmdef
+/// directory + ancestors, every `.asmdef`/`.asmref` file (in-place edits).
+/// On meow-tower this hits ~1–2 ms warm.
+pub fn scan(project_root: &str, generator_root: &str) -> Result<ScanResult> {
+    let cache_path = join_path(
+        project_root,
+        &format!("{}/{}", generator_root, SCAN_CACHE_FILE),
+    );
+
+    if let Some((mtimes, cached_scan)) = load_cached_scan(&cache_path) {
+        if mtimes_unchanged(project_root, &mtimes) {
+            return Ok(cached_scan);
+        }
+    }
+
+    let scan = scan_uncached(project_root)?;
+    let mtimes = collect_mtimes(project_root, &scan);
+    write_cached_scan(&cache_path, mtimes, &scan);
+    Ok(scan)
+}
+
+fn scan_uncached(project_root: &str) -> Result<ScanResult> {
+    let _span = tracing::info_span!("project_scanner.scan").entered();
+
+    // One Watchman query — returns the full file enumeration.
+    let paths = enumerate(Path::new(project_root)).map_err(to_generator_error)?;
+    let (cs_dirs, asmdef_paths, asmref_paths) = partition_paths(&paths);
+
+    // Parse asmdefs + asmrefs in parallel. Most projects have <100 of
+    // each; per-file `read` is the dominant cost, so amortising across
+    // cores is the win.
+    let asmdef_records: Vec<AsmDefRecord> = asmdef_paths
+        .par_iter()
+        .filter_map(|p| AsmDefRecord::load(project_root, p).ok().flatten())
+        .collect();
+    let asmref_records: Vec<(String, String)> = asmref_paths
+        .par_iter()
+        .filter_map(|p| load_asm_ref(project_root, p).ok().flatten())
+        .collect();
+
     let mut asm_def_by_name: HashMap<String, AsmDefRecord> = HashMap::new();
+    for record in asmdef_records {
+        if asm_def_by_name.contains_key(&record.name) {
+            return Err(GeneratorError::DuplicateAsmDefName(record.name));
+        }
+        asm_def_by_name.insert(record.name.clone(), record);
+    }
+
+    let mut assembly_roots: HashMap<String, String> = HashMap::new();
+    for (name, record) in &asm_def_by_name {
+        assembly_roots.insert(record.directory.clone(), name.clone());
+    }
+    for (dir, reference) in asmref_records {
+        if asm_def_by_name.contains_key(&reference) {
+            assembly_roots.insert(dir, reference);
+        }
+    }
+
     let mut dirs_by_project: HashMap<String, Vec<String>> = HashMap::new();
     let mut unresolved_dirs: Vec<String> = Vec::new();
+    for dir in &cs_dirs {
+        if let Some(owner) = find_assembly_owner(dir, &assembly_roots) {
+            dirs_by_project.entry(owner).or_default().push(dir.clone());
+        } else if let Some(legacy) = resolve_legacy_project(dir) {
+            dirs_by_project
+                .entry(legacy.to_string())
+                .or_default()
+                .push(dir.clone());
+        } else {
+            unresolved_dirs.push(dir.clone());
+        }
+    }
 
-    enum Sec { Mtimes, Asmdefs, Dirs, Unresolved }
-    let mut section: Option<Sec> = None;
-    for line in content.split('\n') {
-        if line.is_empty() { continue; }
-        if line.starts_with('#') { continue; }
-        match line {
-            "[mtimes]" => { section = Some(Sec::Mtimes); continue; }
-            "[asmdefs]" => { section = Some(Sec::Asmdefs); continue; }
-            "[dirs]" => { section = Some(Sec::Dirs); continue; }
-            "[unresolved]" => { section = Some(Sec::Unresolved); continue; }
-            _ => {}
-        }
-        match section {
-            Some(Sec::Mtimes) => {
-                if let Some((p, m)) = line.rsplit_once('|') {
-                    if let Ok(m) = m.parse::<u128>() {
-                        mtimes.push((p.to_string(), m));
-                    }
-                }
-            }
-            Some(Sec::Asmdefs) => {
-                if let Some(r) = decode_asmdef_record(line) {
-                    asm_def_by_name.insert(r.name.clone(), r);
-                }
-            }
-            Some(Sec::Dirs) => {
-                if let Some((proj, dir)) = line.split_once('\t') {
-                    dirs_by_project.entry(proj.to_string()).or_default().push(dir.to_string());
-                }
-            }
-            Some(Sec::Unresolved) => unresolved_dirs.push(line.to_string()),
-            None => {}
-        }
-    }
-    // mtimes section must be present for the cache to be usable.
-    if mtimes.is_empty() {
-        return None;
-    }
-    Some((
-        CacheHeader { mtimes },
-        ScanResult { asm_def_by_name, dirs_by_project, unresolved_dirs },
-    ))
+    Ok(ScanResult {
+        asm_def_by_name,
+        dirs_by_project,
+        unresolved_dirs,
+    })
 }
 
-fn write_cached_scan(cache_path: &str, header: &CacheHeader, scan: &ScanResult) {
-    let mut s = String::with_capacity(8 * 1024);
-    s.push_str("# scan-cache — auto-generated, do not edit\n");
-    s.push_str("[mtimes]\n");
-    for (p, m) in &header.mtimes {
-        s.push_str(p);
-        s.push('|');
-        s.push_str(&m.to_string());
-        s.push('\n');
+fn bincode_config() -> bincode::config::Configuration {
+    bincode::config::standard()
+}
+
+fn load_cached_scan(cache_path: &str) -> Option<(Vec<(String, u128)>, ScanResult)> {
+    let bytes = std::fs::read(cache_path).ok()?;
+    let (file, _): (CacheFile, _) =
+        bincode::decode_from_slice(&bytes, bincode_config()).ok()?;
+    if file.schema != SCAN_CACHE_SCHEMA {
+        return None;
     }
-    s.push_str("[asmdefs]\n");
-    let mut names: Vec<&String> = scan.asm_def_by_name.keys().collect();
-    names.sort();
-    for n in names {
-        encode_asmdef_record(&mut s, &scan.asm_def_by_name[n]);
-        s.push('\n');
-    }
-    s.push_str("[dirs]\n");
-    let mut proj_keys: Vec<&String> = scan.dirs_by_project.keys().collect();
-    proj_keys.sort();
-    for proj in proj_keys {
-        let mut dirs = scan.dirs_by_project[proj].clone();
-        dirs.sort();
-        for d in dirs {
-            s.push_str(proj);
-            s.push('\t');
-            s.push_str(&d);
-            s.push('\n');
-        }
-    }
-    s.push_str("[unresolved]\n");
-    for d in &scan.unresolved_dirs {
-        s.push_str(d);
-        s.push('\n');
-    }
+    Some((file.mtimes, file.scan))
+}
+
+fn write_cached_scan(cache_path: &str, mtimes: Vec<(String, u128)>, scan: &ScanResult) {
+    let file = CacheFile {
+        schema: SCAN_CACHE_SCHEMA,
+        mtimes,
+        scan: scan.clone(),
+    };
+    let Ok(bytes) = bincode::encode_to_vec(&file, bincode_config()) else {
+        return;
+    };
     create_dir_all(parent_directory(cache_path));
-    let _ = write_file_if_changed(cache_path, &s);
+    let _ = crate::io::atomic_write_bytes(cache_path, &bytes);
 }
 
 /// Collect the mtime-fingerprint set for `scan`. Two layers of coverage:
@@ -332,18 +269,19 @@ fn write_cached_scan(cache_path: &str, header: &CacheHeader, scan: &ScanResult) 
 fn collect_mtimes(project_root: &str, scan: &ScanResult) -> Vec<(String, u128)> {
     use std::collections::BTreeSet;
     let mut paths: BTreeSet<String> = BTreeSet::new();
-    // Top-level dir mtimes: bump on entry add/remove.
+    // Top-level dir mtimes: bump on subdir add/remove. Library/PackageCache
+    // catches the "Unity refreshed packages" case (subdir added/removed on
+    // each package install/uninstall). Hand-edits to `manifest.json` or
+    // `packages-lock.json` don't bump anything on the FS until Unity actually
+    // resolves them — caching the old state is correct until that happens.
     paths.insert("Assets".to_string());
     paths.insert("Packages".to_string());
     paths.insert("Library/PackageCache".to_string());
     paths.insert("ProjectSettings".to_string());
-    // File-level mtimes for files the lockfile derives from. These rewrites
-    // preserve parent-dir mtime on POSIX, so the dir entry above doesn't
-    // catch them — file-level tracking is the only signal.
+    // File-level mtimes capture in-place rewrites of `.asmdef`/`.asmref`
+    // files that preserve parent-dir mtime on POSIX. Populated below from the
+    // per-asmdef-directory `read_dir` walk.
     let mut file_paths: BTreeSet<String> = BTreeSet::new();
-    file_paths.insert("ProjectSettings/ProjectVersion.txt".to_string());
-    file_paths.insert("Packages/manifest.json".to_string());
-    file_paths.insert("Packages/packages-lock.json".to_string());
     let mut asmdef_dirs: BTreeSet<String> = BTreeSet::new();
     for record in scan.asm_def_by_name.values() {
         asmdef_dirs.insert(record.directory.clone());
@@ -405,7 +343,7 @@ fn collect_mtimes(project_root: &str, scan: &ScanResult) -> Vec<(String, u128)> 
 
 /// Check whether the persisted `scan-cache` fingerprint matches the current
 /// filesystem state. Returns `false` if the cache is missing, malformed, or
-/// any tracked path's mtime has changed. Used by `LockfileIO::scan_and_write`
+/// any tracked path's mtime has changed. Used by `lockfile::scan_and_write`
 /// as its own invalidation signal — when the scan cache is fresh, the lockfile
 /// derived from the same scan state is also fresh.
 pub(crate) fn scan_cache_fingerprint_matches(
@@ -416,10 +354,10 @@ pub(crate) fn scan_cache_fingerprint_matches(
         project_root,
         &format!("{}/{}", generator_root, SCAN_CACHE_FILE),
     );
-    let Some((header, _)) = load_cached_scan(&cache_path) else {
+    let Some((mtimes, _)) = load_cached_scan(&cache_path) else {
         return false;
     };
-    mtimes_unchanged(project_root, &header.mtimes)
+    mtimes_unchanged(project_root, &mtimes)
 }
 
 /// Tier-0 invalidation check: all recorded paths still have their cached
@@ -438,59 +376,6 @@ fn mtimes_unchanged(project_root: &str, mtimes: &[(String, u128)]) -> bool {
         }
     }
     true
-}
-
-fn encode_asmdef_record(out: &mut String, r: &AsmDefRecord) {
-    out.push_str(&r.name);
-    out.push('\t');
-    out.push_str(&r.directory);
-    out.push('\t');
-    out.push(match r.category {
-        ProjectCategory::Runtime => 'R',
-        ProjectCategory::Editor => 'E',
-        ProjectCategory::Test => 'T',
-    });
-    out.push('\t');
-    out.push(if r.allow_unsafe_code { '1' } else { '0' });
-    out.push('\t');
-    out.push_str(&r.references.join(";"));
-    out.push('\t');
-    out.push_str(&r.include_platforms.join(";"));
-    out.push('\t');
-    for (i, vd) in r.version_defines.iter().enumerate() {
-        if i > 0 { out.push(','); }
-        out.push_str(&vd.package_name);
-        out.push('|');
-        out.push_str(&vd.define);
-    }
-}
-
-fn decode_asmdef_record(line: &str) -> Option<AsmDefRecord> {
-    let mut parts = line.split('\t');
-    let name = parts.next()?.to_string();
-    let directory = parts.next()?.to_string();
-    let category = match parts.next()? {
-        "R" => ProjectCategory::Runtime,
-        "E" => ProjectCategory::Editor,
-        "T" => ProjectCategory::Test,
-        _ => return None,
-    };
-    let allow_unsafe_code = matches!(parts.next()?, "1");
-    let references = split_semi(parts.next()?);
-    let include_platforms = split_semi(parts.next()?);
-    let version_defines = parts.next().map(|s| {
-        if s.is_empty() { Vec::new() } else {
-            s.split(',').filter_map(|pair| {
-                let (pkg, def) = pair.split_once('|')?;
-                Some(VersionDefine { package_name: pkg.to_string(), define: def.to_string() })
-            }).collect()
-        }
-    }).unwrap_or_default();
-    Some(AsmDefRecord { name, directory, references, category, include_platforms, allow_unsafe_code, version_defines })
-}
-
-fn split_semi(s: &str) -> Vec<String> {
-    if s.is_empty() { Vec::new() } else { s.split(';').map(str::to_string).collect() }
 }
 
 /// Path component filter: skip any path with a `.foo` (dotfile) or `bar~`
@@ -520,16 +405,6 @@ fn partition_paths(paths: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) 
         }
     }
     (cs_dirs.into_iter().collect(), asmdef_paths, asmref_paths)
-}
-
-/// Map a `ScanError` into the crate-level error type, preserving the
-/// `Unavailable` discriminant so callers (BoxcatBridge, CLI) can surface the
-/// "install watchman" message without string-matching.
-fn scan_err_to_generator(e: ScanError) -> GeneratorError {
-    match e {
-        ScanError::Unavailable => GeneratorError::ScanUnavailable(e.to_string()),
-        ScanError::Query(_) => GeneratorError::Other(e.to_string()),
-    }
 }
 
 fn find_assembly_owner(directory: &str, assembly_roots: &HashMap<String, String>) -> Option<String> {

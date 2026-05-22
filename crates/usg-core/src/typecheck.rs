@@ -78,15 +78,13 @@ pub fn run(
     let included = compute_included_projects(&scan.asm_def_by_name, opts);
     let levels = topo_levels(&included, &scan.asm_def_by_name);
 
-    purge_legacy_typecheck_dir(&root, DEFAULT_GENERATOR_ROOT, opts.platform, opts.build_config);
-
     // Shares `<variant>/obj/Debug/` with `build`'s MSBuild output so consumers
     // see fresh DLLs after a typecheck-only flow. Foreign writers are detected
     // per-DLL via `.usg-stamp` sidecars — see `is_up_to_date`.
     let out_dir = typecheck_output_dir(&root, DEFAULT_GENERATOR_ROOT, opts.platform, opts.build_config);
     fs::create_dir_all(&out_dir).map_err(|e| io_err(&out_dir, e))?;
 
-    let csc_dll = find_csc_dll_cached(&root).ok_or_else(|| {
+    let csc_dll = find_csc_dll_cached(&lockfile.unity_version).ok_or_else(|| {
         io_err(
             "csc.dll",
             std::io::Error::new(
@@ -581,37 +579,6 @@ pub fn typecheck_output_dir(
     )
 }
 
-#[doc(hidden)] pub fn legacy_typecheck_dir(
-    project_root: &str,
-    generator_root: &str,
-    platform: BuildPlatform,
-    config: BuildConfig,
-) -> String {
-    format!(
-        "{}/{}/typecheck-{}-{}",
-        project_root, generator_root, platform.raw(), config.raw(),
-    )
-}
-
-/// One-time cleanup of pre-consolidation `typecheck-<variant>/` output.
-/// Idempotent: no-op when the dir doesn't exist.
-#[doc(hidden)] pub fn purge_legacy_typecheck_dir(
-    project_root: &str,
-    generator_root: &str,
-    platform: BuildPlatform,
-    config: BuildConfig,
-) {
-    let path = legacy_typecheck_dir(project_root, generator_root, platform, config);
-    if !Path::new(&path).is_dir() {
-        return;
-    }
-    // Non-fatal: leftover legacy dir is disk waste, not a correctness issue.
-    // `eprintln!` (not `tracing::warn!`) so it's visible without USG_PROFILE.
-    if let Err(e) = fs::remove_dir_all(&path) {
-        eprintln!("warning: failed to remove legacy typecheck dir {path}: {e}");
-    }
-}
-
 #[doc(hidden)] pub fn stamp_path_for(out_dll: &str) -> String {
     format!("{}.usg-stamp", out_dll)
 }
@@ -637,18 +604,16 @@ pub fn typecheck_output_dir(
 
 // ── csc invocation ────────────────────────────────────────────────────────
 
-/// Per-user cached path to `csc.dll`. Resolved once via the (~60 ms)
-/// `dotnet --list-sdks` subprocess; subsequent invocations read the sidecar
-/// and validate the path still exists. Cache lives under the project
-/// generator root because it's tied to the dev machine's installed SDK set —
-/// moving the project to a different machine should re-resolve.
+/// Per-user, per-Unity-version cached `csc.dll` path. Resolved once via the
+/// `dotnet --list-sdks` subprocess (~60 ms); subsequent invocations read the
+/// sidecar and validate the path still exists. Lives under `usg_cache_dir`
+/// next to the tarball-extract cache — the SDK set is a per-host
+/// (not per-project) invariant.
 const CSC_DLL_CACHE_FILE: &str = "csc-dll-path";
 
-fn find_csc_dll_cached(project_root: &str) -> Option<String> {
-    let cache_path = crate::paths::join_path(
-        project_root,
-        &format!("{}/{}", DEFAULT_GENERATOR_ROOT, CSC_DLL_CACHE_FILE),
-    );
+fn find_csc_dll_cached(unity_version: &str) -> Option<String> {
+    let cache_dir = crate::paths::usg_cache_dir(unity_version);
+    let cache_path = crate::paths::join_path(&cache_dir, CSC_DLL_CACHE_FILE);
     // Fast path: read cached path, verify it still exists. SDK upgrades that
     // remove the previously-pinned csc.dll fall through to the slow path.
     if let Ok(cached) = fs::read_to_string(&cache_path) {
@@ -660,7 +625,7 @@ fn find_csc_dll_cached(project_root: &str) -> Option<String> {
     let resolved = find_csc_dll()?;
     // Best-effort cache write — a failure here just means the next invocation
     // pays the subprocess cost again.
-    let _ = fs::create_dir_all(crate::paths::parent_directory(&cache_path));
+    let _ = fs::create_dir_all(&cache_dir);
     let _ = crate::io::write_file_if_changed(&cache_path, &resolved);
     Some(resolved)
 }
@@ -713,9 +678,8 @@ pub fn __test_only_build_rsp(inputs: &BuildRspInputs) -> String {
 #[doc(hidden)]
 pub mod __test_only {
     pub use super::{
-        is_up_to_date, legacy_typecheck_dir, max_input_mtime, purge_legacy_typecheck_dir,
-        read_stamp, record_stamp_for, restore_mtime, stamp_path_for, typecheck_output_dir,
-        write_stamp,
+        is_up_to_date, max_input_mtime, read_stamp, record_stamp_for, restore_mtime,
+        stamp_path_for, typecheck_output_dir, write_stamp,
     };
 
     pub fn mtime_nsec(path: &str) -> Option<u128> {
