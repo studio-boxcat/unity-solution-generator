@@ -17,6 +17,7 @@ pub mod lockfile;
 pub mod lockfile_scanner;
 pub(crate) mod package_cache;
 pub mod paths;
+pub mod pe;
 pub mod project_scanner;
 pub mod scan;
 pub mod solution_generator;
