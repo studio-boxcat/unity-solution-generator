@@ -119,6 +119,25 @@ pub const DEFAULT_FEATURE_DEFINES: &[&str] = &[
     "CSHARP_7_OR_LATER", "CSHARP_7_3_OR_NEWER",
 ];
 
+/// Editor defines that are platform-target-independent. The host-OS suffix
+/// (`UNITY_EDITOR_OSX` / `UNITY_EDITOR_WIN` / `UNITY_EDITOR_LINUX`) is added
+/// separately via [`editor_host_define`] based on `cfg!(target_os)`.
+pub(crate) const EDITOR_DEFINES_BASE: &[&str] = &["UNITY_EDITOR", "UNITY_EDITOR_64"];
+
+/// Defines emitted under `dev`/`editor` configs.
+pub(crate) const DEBUG_DEFINES: &[&str] = &["DEBUG", "TRACE", "UNITY_ASSERTIONS"];
+
+/// Host-OS `UNITY_EDITOR_*` define, resolved at run time from `cfg!(target_os)`.
+pub(crate) fn editor_host_define() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "UNITY_EDITOR_WIN"
+    } else if cfg!(target_os = "linux") {
+        "UNITY_EDITOR_LINUX"
+    } else {
+        "UNITY_EDITOR_OSX"
+    }
+}
+
 /// Parse `scriptingDefineSymbols:` from `ProjectSettings.asset`. Returns the
 /// union (sorted, deduplicated) across all platforms.
 pub fn parse_scripting_defines(project_root: &str) -> Vec<String> {
@@ -154,4 +173,25 @@ pub fn parse_scripting_defines(project_root: &str) -> Vec<String> {
         }
     }
     all.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_host_define_matches_target_os() {
+        // On the running host, the define must end with the OS suffix that the
+        // build machine has — the only one consumers can sensibly wire
+        // `#if UNITY_EDITOR_*` against.
+        let d = editor_host_define();
+        let host_suffix = if cfg!(target_os = "windows") {
+            "WIN"
+        } else if cfg!(target_os = "linux") {
+            "LINUX"
+        } else {
+            "OSX"
+        };
+        assert!(d.ends_with(host_suffix), "got {d}, expected suffix {host_suffix}");
+    }
 }

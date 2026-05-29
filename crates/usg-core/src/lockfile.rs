@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::error::{LockfileError, Result};
 use crate::io::{create_dir_all, read_file, write_file_if_changed};
 use crate::lockfile_scanner;
-use crate::paths::{lockfile_path, parent_directory, read_unity_version};
+use crate::paths::{lockfile_path, parent_directory, path_filename, read_unity_version};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DllRef {
@@ -27,7 +27,7 @@ impl DllRef {
             .filter(|s| !s.is_empty())
             .map(|part| {
                 let path = part.to_string();
-                let filename = path.rsplit('/').next().unwrap_or(&path);
+                let filename = path_filename(&path);
                 let name = filename
                     .strip_suffix(".dll")
                     .map(str::to_string)

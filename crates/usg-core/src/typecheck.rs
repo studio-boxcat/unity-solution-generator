@@ -10,11 +10,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, FileTimes};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
+use crate::csc::{self, BuildRspInputs};
 use crate::error::{GeneratorError, Result, io_err};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, mtime_nanos_for, resolve_real_path};
@@ -84,7 +84,7 @@ pub fn run(
     let out_dir = typecheck_output_dir(&root, DEFAULT_GENERATOR_ROOT, opts.platform, opts.build_config);
     fs::create_dir_all(&out_dir).map_err(|e| io_err(&out_dir, e))?;
 
-    let csc_dll = find_csc_dll_cached(&lockfile.unity_version).ok_or_else(|| {
+    let csc_dll = csc::find_csc_dll_cached(&lockfile.unity_version).ok_or_else(|| {
         io_err(
             "csc.dll",
             std::io::Error::new(
@@ -334,7 +334,7 @@ fn compile_project(
     defines.extend(asm.include_platforms.iter().cloned());
 
     let rsp_path = format!("{}/{}.rsp", out_dir, name);
-    let rsp_body = build_rsp(&BuildRspInputs {
+    let rsp_body = csc::build_rsp(&BuildRspInputs {
         lang_version,
         defines: &defines,
         refs: common_refs,
@@ -355,9 +355,9 @@ fn compile_project(
     // output). Compare bytes after compile; if identical, restore the old
     // mtime so the cascade never starts.
     let prev_bytes = fs::read(&out_dll).ok();
-    let prev_mtime = mtime_nsec(&out_dll);
+    let prev_mtime = mtime_nanos_for(&out_dll);
 
-    match invoke_csc(csc_dll, &rsp_path) {
+    match csc::invoke_csc(csc_dll, &rsp_path) {
         Ok(()) => {
             // If csc's emit is byte-identical to the pre-compile DLL, roll
             // mtime back so downstream UTD doesn't see a spurious cascade —
@@ -387,7 +387,7 @@ fn compile_project(
 /// Max mtime across every input the UTD predicate stats. Returned value is
 /// the floor below which `restore_mtime` must not go — otherwise the next
 /// UTD pass would see an input newer than out_dll and recompile forever.
-#[doc(hidden)] pub fn max_input_mtime(
+fn max_input_mtime(
     sources: &[PathBuf],
     refs: &[DllRef],
     proj_refs: &[PathBuf],
@@ -397,17 +397,17 @@ fn compile_project(
         max = Some(max.map_or(t, |m| m.max(t)));
     };
     for s in sources {
-        if let Some(t) = mtime_nsec(s) {
+        if let Some(t) = mtime_nanos_for(s) {
             bump(t);
         }
     }
     for r in refs {
-        if let Some(t) = mtime_nsec(&r.path) {
+        if let Some(t) = mtime_nanos_for(&r.path) {
             bump(t);
         }
     }
     for p in proj_refs {
-        if let Some(t) = mtime_nsec(p) {
+        if let Some(t) = mtime_nanos_for(p) {
             bump(t);
         }
     }
@@ -460,14 +460,11 @@ fn collect_defines(lockfile: &Lockfile, platform: BuildPlatform, config: BuildCo
     out.extend(lockfile.defines_scripting.iter().cloned());
     out.extend(platform.platform_defines().iter().map(|s| s.to_string()));
     if config == BuildConfig::Editor {
-        out.push("UNITY_EDITOR".to_string());
-        out.push("UNITY_EDITOR_64".to_string());
-        out.push(crate::solution_generator::editor_host_define().to_string());
+        out.extend(crate::defines::EDITOR_DEFINES_BASE.iter().map(|s| s.to_string()));
+        out.push(crate::defines::editor_host_define().to_string());
     }
     if matches!(config, BuildConfig::Editor | BuildConfig::Dev) {
-        for d in ["DEBUG", "TRACE", "UNITY_ASSERTIONS"] {
-            out.push(d.to_string());
-        }
+        out.extend(crate::defines::DEBUG_DEFINES.iter().map(|s| s.to_string()));
     }
     out
 }
@@ -510,14 +507,10 @@ fn collect_refs(
 
 // ── up-to-date check ──────────────────────────────────────────────────────
 
-fn mtime_nsec(p: impl AsRef<Path>) -> Option<u128> {
-    mtime_nanos_for(p.as_ref())
-}
-
-/// Set `path`'s mtime to a previously-recorded `mtime_nsec` value.
+/// Set `path`'s mtime to a previously-recorded `mtime_nanos_for` value.
 /// Used to roll back csc's freshly-emitted mtime when the bytes match the
 /// pre-compile bytes — see "content-hash UTD" in `run`.
-#[doc(hidden)] pub fn restore_mtime(path: &str, mtime_ns: u128) -> std::io::Result<()> {
+fn restore_mtime(path: &str, mtime_ns: u128) -> std::io::Result<()> {
     let secs = (mtime_ns / 1_000_000_000) as u64;
     let nanos = (mtime_ns % 1_000_000_000) as u32;
     let t = UNIX_EPOCH + Duration::new(secs, nanos);
@@ -526,14 +519,14 @@ fn mtime_nsec(p: impl AsRef<Path>) -> Option<u128> {
     Ok(())
 }
 
-#[doc(hidden)] pub fn is_up_to_date(
+fn is_up_to_date(
     sources: &[PathBuf],
     refs: &[DllRef],
     proj_refs: &[PathBuf],
     out_dll: &str,
     stamp_path: &str,
 ) -> bool {
-    let Some(out_mtime) = mtime_nsec(out_dll) else {
+    let Some(out_mtime) = mtime_nanos_for(out_dll) else {
         return false;
     };
     // Foreign-writer guard: a missing or stale stamp means something other
@@ -542,19 +535,19 @@ fn mtime_nsec(p: impl AsRef<Path>) -> Option<u128> {
         return false;
     }
     for s in sources {
-        if mtime_nsec(s).is_none_or(|t| t > out_mtime) {
+        if mtime_nanos_for(s).is_none_or(|t| t > out_mtime) {
             return false;
         }
     }
     for r in refs {
         // Refs are pre-resolved (`$(UnityPath)` substituted) by `run`.
         // If a path doesn't exist, treat as dirty.
-        if mtime_nsec(&r.path).is_none_or(|t| t > out_mtime) {
+        if mtime_nanos_for(&r.path).is_none_or(|t| t > out_mtime) {
             return false;
         }
     }
     for p in proj_refs {
-        if mtime_nsec(p).is_none_or(|t| t > out_mtime) {
+        if mtime_nanos_for(p).is_none_or(|t| t > out_mtime) {
             return false;
         }
     }
@@ -575,214 +568,280 @@ pub fn typecheck_output_dir(
 ) -> String {
     format!(
         "{}/{}/{}-{}/obj/Debug",
-        project_root, generator_root, platform.raw(), config.raw(),
+        project_root, generator_root, platform, config,
     )
 }
 
-#[doc(hidden)] pub fn stamp_path_for(out_dll: &str) -> String {
+fn stamp_path_for(out_dll: &str) -> String {
     format!("{}.usg-stamp", out_dll)
 }
 
-#[doc(hidden)] pub fn read_stamp(path: &str) -> Option<u128> {
+fn read_stamp(path: &str) -> Option<u128> {
     let s = fs::read_to_string(path).ok()?;
     s.trim().parse::<u128>().ok()
 }
 
-#[doc(hidden)] pub fn write_stamp(path: &str, mtime_ns: u128) -> std::io::Result<()> {
+fn write_stamp(path: &str, mtime_ns: u128) -> std::io::Result<()> {
     fs::write(path, mtime_ns.to_string())
 }
 
 /// Stamp `out_dll` with its current on-disk mtime. Call after every emit so
 /// the next UTD pass recognises us as the writer; absent or stale stamps
 /// (from foreign writers like `dotnet build`) force recompile.
-#[doc(hidden)] pub fn record_stamp_for(out_dll: &str, stamp_path: &str) -> std::io::Result<()> {
-    let t = mtime_nsec(out_dll).ok_or_else(|| {
+fn record_stamp_for(out_dll: &str, stamp_path: &str) -> std::io::Result<()> {
+    let t = mtime_nanos_for(out_dll).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, format!("missing dll: {}", out_dll))
     })?;
     write_stamp(stamp_path, t)
 }
 
-// ── csc invocation ────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    //! Path layout, stamp sidecar, and up-to-date predicate. These pin the
+    //! consolidated `obj/Debug` layout (see architecture.md "On-disk layout"
+    //! and "typecheck deeper") and the foreign-writer guard via per-DLL
+    //! `.usg-stamp` sidecars: when `typecheck` shares `<variant>/obj/Debug/`
+    //! with `build`'s MSBuild output, a naive mtime-only UTD would silently
+    //! SKIP after `dotnet build` wrote a fresh DLL — typecheck would
+    //! rubber-stamp MSBuild's compile instead of running csc.
+    use super::*;
+    use crate::lockfile::DllRef;
+    use std::fs;
 
-/// Per-user, per-Unity-version cached `csc.dll` path. Resolved once via the
-/// `dotnet --list-sdks` subprocess (~60 ms); subsequent invocations read the
-/// sidecar and validate the path still exists. Lives under `usg_cache_dir`
-/// next to the tarball-extract cache — the SDK set is a per-host
-/// (not per-project) invariant.
-const CSC_DLL_CACHE_FILE: &str = "csc-dll-path";
+    const GR: &str = "Library/USG";
 
-fn find_csc_dll_cached(unity_version: &str) -> Option<String> {
-    let cache_dir = crate::paths::usg_cache_dir(unity_version);
-    let cache_path = crate::paths::join_path(&cache_dir, CSC_DLL_CACHE_FILE);
-    // Fast path: read cached path, verify it still exists. SDK upgrades that
-    // remove the previously-pinned csc.dll fall through to the slow path.
-    if let Ok(cached) = fs::read_to_string(&cache_path) {
-        let cached = cached.trim().to_string();
-        if !cached.is_empty() && Path::new(&cached).exists() {
-            return Some(cached);
-        }
+    fn temp() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
-    let resolved = find_csc_dll()?;
-    // Best-effort cache write — a failure here just means the next invocation
-    // pays the subprocess cost again.
-    let _ = fs::create_dir_all(&cache_dir);
-    let _ = crate::io::write_file_if_changed(&cache_path, &resolved);
-    Some(resolved)
-}
 
-fn find_csc_dll() -> Option<String> {
-    // Parse `dotnet --list-sdks` output: "8.0.303 [/usr/local/share/dotnet/sdk]"
-    // → /usr/local/share/dotnet/sdk/8.0.303/Roslyn/bincore/csc.dll. Pick the
-    // highest semver — `dotnet`'s own sort order isn't contractually
-    // ascending, and a future 9.0/10.0 should win even if listed first.
-    let out = Command::new("dotnet").arg("--list-sdks").output().ok()?;
-    if !out.status.success() {
-        return None;
+    #[test]
+    fn output_dir_is_under_variant_obj_debug() {
+        let dir = typecheck_output_dir("/proj", GR, BuildPlatform::Ios, BuildConfig::Editor);
+        assert_eq!(dir, "/proj/Library/USG/ios-editor/obj/Debug");
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let parse_semver = |s: &str| -> (u32, u32, u32) {
-        let mut parts = s.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
-        (
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
+
+    #[test]
+    fn output_dir_varies_with_variant() {
+        let a = typecheck_output_dir("/proj", GR, BuildPlatform::Android, BuildConfig::Dev);
+        assert_eq!(a, "/proj/Library/USG/android-dev/obj/Debug");
+    }
+
+    #[test]
+    fn stamp_path_is_dll_dot_usg_stamp() {
+        assert_eq!(stamp_path_for("/x/Foo.dll"), "/x/Foo.dll.usg-stamp");
+    }
+
+    #[test]
+    fn stamp_roundtrip() {
+        let tmp = temp();
+        let p = tmp.path().join("Foo.dll.usg-stamp");
+        let path = p.to_str().unwrap();
+        write_stamp(path, 1234567890u128).unwrap();
+        assert_eq!(read_stamp(path), Some(1234567890u128));
+    }
+
+    #[test]
+    fn stamp_read_returns_none_when_absent() {
+        let tmp = temp();
+        let p = tmp.path().join("nope.usg-stamp");
+        assert_eq!(read_stamp(p.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn stamp_read_returns_none_on_garbage() {
+        let tmp = temp();
+        let p = tmp.path().join("garbage.usg-stamp");
+        fs::write(&p, b"not-a-number\n").unwrap();
+        assert_eq!(read_stamp(p.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn utd_false_when_dll_missing() {
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        // No DLL on disk; stamp irrelevant.
+        assert!(!is_up_to_date(&[], &[], &[], dll.to_str().unwrap(), stamp.to_str().unwrap()));
+    }
+
+    #[test]
+    fn utd_false_when_stamp_missing() {
+        // The DLL exists but no `.usg-stamp` next to it. This is exactly the
+        // post-`dotnet build` state: MSBuild wrote the DLL, we did not.
+        // Without the stamp guard, typecheck would silently rubber-stamp it.
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        fs::write(&dll, b"foreign\n").unwrap();
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        assert!(!is_up_to_date(&[], &[], &[], dll.to_str().unwrap(), stamp.to_str().unwrap()));
+    }
+
+    #[test]
+    fn utd_false_when_stamp_mtime_disagrees_with_disk() {
+        // Stamp recorded a different mtime than what's on disk → foreign writer
+        // touched the DLL since we stamped it.
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        fs::write(&dll, b"x").unwrap();
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        write_stamp(stamp.to_str().unwrap(), 1u128).unwrap(); // bogus mtime
+        assert!(!is_up_to_date(&[], &[], &[], dll.to_str().unwrap(), stamp.to_str().unwrap()));
+    }
+
+    #[test]
+    fn utd_true_when_stamp_matches_and_inputs_older() {
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        fs::write(&dll, b"x").unwrap();
+        let dll_mtime = mtime_nanos_for(dll.to_str().unwrap()).unwrap();
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        write_stamp(stamp.to_str().unwrap(), dll_mtime).unwrap();
+        assert!(is_up_to_date(&[], &[], &[], dll.to_str().unwrap(), stamp.to_str().unwrap()));
+    }
+
+    #[test]
+    fn record_stamp_after_write_makes_utd_true() {
+        // Producer side: write a DLL, stamp it with its own mtime, then UTD
+        // should be true on the next pass with no source changes.
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        fs::write(&dll, b"contents").unwrap();
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        record_stamp_for(dll.to_str().unwrap(), stamp.to_str().unwrap()).unwrap();
+        assert!(is_up_to_date(&[], &[], &[], dll.to_str().unwrap(), stamp.to_str().unwrap()));
+    }
+
+    #[test]
+    fn foreign_overwrite_after_stamp_breaks_utd() {
+        // Stamp the DLL, then simulate `dotnet build` overwriting it. UTD must
+        // flip to false so the next typecheck recompiles and re-stamps.
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        fs::write(&dll, b"v1").unwrap();
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        record_stamp_for(dll.to_str().unwrap(), stamp.to_str().unwrap()).unwrap();
+        assert!(is_up_to_date(&[], &[], &[], dll.to_str().unwrap(), stamp.to_str().unwrap()));
+
+        // Sleep a hair to guarantee mtime advances on filesystems with coarse
+        // resolution, then overwrite. (apfs is nanosecond; ext4 may be too
+        // coarse without this nudge.)
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&dll, b"foreign-bytes").unwrap();
+        assert!(!is_up_to_date(&[], &[], &[], dll.to_str().unwrap(), stamp.to_str().unwrap()));
+    }
+
+    #[test]
+    fn restored_mtime_floors_at_freshest_input() {
+        // After a foreign upstream write, downstream recompiles, csc emits the
+        // same bytes (deterministic), and we restore the mtime. If we restored
+        // to the OLD prev_t, downstream's mtime would be below its proj_ref's
+        // mtime and UTD would fail forever — every subsequent typecheck would
+        // recompile downstream. max_input_mtime is the floor that breaks this.
+        let tmp = temp();
+        let dll = tmp.path().join("Downstream.dll");
+        let proj_ref = tmp.path().join("Upstream.dll");
+
+        fs::write(&dll, b"downstream-bytes").unwrap();
+        let prev_t = mtime_nanos_for(dll.to_str().unwrap()).unwrap();
+
+        // proj_ref written AFTER downstream → fresher mtime, simulating the
+        // post-foreign-write upstream recovery.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&proj_ref, b"upstream-bytes").unwrap();
+        let upstream_t = mtime_nanos_for(proj_ref.to_str().unwrap()).unwrap();
+        assert!(upstream_t > prev_t);
+
+        let target = max_input_mtime(&[], &[], &[PathBuf::from(&proj_ref)])
+            .map_or(prev_t, |m| prev_t.max(m));
+        assert_eq!(
+            target, upstream_t,
+            "restore target must rise to upstream's mtime, not stay at prev_t",
+        );
+
+        // Apply the restore + stamp and verify UTD passes against the upstream input.
+        restore_mtime(dll.to_str().unwrap(), target).unwrap();
+        let stamp = tmp.path().join("Downstream.dll.usg-stamp");
+        record_stamp_for(dll.to_str().unwrap(), stamp.to_str().unwrap()).unwrap();
+        assert!(
+            is_up_to_date(
+                &[],
+                &[],
+                &[PathBuf::from(&proj_ref)],
+                dll.to_str().unwrap(),
+                stamp.to_str().unwrap(),
+            ),
+            "downstream must UTD-skip on the run after cascade recovery — no infinite loop",
+        );
+    }
+
+    #[test]
+    fn max_input_mtime_picks_freshest_across_categories() {
+        let tmp = temp();
+        let a = tmp.path().join("a.cs");
+        let b = tmp.path().join("b.dll");
+        let c = tmp.path().join("c.dll");
+        fs::write(&a, b"a").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&b, b"b").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&c, b"c").unwrap();
+
+        let max = max_input_mtime(
+            &[PathBuf::from(&a)],
+            &[DllRef::new("B", b.to_str().unwrap())],
+            &[PathBuf::from(&c)],
         )
-    };
-    let best = stdout
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            if l.is_empty() {
-                return None;
-            }
-            let (version, rest) = l.split_once(' ')?;
-            let base = rest.trim().trim_start_matches('[').trim_end_matches(']');
-            Some((parse_semver(version), version.to_string(), base.to_string()))
-        })
-        .max_by_key(|t| t.0)?;
-    let path = format!("{}/{}/Roslyn/bincore/csc.dll", best.2, best.1);
-    if Path::new(&path).exists() {
-        Some(path)
-    } else {
-        None
+        .unwrap();
+        assert_eq!(max, mtime_nanos_for(c.to_str().unwrap()).unwrap());
+    }
+
+    #[test]
+    fn max_input_mtime_none_when_no_inputs() {
+        assert!(max_input_mtime(&[], &[], &[]).is_none());
+    }
+
+    #[test]
+    fn utd_false_when_source_newer_than_dll() {
+        // The "source touched after last emit" branch of is_up_to_date. Stamp +
+        // disk-mtime can agree, but a fresh source still forces recompile.
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        fs::write(&dll, b"x").unwrap();
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        record_stamp_for(dll.to_str().unwrap(), stamp.to_str().unwrap()).unwrap();
+
+        // Source written AFTER the DLL+stamp → newer mtime.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let src = tmp.path().join("Foo.cs");
+        fs::write(&src, b"class Foo {}\n").unwrap();
+        assert!(!is_up_to_date(
+            &[PathBuf::from(&src)],
+            &[],
+            &[],
+            dll.to_str().unwrap(),
+            stamp.to_str().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn utd_false_when_ref_newer_than_dll() {
+        // The "external DllRef touched after last emit" branch — e.g. Unity
+        // updated, advancing the engine DLL mtime under us.
+        let tmp = temp();
+        let dll = tmp.path().join("Foo.dll");
+        fs::write(&dll, b"x").unwrap();
+        let stamp = tmp.path().join("Foo.dll.usg-stamp");
+        record_stamp_for(dll.to_str().unwrap(), stamp.to_str().unwrap()).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let r = tmp.path().join("UnityEngine.dll");
+        fs::write(&r, b"engine-bytes").unwrap();
+        assert!(!is_up_to_date(
+            &[],
+            &[DllRef::new("UnityEngine", r.to_str().unwrap())],
+            &[],
+            dll.to_str().unwrap(),
+            stamp.to_str().unwrap(),
+        ));
     }
 }
-
-#[doc(hidden)]
-pub fn __test_only_build_rsp(inputs: &BuildRspInputs) -> String {
-    build_rsp(inputs)
-}
-
-/// Test-only re-exports of internal path/stamp/UTD helpers. Stable surface
-/// for `tests/typecheck_paths.rs`; not part of the library API.
-#[doc(hidden)]
-pub mod __test_only {
-    pub use super::{
-        is_up_to_date, max_input_mtime, read_stamp, record_stamp_for, restore_mtime,
-        stamp_path_for, typecheck_output_dir, write_stamp,
-    };
-
-    pub fn mtime_nsec(path: &str) -> Option<u128> {
-        super::mtime_nsec(path)
-    }
-}
-
-/// Inputs to `build_rsp`. Named-field struct to keep the call site readable
-/// and to avoid the clippy `too_many_arguments` lint as more flags get added.
-#[doc(hidden)]
-pub struct BuildRspInputs<'a> {
-    pub lang_version: &'a str,
-    pub defines: &'a [String],
-    pub refs: &'a [DllRef],
-    pub proj_refs: &'a [PathBuf],
-    pub analyzers: &'a [String],
-    pub sources: &'a [PathBuf],
-    pub out_dll: &'a str,
-    pub allow_unsafe: bool,
-}
-
-fn build_rsp(i: &BuildRspInputs) -> String {
-    // `/noconfig` MUST go on the command line (not in the rsp) — otherwise csc
-    // emits CS2023 and reads its default csc.rsp anyway. See `invoke_csc`.
-    let mut s = String::new();
-    s.push_str("/nostdlib+\n");
-    s.push_str("/target:library\n");
-    // Intentionally NOT `/refonly` — under .NET 8 SDK csc (4.10.x) it silently
-    // skips body-binding diagnostics that don't affect the reference-assembly
-    // surface, e.g. CS1503 at call sites. Hit on meow-tower `orgel-fix`:
-    // USG reported `ok` while Unity Editor flagged a real type mismatch. We
-    // emit a full library; `/deterministic` keeps output byte-identical for
-    // unchanged inputs so the mtime-restore cascade-skip trick still works.
-    s.push_str("/deterministic\n");
-    s.push_str(&format!("/langversion:{}\n", i.lang_version));
-    s.push_str(&format!("/out:{}\n", i.out_dll));
-    if i.allow_unsafe {
-        s.push_str("/unsafe+\n");
-    }
-    if !i.defines.is_empty() {
-        s.push_str(&format!("/define:{}\n", i.defines.join(";")));
-    }
-    for r in i.refs {
-        s.push_str(&format!("/reference:{}\n", r.path));
-    }
-    for p in i.proj_refs {
-        s.push_str(&format!("/reference:{}\n", p.display()));
-    }
-    for a in i.analyzers {
-        s.push_str(&format!("/analyzer:{}\n", a));
-    }
-    for src in i.sources {
-        s.push_str(&format!("{}\n", src.display()));
-    }
-    s
-}
-
-fn invoke_csc(csc_dll: &str, rsp_path: &str) -> std::result::Result<(), String> {
-    let out = Command::new("dotnet")
-        .arg("exec")
-        .arg(csc_dll)
-        // `/noconfig` and `/shared` are client-only flags and MUST go on the
-        // command line (not in the rsp — csc otherwise rejects them with
-        // CS2007 / CS2023). `/shared` connects to a long-lived VBCSCompiler
-        // over the named-pipe protocol; the server amortizes Roslyn JIT +
-        // metadata-loading across calls (~390 ms saved per call after the
-        // first). VBCSCompiler self-spawns on first connect, idles 10 min.
-        .arg("/shared")
-        .arg("/noconfig")
-        .arg(format!("@{}", rsp_path))
-        .output()
-        .map_err(|e| format!("failed to spawn dotnet: {}", e))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(filter_diagnostics(&format!("{}{}", stdout, stderr)))
-    }
-}
-
-/// Strip `warning CS####` and `info CS####` / `info USG####` lines from csc
-/// output. Typecheck is for errors only; warnings repeat across assemblies
-/// that share sources via asmref (e.g. `com.boxcat.libs` pulled into half a
-/// dozen projects), and they're not actionable from the typecheck path.
-/// Errors and the csc banner pass through untouched.
-fn filter_diagnostics(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for line in s.lines() {
-        // csc diagnostics: `<path>(L,C): <severity> <CODE>: <text>` or
-        // `<severity> <CODE>: <text>` for tool-level info. Drop everything
-        // except errors. Includes `info SP####` from DiagnosticSuppressor,
-        // `info USG####` (Unity), `warning CS####`, etc.
-        if line.contains(": warning ") || line.contains(": info ") {
-            continue;
-        }
-        let t = line.trim_start();
-        if t.starts_with("warning ") || t.starts_with("info ") {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-

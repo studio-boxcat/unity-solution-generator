@@ -10,6 +10,8 @@
 pub const LOCKFILE_VERSION: u32 = 2;
 
 
+pub(crate) mod csc;
+pub(crate) mod csproj_render;
 pub mod defines;
 pub mod error;
 pub mod io;
@@ -61,11 +63,6 @@ pub fn script_dll_dir(
         config,
     );
     PathBuf::from(s)
-}
-/// Test-only re-exports of internal helpers. Not part of the stable public API.
-#[doc(hidden)]
-pub mod __test_only {
-    pub use crate::typecheck::{BuildRspInputs, __test_only_build_rsp as build_rsp};
 }
 
 /// High-level convenience: parse string args + run the full generate pipeline.

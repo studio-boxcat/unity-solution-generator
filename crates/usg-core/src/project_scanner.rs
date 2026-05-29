@@ -249,7 +249,11 @@ fn write_cached_scan(cache_path: &str, mtimes: Vec<(String, u128)>, scan: &ScanR
         return;
     };
     create_dir_all(parent_directory(cache_path));
-    let _ = crate::io::atomic_write_bytes(cache_path, &bytes);
+    // Best-effort: a failed cache write just means the next scan pays the full
+    // rescan cost. Surface it so perf debugging isn't mystified by a silent miss.
+    if let Err(e) = crate::io::atomic_write_bytes(cache_path, &bytes) {
+        tracing::warn!(target: "unity_solution_generator::scan", path = %cache_path, error = %e, "scan-cache write failed; next scan will rescan");
+    }
 }
 
 /// Collect the mtime-fingerprint set for `scan`. Two layers of coverage:

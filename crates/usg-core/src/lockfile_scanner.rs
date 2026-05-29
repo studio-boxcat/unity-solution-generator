@@ -20,7 +20,7 @@ use crate::defines::{DEFAULT_FEATURE_DEFINES, generate_version_defines, parse_sc
 use crate::error::{LockfileError, Result};
 use crate::io::{file_exists, list_directory, read_file};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
-use crate::paths::{join_path, resolve_real_path, unity_data_subpath, unity_install_root};
+use crate::paths::{join_path, path_filename, resolve_real_path, unity_data_subpath, unity_install_root};
 use crate::project_scanner::parse_version_defines;
 use crate::scan::{enumerate, to_generator_error};
 
@@ -404,12 +404,6 @@ fn fs_walk_dlls_and_asmdefs(directory: &str, strip_base: &str) -> Vec<(String, S
     }
     hits.sort();
     hits
-}
-
-/// Return the basename of a forward-slash path. Watchman emits project-relative
-/// forward-slash paths, so a simple rsplit suffices.
-fn path_filename(p: &str) -> &str {
-    p.rsplit('/').next().unwrap_or(p)
 }
 
 /// Skip path predicate: any component starts with `.` or ends with `~`, or any

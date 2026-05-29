@@ -6,17 +6,23 @@
 
 (empty)
 
-All v0.5.0 follow-ups landed in v0.6.0: unit-struct collapse, csc-dll-path moved
-to per-user cache, scan-cache bincoded with asmdef/asmref paths persisted, single
-`scan::to_generator_error` helper, fingerprint pruned to the actionable set
-(top-level project dirs + asmdef/asmref dirs + files; manifest.json /
-packages-lock.json / ProjectVersion.txt dropped — the lockfile's `unity-version`
-field and `Library/PackageCache` dir-mtime already cover those).
-
 ## Historical notes
 
 These aren't TODOs — kept as durable research breadcrumbs so a future
 overhauler doesn't re-research them.
+
+### Rejected declutter changes (decided against)
+
+Flagged by the declutter audit, investigated, kept as-is — collapsing them
+degrades the code:
+- **`GenerateOptions`/`TypecheckOptions` builders** — multiple real consumers
+  (`generate()` + CLI + tests), and `with_output_dir` encapsulates trailing-slash
+  normalization. Collapsing to struct literals duplicates that and uglifies call
+  sites. The builder is the intended published lower-level API ([[library-api.md]]).
+- **`DllRef::new(impl Into<String>, …)`** — the generic lets the String-producing
+  scanner sites *move* owned strings in without re-allocation, while `&str`
+  literals (tests) still work. Pinning to `(&str, &str)` adds `&` noise *and*
+  forces a re-allocation of strings the caller already owns.
 
 ### Rejected MSBuild knobs (no-emit wiring)
 

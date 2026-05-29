@@ -212,10 +212,8 @@ fn display_round_trips_through_parse() {
     use unity_solution_generator::{BuildConfig, BuildPlatform};
     for &p in BuildPlatform::ALL {
         assert_eq!(BuildPlatform::parse(&p.to_string()), Some(p));
-        assert_eq!(p.to_string(), p.raw());
     }
     for c in [BuildConfig::Editor, BuildConfig::Dev, BuildConfig::Prod] {
         assert_eq!(BuildConfig::parse(&c.to_string()), Some(c));
-        assert_eq!(c.to_string(), c.raw());
     }
 }

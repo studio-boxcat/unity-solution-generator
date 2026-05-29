@@ -17,6 +17,13 @@ pub fn join_path(base: &str, component: &str) -> String {
     }
 }
 
+/// Return the basename of a forward-slash path. Watchman emits project-relative
+/// forward-slash paths and DLL-ref paths are stored slash-normalized, so a
+/// simple rsplit suffices.
+pub fn path_filename(p: &str) -> &str {
+    p.rsplit('/').next().unwrap_or(p)
+}
+
 /// Canonicalize a filesystem path. Resolves symlinks, normalizes `..`, and on
 /// Windows strips the `\\?\` UNC prefix that `std::fs::canonicalize` adds —
 /// downstream string-path code chokes on it. Returns the input unchanged on

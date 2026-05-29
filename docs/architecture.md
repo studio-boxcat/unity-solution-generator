@@ -49,17 +49,20 @@ crates/
       lockfile_scanner.rs   Unity-install (fs walk, one-shot per version)
                             + project DLL/asmdef discovery (Watchman)
       scan.rs               Watchman wire layer (sync facade over async)
-      solution_generator.rs render + write csproj/sln/Directory.Build.props
-      typecheck.rs          DAG walk + csc invocations
+      solution_generator.rs ownership walk + write csproj/sln/Directory.Build.props
+      csproj_render.rs      pure XML string-builders + ProjectInfo render model
+      typecheck.rs          DAG walk + UTD/stamp logic
+      csc.rs                csc.dll discovery + @rsp build + dotnet-exec invocation
       package_cache.rs      on-demand tarball extraction (Editor/*.tgz);
                             cross-platform flock via std::fs::File::lock (1.89+)
-      defines.rs            version + scripting defines
+      defines.rs            version + scripting + editor/debug/host defines
       paths.rs              cross-platform path helpers; dunce::canonicalize
                             (Windows-safe); per-host install/data subpaths
       io.rs                 atomic_write via tempfile::NamedTempFile::persist
       xml.rs                escape + deterministic GUID (pinned invariant)
       error.rs              GeneratorError + LockfileError + io_err helper
-    tests/                  e2e + integration + cli_regression + typecheck_paths
+    tests/                  e2e + integration + regression suites
+                            (unit tests live in-module under src/)
 ```
 
 The crate publishes to crates.io as `unity-solution-generator`. Cdylib hosting (C ABI for Unity `[DllImport]`) lives downstream in meow-tower's BoxcatBridge — this repo has no FFI.
@@ -214,11 +217,11 @@ The `scan-cache.bin` file carries a `SCAN_CACHE_SCHEMA: u32` in its bincoded hea
 
 Bypasses MSBuild entirely. Per-asmdef args (refs from lockfile, sources from scan, defines from platform+config) are written to `<name>.rsp` and consumed via `dotnet exec /path/to/csc.dll /shared /noconfig @<name>.rsp`.
 
-- **No `/refonly`.** csc 4.10 (.NET 8 SDK) silently skips body-binding diagnostics under `/refonly` — argument-conversion errors at call sites don't surface. We emit a full library and rely on `/deterministic` for byte-stable outputs (see Content-hash UTD). Hit on `meow-tower/orgel-fix`: typecheck reported `ok` while Unity Editor flagged a real `CS1503`. Test `tests/e2e.rs::rsp_has_no_refonly` locks the regression.
+- **No `/refonly`.** csc 4.10 (.NET 8 SDK) silently skips body-binding diagnostics under `/refonly` — argument-conversion errors at call sites don't surface. We emit a full library and rely on `/deterministic` for byte-stable outputs (see Content-hash UTD). Hit on `meow-tower/orgel-fix`: typecheck reported `ok` while Unity Editor flagged a real `CS1503`. Unit test `csc::tests::rsp_has_no_refonly` (in `src/csc.rs`) locks the regression.
 - **Native-DLL filter.** Unity's lockfile sometimes points at native plugins. Passing those via `/reference:` to csc fires `CS0009`. We check the PE header's CLR Runtime Header data-directory entry (index 14) — non-zero RVA = managed. MSBuild's `ResolveAssemblyReferences` task does the same check.
 - **Cascade skip.** If an asmdef references an upstream that failed, the downstream compile would just spew `CS0006`. We track a `failed_set` between levels and surface a `"skipped (cascade): upstream 'X' failed"` message instead.
 - **Content-hash UTD.** csc with `/deterministic` produces byte-identical output for unchanged inputs, but the post-compile mtime advances anyway. We snapshot pre-compile bytes + mtime and restore the mtime via `std::fs::FileTimes::set_modified` when the new bytes match — downstream's mtime UTD then sees the upstream as unchanged and skips.
-- **Foreign-writer guard (`.usg-stamp`).** Output lives in `<variant>/obj/Debug/` alongside MSBuild's emits from `build`. The guard: every successful csc emit writes a per-DLL `<name>.dll.usg-stamp` containing the DLL's mtime (ns). UTD requires stamp present AND `stamp.mtime == disk.mtime`; foreign writers don't touch the stamp, so the next typecheck recompiles. Pattern borrowed from producer-tag sidecars in Bazel's action cache and Ninja's `.ninja_log`. Tests: `tests/typecheck_paths.rs`.
+- **Foreign-writer guard (`.usg-stamp`).** Output lives in `<variant>/obj/Debug/` alongside MSBuild's emits from `build`. The guard: every successful csc emit writes a per-DLL `<name>.dll.usg-stamp` containing the DLL's mtime (ns). UTD requires stamp present AND `stamp.mtime == disk.mtime`; foreign writers don't touch the stamp, so the next typecheck recompiles. Pattern borrowed from producer-tag sidecars in Bazel's action cache and Ninja's `.ninja_log`. Tests: stamp/UTD unit tests in `src/typecheck.rs`; the public `script_dll_dir` path contract in `tests/typecheck_paths.rs`.
 - **Parallel level dispatch.** The DAG is grouped into levels (Kahn's). Within a level all projects are independent and run concurrently via `rayon::par_iter`. Each worker spawns its own `dotnet exec csc.dll /shared`, all connecting to the same VBCSCompiler.
 - **Cross-platform mtime.** `std::fs::Metadata::modified()` everywhere — no `#[cfg(unix)] MetadataExt` branches. Resolution is fs-dependent (APFS/ext4: ns; NTFS: 100-ns ticks) and sufficient for our predicates.
 
