@@ -182,8 +182,7 @@ pub fn scan(project_root: &str) -> Result<Lockfile> {
         for rel in hits.iter() {
             let rel = (*rel).to_string();
             let file_name = path_filename(&rel);
-            if file_name.ends_with(".dll") {
-                let name = &file_name[..file_name.len() - 4];
+            if let Some(name) = file_name.strip_suffix(".dll") {
                 let path = format!("$(ProjectRoot)/{}", rel);
                 if is_analyzer_dll(name) {
                     if seen_analyzers.insert(name.to_string()) {

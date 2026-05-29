@@ -42,6 +42,7 @@ pub enum ScanError {
     ///   - macOS:   `brew install watchman`
     ///   - Linux:   `pacman -S watchman` / `apt install watchman` / build from source
     ///   - Windows: `choco install watchman`
+    ///
     /// Then `watchman watch /path/to/project` to seed the daemon.
     #[error("watchman is required for project scanning but is unavailable. Install: macOS `brew install watchman`, Windows `choco install watchman`, Linux per your package manager.")]
     Unavailable,
@@ -86,7 +87,7 @@ const TOPLEVEL_DIRS: &[&str] = &[
 ///
 /// Conventions ([watchman docs]):
 /// - Unix:    `$XDG_STATE_HOME/watchman/<user>-state/sock`,
-///            fallback `$HOME/.local/state/watchman/<user>-state/sock`.
+///   fallback `$HOME/.local/state/watchman/<user>-state/sock`.
 /// - Windows: named pipe `\\.\pipe\watchman-<user>`.
 ///
 /// User has overridden `--sockname` in their watchman config? Our path
