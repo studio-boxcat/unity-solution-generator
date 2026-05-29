@@ -11,19 +11,6 @@
 These aren't TODOs — kept as durable research breadcrumbs so a future
 overhauler doesn't re-research them.
 
-### Rejected declutter changes (decided against)
-
-Flagged by the declutter audit, investigated, kept as-is — collapsing them
-degrades the code:
-- **`GenerateOptions`/`TypecheckOptions` builders** — multiple real consumers
-  (`generate()` + CLI + tests), and `with_output_dir` encapsulates trailing-slash
-  normalization. Collapsing to struct literals duplicates that and uglifies call
-  sites. The builder is the intended published lower-level API ([[library-api.md]]).
-- **`DllRef::new(impl Into<String>, …)`** — the generic lets the String-producing
-  scanner sites *move* owned strings in without re-allocation, while `&str`
-  literals (tests) still work. Pinning to `(&str, &str)` adds `&` noise *and*
-  forces a re-allocation of strings the caller already owns.
-
 ### Rejected MSBuild knobs (no-emit wiring)
 
 - `-t:CoreCompile` (alone) — broke `ResolveProjectReferences`, downstream csprojs lose refs to upstream. Has to be `-t:Build` with property-level skips.

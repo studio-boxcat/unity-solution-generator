@@ -32,7 +32,7 @@ pub use lockfile::{DllRef, Lockfile, RefCategory};
 pub use paths::{
     DEFAULT_GENERATOR_ROOT, lockfile_path, parent_directory, resolve_project_root, resolve_real_path,
 };
-pub use project_scanner::{AsmDefRecord, ProjectCategory, ScanResult, VersionDefine};
+pub use project_scanner::{AsmDefRecord, ProjectCategory, ProjectName, ScanResult, VersionDefine};
 pub use solution_generator::{
     BuildConfig, BuildPlatform, GenerateOptions, GenerateResult,
 };

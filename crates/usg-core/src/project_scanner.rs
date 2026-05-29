@@ -5,10 +5,10 @@
 //!
 //! Backend: [`crate::scan`] (Watchman). One `since(None)` query per invocation
 //! returns the full file enumeration; per-asmdef JSON parse is parallelised
-//! via `rayon`. No on-disk scan-cache — Watchman is the source of truth for
-//! "what files exist" and the cost of re-parsing a few asmdef JSONs on a
-//! warm-watch query (~ms) is below the noise floor of process startup.
+//! via `rayon`. Results are persisted to a bincode scan-cache (`scan-cache.bin`)
+//! guarded by an mtime fingerprint — see [`scan`].
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -18,6 +18,45 @@ use crate::error::{GeneratorError, Result};
 use crate::io::{create_dir_all, read_file};
 use crate::paths::{join_path, mtime_nanos_for, parent_directory};
 use crate::scan::{enumerate, to_generator_error};
+
+/// An assembly (asmdef) name — the project identity used as the map key across
+/// scan → generate → typecheck. A newtype so it can't be confused with the
+/// many other strings in flight (directories, platforms, defines, GUIDs).
+/// `Borrow<str>` lets `HashMap`/`BTreeSet` be queried with a bare `&str`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, bincode::Encode, bincode::Decode,
+)]
+pub struct ProjectName(pub String);
+
+impl ProjectName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ProjectName {
+    fn from(s: String) -> Self {
+        ProjectName(s)
+    }
+}
+
+impl From<&str> for ProjectName {
+    fn from(s: &str) -> Self {
+        ProjectName(s.to_string())
+    }
+}
+
+impl std::fmt::Display for ProjectName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Borrow<str> for ProjectName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub enum ProjectCategory {
@@ -34,9 +73,9 @@ pub struct VersionDefine {
 
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct AsmDefRecord {
-    pub name: String,
+    pub name: ProjectName,
     pub directory: String,
-    pub references: Vec<String>,
+    pub references: Vec<ProjectName>,
     pub category: ProjectCategory,
     pub include_platforms: Vec<String>,
     pub allow_unsafe_code: bool,
@@ -51,7 +90,7 @@ impl AsmDefRecord {
             // asmdef present but malformed — treat same as missing-name (skip).
             return Ok(None);
         };
-        let Some(name) = v.get("name").and_then(|x| x.as_str()).map(String::from) else {
+        let Some(name) = v.get("name").and_then(|x| x.as_str()).map(ProjectName::from) else {
             return Ok(None);
         };
         let include_platforms = json_string_array(&v, "includePlatforms");
@@ -59,7 +98,10 @@ impl AsmDefRecord {
         Ok(Some(AsmDefRecord {
             name,
             directory: parent_directory(relative_path).to_string(),
-            references: json_string_array(&v, "references"),
+            references: json_string_array(&v, "references")
+                .into_iter()
+                .map(ProjectName)
+                .collect(),
             category: infer_category(&include_platforms, &define_constraints),
             include_platforms,
             allow_unsafe_code: v
@@ -116,8 +158,8 @@ fn infer_category(include_platforms: &[String], define_constraints: &[String]) -
 
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct ScanResult {
-    pub asm_def_by_name: HashMap<String, AsmDefRecord>,
-    pub dirs_by_project: HashMap<String, Vec<String>>,
+    pub asm_def_by_name: HashMap<ProjectName, AsmDefRecord>,
+    pub dirs_by_project: HashMap<ProjectName, Vec<String>>,
     pub unresolved_dirs: Vec<String>,
 }
 
@@ -130,7 +172,7 @@ const SCAN_CACHE_FILE: &str = "scan-cache.bin";
 /// Schema version embedded in every `scan-cache.bin`. Bumping this
 /// invalidates all caches wholesale — no migrations. Cold rebuild on bump
 /// is harmless (file is gitignored under `Library/`).
-const SCAN_CACHE_SCHEMA: u32 = 1;
+const SCAN_CACHE_SCHEMA: u32 = 2;
 
 /// Full on-disk payload: schema version + mtime fingerprint + scan content.
 #[derive(bincode::Encode, bincode::Decode)]
@@ -185,32 +227,32 @@ fn scan_uncached(project_root: &str) -> Result<ScanResult> {
         .filter_map(|p| load_asm_ref(project_root, p).ok().flatten())
         .collect();
 
-    let mut asm_def_by_name: HashMap<String, AsmDefRecord> = HashMap::new();
+    let mut asm_def_by_name: HashMap<ProjectName, AsmDefRecord> = HashMap::new();
     for record in asmdef_records {
         if asm_def_by_name.contains_key(&record.name) {
-            return Err(GeneratorError::DuplicateAsmDefName(record.name));
+            return Err(GeneratorError::DuplicateAsmDefName(record.name.0));
         }
         asm_def_by_name.insert(record.name.clone(), record);
     }
 
-    let mut assembly_roots: HashMap<String, String> = HashMap::new();
+    let mut assembly_roots: HashMap<String, ProjectName> = HashMap::new();
     for (name, record) in &asm_def_by_name {
         assembly_roots.insert(record.directory.clone(), name.clone());
     }
     for (dir, reference) in asmref_records {
-        if asm_def_by_name.contains_key(&reference) {
-            assembly_roots.insert(dir, reference);
+        if asm_def_by_name.contains_key(reference.as_str()) {
+            assembly_roots.insert(dir, ProjectName(reference));
         }
     }
 
-    let mut dirs_by_project: HashMap<String, Vec<String>> = HashMap::new();
+    let mut dirs_by_project: HashMap<ProjectName, Vec<String>> = HashMap::new();
     let mut unresolved_dirs: Vec<String> = Vec::new();
     for dir in &cs_dirs {
         if let Some(owner) = find_assembly_owner(dir, &assembly_roots) {
             dirs_by_project.entry(owner).or_default().push(dir.clone());
         } else if let Some(legacy) = resolve_legacy_project(dir) {
             dirs_by_project
-                .entry(legacy.to_string())
+                .entry(legacy.into())
                 .or_default()
                 .push(dir.clone());
         } else {
@@ -411,7 +453,10 @@ fn partition_paths(paths: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) 
     (cs_dirs.into_iter().collect(), asmdef_paths, asmref_paths)
 }
 
-fn find_assembly_owner(directory: &str, assembly_roots: &HashMap<String, String>) -> Option<String> {
+fn find_assembly_owner(
+    directory: &str,
+    assembly_roots: &HashMap<String, ProjectName>,
+) -> Option<ProjectName> {
     let mut current = directory.to_string();
     loop {
         if let Some(name) = assembly_roots.get(&current) {

@@ -12,6 +12,8 @@ pub struct DllRef {
 }
 
 impl DllRef {
+    // `impl Into<String>` (not `&str`): the scanner sites pass owned `String`s and
+    // move them in without re-allocating, while `&str` literals (tests) still work.
     pub fn new(name: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             name: name.into(),

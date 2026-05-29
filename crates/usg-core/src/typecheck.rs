@@ -16,9 +16,9 @@ use rayon::prelude::*;
 
 use crate::csc::{self, BuildRspInputs};
 use crate::error::{GeneratorError, Result, io_err};
-use crate::lockfile::{DllRef, Lockfile, RefCategory};
+use crate::lockfile::{DllRef, Lockfile};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, mtime_nanos_for, resolve_real_path};
-use crate::project_scanner::{AsmDefRecord, ProjectCategory};
+use crate::project_scanner::{AsmDefRecord, ProjectCategory, ProjectName};
 use crate::solution_generator::{BuildConfig, BuildPlatform};
 
 #[derive(Debug, Clone)]
@@ -135,7 +135,7 @@ pub fn run(
     // Tracks which projects' compiles failed (or were cascade-skipped). When a
     // downstream project references one of these, we skip rather than invoking
     // csc on a doomed compile that produces a wall of CS0006 noise.
-    let mut failed_set: BTreeSet<String> = BTreeSet::new();
+    let mut failed_set: BTreeSet<ProjectName> = BTreeSet::new();
 
     // Process the DAG level-by-level. Within a level all projects are
     // independent (no cross-edges), so we fan out via rayon — each worker
@@ -148,7 +148,7 @@ pub fn run(
     // reads level N's `.dll` outputs as `/reference:` inputs and depends
     // on the failed-set decision (cascade-skip).
     for level in &levels {
-        let outcomes: Vec<(String, ProjectOutcome)> = level
+        let outcomes: Vec<(ProjectName, ProjectOutcome)> = level
             .par_iter()
             .map(|name| {
                 let outcome = compile_project(
@@ -175,13 +175,13 @@ pub fn run(
                 ProjectOutcome::Empty => {}
                 ProjectOutcome::CascadeSkipped(dep) => {
                     failures.insert(
-                        name.clone(),
+                        name.to_string(),
                         format!("skipped (cascade): upstream '{}' failed", dep),
                     );
                     failed_set.insert(name);
                 }
                 ProjectOutcome::Failed(stderr) => {
-                    failures.insert(name.clone(), stderr);
+                    failures.insert(name.to_string(), stderr);
                     failed_set.insert(name);
                 }
                 ProjectOutcome::Io(e) => return Err(e),
@@ -199,9 +199,9 @@ pub fn run(
 // ── inclusion + topo ──────────────────────────────────────────────────────
 
 fn compute_included_projects(
-    asm_def_by_name: &HashMap<String, AsmDefRecord>,
+    asm_def_by_name: &HashMap<ProjectName, AsmDefRecord>,
     opts: &TypecheckOptions,
-) -> BTreeSet<String> {
+) -> BTreeSet<ProjectName> {
     let is_editor = opts.build_config == BuildConfig::Editor;
     let target_platform = opts.platform.unity_platform_name();
     asm_def_by_name
@@ -230,11 +230,11 @@ fn compute_included_projects(
 /// level all projects are independent and can be compiled in parallel.
 /// Lex-sorted within levels for deterministic output.
 fn topo_levels(
-    included: &BTreeSet<String>,
-    asm_def_by_name: &HashMap<String, AsmDefRecord>,
-) -> Vec<Vec<String>> {
-    let mut indeg: HashMap<String, usize> = HashMap::new();
-    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    included: &BTreeSet<ProjectName>,
+    asm_def_by_name: &HashMap<ProjectName, AsmDefRecord>,
+) -> Vec<Vec<ProjectName>> {
+    let mut indeg: HashMap<ProjectName, usize> = HashMap::new();
+    let mut adj: HashMap<ProjectName, Vec<ProjectName>> = HashMap::new();
     for name in included {
         indeg.entry(name.clone()).or_insert(0);
         if let Some(asm) = asm_def_by_name.get(name) {
@@ -247,14 +247,14 @@ fn topo_levels(
         }
     }
 
-    let mut levels: Vec<Vec<String>> = Vec::new();
-    let mut current: BTreeSet<String> = indeg
+    let mut levels: Vec<Vec<ProjectName>> = Vec::new();
+    let mut current: BTreeSet<ProjectName> = indeg
         .iter()
         .filter(|(_, &d)| d == 0)
         .map(|(n, _)| n.clone())
         .collect();
     while !current.is_empty() {
-        let mut next: BTreeSet<String> = BTreeSet::new();
+        let mut next: BTreeSet<ProjectName> = BTreeSet::new();
         for n in &current {
             if let Some(succs) = adj.get(n) {
                 for s in succs {
@@ -284,7 +284,7 @@ enum ProjectOutcome {
     /// asmdef has no `.cs` files — nothing to compile.
     Empty,
     /// At least one upstream is in `failed_set`; compile would just spew CS0006.
-    CascadeSkipped(String),
+    CascadeSkipped(ProjectName),
     /// csc exited non-zero. Stderr captured for reporting.
     Failed(String),
     /// Local I/O error (couldn't write the rsp, etc.) — fatal, surfaced to caller.
@@ -296,10 +296,10 @@ enum ProjectOutcome {
 /// in parallel across projects within a topo level.
 #[allow(clippy::too_many_arguments)]
 fn compile_project(
-    name: &str,
+    name: &ProjectName,
     scan: &crate::project_scanner::ScanResult,
-    included: &BTreeSet<String>,
-    failed_set: &BTreeSet<String>,
+    included: &BTreeSet<ProjectName>,
+    failed_set: &BTreeSet<ProjectName>,
     root: &str,
     out_dir: &str,
     csc_dll: &str,
@@ -419,7 +419,7 @@ fn max_input_mtime(
 fn collect_sources(
     root: &str,
     asm: &AsmDefRecord,
-    dirs_by_project: &HashMap<String, Vec<String>>,
+    dirs_by_project: &HashMap<ProjectName, Vec<String>>,
 ) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Some(dirs) = dirs_by_project.get(&asm.name) else {
@@ -445,7 +445,7 @@ fn collect_sources(
 
 fn collect_project_refs(
     asm: &AsmDefRecord,
-    included: &BTreeSet<String>,
+    included: &BTreeSet<ProjectName>,
     out_dir: &str,
 ) -> Vec<PathBuf> {
     asm.references
@@ -475,18 +475,7 @@ fn collect_refs(
     config: BuildConfig,
     extra: &[DllRef],
 ) -> Vec<DllRef> {
-    let is_editor = config == BuildConfig::Editor;
-    let mut cats = vec![RefCategory::Engine];
-    if is_editor {
-        cats.push(RefCategory::Editor);
-    }
-    cats.push(RefCategory::PlaybackStandalone);
-    let target_cat = platform.playback_ref_category();
-    if target_cat != RefCategory::PlaybackStandalone {
-        cats.push(target_cat);
-    }
-    cats.push(RefCategory::Project);
-    cats.push(RefCategory::Netstandard);
+    let cats = platform.ref_categories(config == BuildConfig::Editor);
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut out: Vec<DllRef> = Vec::new();

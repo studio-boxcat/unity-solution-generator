@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::io::{create_dir_all, write_file_if_changed};
 use crate::lockfile::{DllRef, Lockfile, RefCategory};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, join_path, resolve_real_path};
-use crate::project_scanner::{self, ProjectCategory, ScanResult};
+use crate::project_scanner::{self, ProjectCategory, ProjectName, ScanResult};
 use crate::xml::deterministic_guid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,27 @@ impl BuildPlatform {
             BuildPlatform::Osx => RefCategory::PlaybackStandalone,
             BuildPlatform::Windows => RefCategory::PlaybackWindows,
         }
+    }
+
+    /// Ref categories to resolve for this target, in canonical merge order
+    /// (first-wins on name dedup). `PlaybackStandalone` always participates —
+    /// it holds engine DLLs shared across desktop targets — and the
+    /// target-specific playback category is appended unless it *is* standalone.
+    /// Shared by `csproj_render` (HintPath references) and `typecheck` (csc
+    /// `/reference:` args) so both resolve the same set the same way.
+    pub(crate) fn ref_categories(self, is_editor: bool) -> Vec<RefCategory> {
+        let mut cats = vec![RefCategory::Engine];
+        if is_editor {
+            cats.push(RefCategory::Editor);
+        }
+        cats.push(RefCategory::PlaybackStandalone);
+        let target_cat = self.playback_ref_category();
+        if target_cat != RefCategory::PlaybackStandalone {
+            cats.push(target_cat);
+        }
+        cats.push(RefCategory::Project);
+        cats.push(RefCategory::Netstandard);
+        cats
     }
 }
 
@@ -177,10 +198,10 @@ pub struct GenerateResult {
 struct GenerationContext {
     project_root: String,
     scan: ScanResult,
-    project_by_name: HashMap<String, ProjectInfo>,
-    patterns_by_project: HashMap<String, Vec<String>>,
+    project_by_name: HashMap<ProjectName, ProjectInfo>,
+    patterns_by_project: HashMap<ProjectName, Vec<String>>,
     included_projects: Vec<ProjectInfo>,
-    non_runtime_names: HashSet<String>,
+    non_runtime_names: HashSet<ProjectName>,
     variant_dir: String,
     result_prefix: String,
     warnings: Vec<String>,
@@ -192,7 +213,7 @@ fn build_context(
     projects: Vec<ProjectInfo>,
     scan: ScanResult,
 ) -> GenerationContext {
-    let project_by_name: HashMap<String, ProjectInfo> = projects
+    let project_by_name: HashMap<ProjectName, ProjectInfo> = projects
         .iter()
         .map(|p| (p.name.clone(), p.clone()))
         .collect();
@@ -221,7 +242,7 @@ fn build_context(
     };
     let variant_prefix: String = "../".repeat(depth);
 
-    let mut patterns_by_project: HashMap<String, Vec<String>> = HashMap::new();
+    let mut patterns_by_project: HashMap<ProjectName, Vec<String>> = HashMap::new();
     for project in &projects {
         let mut dirs: Vec<String> = scan
             .dirs_by_project
@@ -244,7 +265,7 @@ fn build_context(
 
     let is_editor = options.build_config == BuildConfig::Editor;
     let mut included_projects: Vec<ProjectInfo> = Vec::new();
-    let mut non_runtime_names: HashSet<String> = HashSet::new();
+    let mut non_runtime_names: HashSet<ProjectName> = HashSet::new();
     if is_editor {
         included_projects = projects.clone();
     } else {
@@ -386,14 +407,14 @@ pub fn generate(
     let project_root = resolve_real_path(&options.project_root);
 
     let mut projects: Vec<ProjectInfo> = Vec::new();
-    let mut all_names: HashSet<String> = HashSet::new();
+    let mut all_names: HashSet<ProjectName> = HashSet::new();
     for name in scan.asm_def_by_name.keys() {
         if !scan.dirs_by_project.contains_key(name) {
             continue;
         }
         projects.push(ProjectInfo {
             name: name.clone(),
-            guid: deterministic_guid(name),
+            guid: deterministic_guid(name.as_str()),
         });
         all_names.insert(name.clone());
     }
@@ -401,7 +422,7 @@ pub fn generate(
         if !all_names.contains(name) {
             projects.push(ProjectInfo {
                 name: name.clone(),
-                guid: deterministic_guid(name),
+                guid: deterministic_guid(name.as_str()),
             });
         }
     }
@@ -439,7 +460,7 @@ pub fn generate(
             .map(|a| a.allow_unsafe_code)
             .unwrap_or(false);
         let mut out = csproj_render::render_csproj_header(
-            &project.name,
+            project.name.as_str(),
             &project.guid,
             &lang_version,
             allow_unsafe,
