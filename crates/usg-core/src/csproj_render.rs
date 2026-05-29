@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::defines::{DEBUG_DEFINES, EDITOR_DEFINES_BASE, editor_host_define};
 use crate::lockfile::{DllRef, Lockfile};
 use crate::project_scanner::{AsmDefRecord, ProjectName};
-use crate::solution_generator::{BuildConfig, BuildPlatform};
+use crate::build_variant::{BuildConfig, BuildPlatform};
 use crate::xml::xml_escape;
 
 /// One row of the generated solution: an assembly name + its deterministic

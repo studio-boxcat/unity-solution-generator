@@ -24,6 +24,19 @@ pub fn path_filename(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
 
+/// `$key` if set and non-empty, else `None` — folds the repeated
+/// `env::var(k).ok().filter(non-empty)` pattern in host/cache discovery.
+pub(crate) fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// Unity convention: a path component that is a dotfile (`.foo`) or a `~`-suffixed
+/// backup (`bar~`) is editor-only metadata that never ships into compiled output,
+/// so the scanners skip it.
+pub(crate) fn is_dotfile_or_backup(component: &str) -> bool {
+    component.starts_with('.') || component.ends_with('~')
+}
+
 /// Canonicalize a filesystem path. Resolves symlinks, normalizes `..`, and on
 /// Windows strips the `\\?\` UNC prefix that `std::fs::canonicalize` adds —
 /// downstream string-path code chokes on it. Returns the input unchanged on
@@ -74,9 +87,7 @@ pub fn lockfile_path(project_root: &str, generator_root: &str) -> String {
 /// rather than silently downgrading to an unsafe location.
 fn host_cache_root() -> String {
     if cfg!(target_os = "windows") {
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .filter(|s| !s.is_empty())
+        env_non_empty("LOCALAPPDATA")
             .or_else(|| {
                 std::env::var("USERPROFILE")
                     .ok()
@@ -84,15 +95,11 @@ fn host_cache_root() -> String {
             })
             .expect("host_cache_root: neither LOCALAPPDATA nor USERPROFILE is set")
     } else if cfg!(target_os = "macos") {
-        std::env::var("XDG_CACHE_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
+        env_non_empty("XDG_CACHE_HOME")
             .or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/Library/Caches", h)))
             .expect("host_cache_root: neither XDG_CACHE_HOME nor HOME is set")
     } else {
-        std::env::var("XDG_CACHE_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
+        env_non_empty("XDG_CACHE_HOME")
             .or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.cache", h)))
             .expect("host_cache_root: neither XDG_CACHE_HOME nor HOME is set")
     }
@@ -129,10 +136,8 @@ pub fn unity_install_root(version: &str) -> String {
         }
     }
     if cfg!(target_os = "windows") {
-        let program_files = std::env::var("ProgramFiles")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "C:\\Program Files".to_string());
+        let program_files =
+            env_non_empty("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".to_string());
         format!("{}\\Unity\\Hub\\Editor\\{}", program_files, version)
     } else if cfg!(target_os = "macos") {
         format!("/Applications/Unity/Hub/Editor/{}", version)

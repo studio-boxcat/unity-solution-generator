@@ -428,7 +428,7 @@ fn mtimes_unchanged(project_root: &str, mtimes: &[(String, u128)]) -> bool {
 /// (Unity backup) component. Unity convention is for these to be editor-only
 /// metadata that doesn't ship into compiled output.
 fn is_skipped_path(p: &str) -> bool {
-    p.split('/').any(|c| c.starts_with('.') || c.ends_with('~'))
+    p.split('/').any(crate::paths::is_dotfile_or_backup)
 }
 
 /// Partition the Watchman path list into (cs_dirs, asmdef_paths, asmref_paths).

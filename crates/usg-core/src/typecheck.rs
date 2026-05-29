@@ -19,7 +19,7 @@ use crate::error::{GeneratorError, Result, io_err};
 use crate::lockfile::{DllRef, Lockfile};
 use crate::paths::{DEFAULT_GENERATOR_ROOT, mtime_nanos_for, resolve_real_path};
 use crate::project_scanner::{AsmDefRecord, ProjectCategory, ProjectName};
-use crate::solution_generator::{BuildConfig, BuildPlatform};
+use crate::build_variant::{BuildConfig, BuildPlatform};
 
 #[derive(Debug, Clone)]
 pub struct TypecheckOptions {
@@ -371,7 +371,12 @@ fn compile_project(
                     if prev == &new {
                         let target = max_input_mtime(&sources, common_refs, &proj_refs)
                             .map_or(prev_t, |m| prev_t.max(m));
-                        let _ = restore_mtime(&out_dll, target);
+                        // Best-effort: a failed mtime restore only costs a
+                        // spurious downstream recompile next run — surface it
+                        // rather than swallow (matches the cache-write sites).
+                        if let Err(e) = restore_mtime(&out_dll, target) {
+                            tracing::warn!(target: "unity_solution_generator::typecheck", path = %out_dll, error = %e, "mtime restore failed; downstream may recompile");
+                        }
                     }
                 }
             }

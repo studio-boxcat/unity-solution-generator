@@ -10,6 +10,7 @@
 pub const LOCKFILE_VERSION: u32 = 2;
 
 
+pub(crate) mod build_variant;
 pub(crate) mod csc;
 pub(crate) mod csproj_render;
 pub mod defines;
@@ -24,6 +25,7 @@ pub mod project_scanner;
 pub mod scan;
 pub mod solution_generator;
 pub mod typecheck;
+pub(crate) mod unity_install;
 pub mod xml;
 
 pub use defines::{generate_version_defines, parse_scripting_defines};
@@ -33,9 +35,8 @@ pub use paths::{
     DEFAULT_GENERATOR_ROOT, lockfile_path, parent_directory, resolve_project_root, resolve_real_path,
 };
 pub use project_scanner::{AsmDefRecord, ProjectCategory, ProjectName, ScanResult, VersionDefine};
-pub use solution_generator::{
-    BuildConfig, BuildPlatform, GenerateOptions, GenerateResult,
-};
+pub use build_variant::{BuildConfig, BuildPlatform};
+pub use solution_generator::{GenerateOptions, GenerateResult};
 pub use typecheck::{TypecheckOptions, TypecheckResult};
 
 use std::path::{Path, PathBuf};

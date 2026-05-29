@@ -123,16 +123,14 @@ pub fn init_socket_env() {
 fn conventional_sock_path() -> Option<String> {
     if cfg!(target_os = "windows") {
         // Windows uses a named pipe under \\.\pipe\watchman-<user>.
-        let user = std::env::var("USERNAME").ok().filter(|s| !s.is_empty())?;
+        let user = crate::paths::env_non_empty("USERNAME")?;
         return Some(format!(r"\\.\pipe\watchman-{}", user));
     }
-    let user = std::env::var("USER").ok().filter(|s| !s.is_empty())?;
-    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-        if !xdg.is_empty() {
-            return Some(format!("{}/watchman/{}-state/sock", xdg, user));
-        }
+    let user = crate::paths::env_non_empty("USER")?;
+    if let Some(xdg) = crate::paths::env_non_empty("XDG_STATE_HOME") {
+        return Some(format!("{}/watchman/{}-state/sock", xdg, user));
     }
-    let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
+    let home = crate::paths::env_non_empty("HOME")?;
     Some(format!("{}/.local/state/watchman/{}-state/sock", home, user))
 }
 

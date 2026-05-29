@@ -46,9 +46,12 @@ crates/
                             (scan_and_write / read / write)
       project_scanner.rs    project-side scan; AsmDefRecord, ProjectCategory;
                             bincode scan-cache w/ mtime fingerprint
-      lockfile_scanner.rs   Unity-install (fs walk, one-shot per version)
-                            + project DLL/asmdef discovery (Watchman)
+      lockfile_scanner.rs   project DLL/asmdef discovery (Watchman) +
+                            missing-package tgz fallback + lockfile assembly
+      unity_install.rs      Unity-install fs walk (engine/netstd/playback refs;
+                            one-shot per version, never via Watchman)
       scan.rs               Watchman wire layer (sync facade over async)
+      build_variant.rs      BuildPlatform + BuildConfig (target/config vocabulary)
       solution_generator.rs ownership walk + write csproj/sln/Directory.Build.props
       csproj_render.rs      pure XML string-builders + ProjectInfo render model
       typecheck.rs          DAG walk + UTD/stamp logic
@@ -60,6 +63,7 @@ crates/
                             (Windows-safe); per-host install/data subpaths
       io.rs                 atomic_write via tempfile::NamedTempFile::persist
       xml.rs                escape + deterministic GUID (pinned invariant)
+      pe.rs                 PE/CLR header inspection (managed-vs-native DLL filter)
       error.rs              GeneratorError + LockfileError + io_err helper
     tests/                  e2e + integration + regression suites
                             (unit tests live in-module under src/)
