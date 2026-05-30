@@ -19,15 +19,14 @@ serde_json = "1"
 dunce = "1"
 # Atomic file writes via NamedTempFile::persist (replaces hand-rolled rename).
 tempfile = "3"
-# Watchman client (BSER wire protocol). Required for all project scanning.
-watchman_client = "0.9"
-# tokio drives watchman_client's async API via a per-call current-thread runtime
-# (sync facade pattern from `unity-assetdb`). Minimal features only — we do not
-# expose any tokio types in the public API.
-tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "time"] }
-# Context-chained errors for the Watchman wire layer. Scoped to `scan.rs` only.
+# Shared Watchman wire layer (sync facade over watchman_client + tokio, both
+# pulled transitively). `scan.rs` is a thin wrapper pinning the project-scan
+# dir/suffix filter on top of `unity_watch::{enumerate, init_socket_env}`.
+unity-watch = { git = "https://github.com/studio-boxcat/unity-watch.git" }
+# Context-chained errors. `ScanError::Query` carries the `anyhow::Error` that
+# `unity_watch::WatchError::Query` produces.
 anyhow = "1"
-# Typed error enums; used by `scan.rs` for `WatchmanError` and friends.
+# Typed error enums; `ScanError` in `scan.rs`.
 thiserror = "2"
 # Compact binary codec for the `scan-cache` file. Native `Encode`/`Decode`
 # derives — no serde required. Saves ~120 LOC of hand-rolled text codec.

@@ -1,13 +1,15 @@
-//! Watchman wire layer.
+//! Project-tree scanning via Watchman.
 //!
 //! Required scanning backend for the mutable project tree. No filesystem walk
 //! fallback — `usg lock` / `generate` / `typecheck` / `build` hard-fail with a
 //! clear "install watchman" message when the daemon is unreachable.
 //!
-//! Sync facade pattern (mirrored from sibling project `unity-assetdb`): build
-//! a current-thread tokio runtime per call (~µs cost; one call per CLI
-//! invocation). Keeps tokio confined to this module so the rest of the crate
-//! stays sync and `BoxcatBridge`'s FFI host doesn't have to host a runtime.
+//! Thin wrapper over the shared [`unity_watch`] crate
+//! (<https://github.com/studio-boxcat/unity-watch>): that crate owns the
+//! Watchman wire layer (sync facade over `watchman_client`, socket-env
+//! pinning, connect/resolve). This module only pins *which* dirs and suffixes
+//! the project scan cares about, and maps the shared error into the
+//! crate-level `ScanError`.
 //!
 //! Architecture decision: Watchman watches **only the project tree**
 //! (`Assets/`, `Packages/`, `Library/PackageCache/`, `ProjectSettings/`). The
@@ -19,10 +21,9 @@
 //!
 //! [Watchman troubleshooting]: https://facebook.github.io/watchman/docs/troubleshooting
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use watchman_client::Error as WatchmanError;
-use watchman_client::prelude::*;
+use unity_watch::{Filter, WatchError};
 
 /// Map a `ScanError` into the crate-level error type, preserving the
 /// `Unavailable` discriminant so callers (BoxcatBridge, CLI) can surface
@@ -53,6 +54,15 @@ pub enum ScanError {
     Query(#[from] anyhow::Error),
 }
 
+impl From<WatchError> for ScanError {
+    fn from(e: WatchError) -> Self {
+        match e {
+            WatchError::Unavailable => ScanError::Unavailable,
+            WatchError::Query(e) => ScanError::Query(e),
+        }
+    }
+}
+
 /// File suffixes Watchman should report changes for. Drives the `Suffix`
 /// filter so we never see `Temp/`, build artifacts, or unrelated assets even
 /// though Watchman roots at a higher ancestor.
@@ -71,7 +81,6 @@ const SUFFIXES: &[&str] = &["cs", "asmdef", "asmref", "dll", "json", "asset", "t
 /// `Library/PackageCache` is included intentionally despite the cold-crawl
 /// cost (can be tens of thousands of files on large projects) because
 /// package-bundled `.asmdef` files live there and the scanner needs them.
-/// First-watch cost is surfaced via the `scan.first_watch` tracing span.
 const TOPLEVEL_DIRS: &[&str] = &[
     "Assets",
     "Packages",
@@ -79,59 +88,12 @@ const TOPLEVEL_DIRS: &[&str] = &[
     "ProjectSettings",
 ];
 
-/// One-time process setup. Computes the Watchman socket path from the
-/// documented per-user convention and stashes it in `WATCHMAN_SOCK` so
-/// `Connector::connect()` skips its internal socket-discovery hop (which
-/// would otherwise spawn `watchman get-sockname` as a subprocess on every
-/// connect — ~120 ms on macOS).
-///
-/// Conventions ([watchman docs]):
-/// - Unix:    `$XDG_STATE_HOME/watchman/<user>-state/sock`,
-///   fallback `$HOME/.local/state/watchman/<user>-state/sock`.
-/// - Windows: named pipe `\\.\pipe\watchman-<user>`.
-///
-/// User has overridden `--sockname` in their watchman config? Our path
-/// won't exist on disk; we leave `WATCHMAN_SOCK` unset and `watchman_client`
-/// falls back to its own (slower) discovery, which honors the config.
-///
-/// Idempotent — no-op if `WATCHMAN_SOCK` is already set.
-///
-/// [watchman docs]: https://facebook.github.io/watchman/docs/cli-options#unix-domain-sockets
+/// One-time process setup: pin `WATCHMAN_SOCK` so each connect skips the
+/// `watchman get-sockname` subprocess fork (~120 ms on macOS). Call once at
+/// the top of `main()`, before any threads are spawned. See
+/// [`unity_watch::init_socket_env`] for the convention + safety contract.
 pub fn init_socket_env() {
-    if std::env::var_os("WATCHMAN_SOCK").is_some() {
-        return;
-    }
-    let Some(path) = conventional_sock_path() else {
-        return;
-    };
-    // Validate the path exists before setting the env var. A stale convention
-    // (e.g. user uninstalled watchman) would otherwise wedge `Connector::connect()`
-    // with a confusing socket-error rather than the cleaner discovery fallback.
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
-    // SAFETY: called at the top of main() before any threads are spawned.
-    // `set_var` is unsound under concurrent reads on POSIX; that's why this
-    // function explicitly documents the "single-threaded only" contract.
-    unsafe {
-        std::env::set_var("WATCHMAN_SOCK", path);
-    }
-}
-
-/// Per-platform default Watchman socket path. Mirrors `compute_user_state_dir()`
-/// in watchman's C++ source — keep in sync if upstream conventions change.
-fn conventional_sock_path() -> Option<String> {
-    if cfg!(target_os = "windows") {
-        // Windows uses a named pipe under \\.\pipe\watchman-<user>.
-        let user = crate::paths::env_non_empty("USERNAME")?;
-        return Some(format!(r"\\.\pipe\watchman-{}", user));
-    }
-    let user = crate::paths::env_non_empty("USER")?;
-    if let Some(xdg) = crate::paths::env_non_empty("XDG_STATE_HOME") {
-        return Some(format!("{}/watchman/{}-state/sock", xdg, user));
-    }
-    let home = crate::paths::env_non_empty("HOME")?;
-    Some(format!("{}/.local/state/watchman/{}-state/sock", home, user))
+    unity_watch::init_socket_env();
 }
 
 /// Enumerate every project-tree file matching our suffix filter under
@@ -139,83 +101,16 @@ fn conventional_sock_path() -> Option<String> {
 /// Watchman returns project-relative paths (forward-slash separators).
 /// One query per invocation; no clock cursor tracking — invalidation lives
 /// in the caller's mtime fingerprint over the persisted enumeration.
+///
+/// The cold-watch cost (Watchman recursively crawls the project on first
+/// contact) lives inside this call; the `scan.watchman_query` span brackets
+/// it so a slow first invocation is attributable.
 pub fn enumerate(project_root: &Path) -> Result<Vec<String>, ScanError> {
-    // `enable_all` covers IO + time; `watchman_client` internally uses
-    // `tokio::time::timeout` on the connect path in newer versions, and the
-    // cost of enabling the time driver on a one-shot runtime is negligible.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ScanError::Query(anyhow::Error::new(e).context("build tokio runtime")))?;
-    rt.block_on(enumerate_inner(project_root))
-}
-
-async fn enumerate_inner(project_root: &Path) -> Result<Vec<String>, ScanError> {
     let _span = tracing::info_span!("scan.watchman_query").entered();
-
-    let client = Connector::new().connect().await.map_err(map_connect_err)?;
-
-    let canonical = CanonicalPath::canonicalize(project_root).map_err(|e| {
-        ScanError::Query(anyhow::Error::new(e).context("canonicalize project_root"))
-    })?;
-    // Cold-watch cost lives here — Watchman recursively crawls the project
-    // on first contact. Surface it under its own span so users debugging a
-    // slow first invocation see "scan.first_watch" rather than blaming the
-    // whole subcommand.
-    let resolved = {
-        let _s = tracing::info_span!("scan.first_watch_or_resolve").entered();
-        client
-            .resolve_root(canonical)
-            .await
-            .map_err(|e| ScanError::Query(anyhow::Error::new(e)))?
-    };
-
-    let expression = Expr::All(vec![
-        Expr::Any(
-            TOPLEVEL_DIRS
-                .iter()
-                .map(|d| {
-                    Expr::DirName(DirNameTerm {
-                        path: PathBuf::from(d),
-                        depth: None,
-                    })
-                })
-                .collect(),
-        ),
-        Expr::Suffix(SUFFIXES.iter().map(PathBuf::from).collect()),
-    ]);
-
-    let request = QueryRequestCommon {
-        expression: Some(expression),
-        ..Default::default()
-    };
-
-    let result = client
-        .query::<NameOnly>(&resolved, request)
-        .await
-        .map_err(|e| ScanError::Query(anyhow::Error::new(e)))?;
-
-    // Watchman returns paths relative to the watch root. With `relative_root`
-    // auto-set from `ResolvedRoot`, they're project-relative.
-    Ok(result
-        .files
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|row| row.name.into_inner().into_os_string().into_string().ok())
-        .collect())
-}
-
-/// Watchman returns very different errors for "binary not installed"
-/// (`ConnectionDiscovery`, from the CLI subprocess used to find the socket)
-/// vs. "daemon not running" (`Connect`, from the socket open). We treat both
-/// as `Unavailable` — the user-facing fix is the same (install + start).
-fn map_connect_err(e: WatchmanError) -> ScanError {
-    match e {
-        WatchmanError::ConnectionDiscovery { .. } | WatchmanError::Connect { .. } => {
-            ScanError::Unavailable
-        }
-        other => ScanError::Query(anyhow::Error::new(other)),
-    }
+    Ok(unity_watch::enumerate(
+        project_root,
+        &Filter::new(TOPLEVEL_DIRS, SUFFIXES),
+    )?)
 }
 
 #[cfg(test)]
